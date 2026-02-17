@@ -1,10 +1,12 @@
 const std = @import("std");
 const io = @import("io.zig");
 const page_mod = @import("page.zig");
+const wal_mod = @import("wal.zig");
 
 const Page = page_mod.Page;
 const PageHeader = page_mod.PageHeader;
 const page_size = io.page_size;
+const Wal = wal_mod.Wal;
 
 pub const BufferPoolError = error{
     AllFramesPinned,
@@ -12,6 +14,7 @@ pub const BufferPoolError = error{
     StorageRead,
     StorageWrite,
     StorageFsync,
+    WalNotFlushed,
 };
 
 /// A frame in the buffer pool holds one page in memory.
@@ -34,6 +37,10 @@ pub const BufferPool = struct {
     /// Maps page_id -> frame index for O(1) lookup.
     page_table: std.AutoHashMap(u64, usize),
     storage: io.Storage,
+    /// Optional WAL reference. When set, the buffer pool enforces the WAL
+    /// protocol: a dirty page cannot be flushed to disk until its LSN has
+    /// been durably flushed to the WAL.
+    wal: ?*Wal = null,
     clock_hand: usize,
     allocator: std.mem.Allocator,
 
@@ -154,6 +161,13 @@ pub const BufferPool = struct {
     fn flushFrame(self: *BufferPool, frame_idx: usize) BufferPoolError!void {
         var frame = &self.frames[frame_idx];
         if (!frame.dirty) return;
+
+        // WAL protocol: page cannot be flushed until its LSN is WAL-flushed.
+        if (self.wal) |wal| {
+            if (frame.page.header.lsn > wal.flushed_lsn) {
+                return error.WalNotFlushed;
+            }
+        }
 
         var raw: [page_size]u8 = undefined;
         frame.page.serialize(&raw);
@@ -348,4 +362,59 @@ test "cache hit tracking" {
 
     try std.testing.expectEqual(@as(u64, 2), pool.misses);
     try std.testing.expectEqual(@as(u64, 1), pool.hits);
+}
+
+test "WAL protocol: flush blocked until WAL is flushed" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 4);
+    defer pool.deinit();
+    pool.wal = &wal;
+
+    // Write a WAL record (LSN 1) but don't flush the WAL.
+    _ = try wal.append(1, .insert, 0, "data");
+
+    // Modify page through buffer pool, set its LSN to 1.
+    const page = try pool.pin(0);
+    page.header.lsn = 1;
+    @memset(&page.content, 0xAA);
+    pool.unpin(0, true);
+
+    // Flushing the page should fail — WAL not flushed yet.
+    const result = pool.flush(0);
+    try std.testing.expectError(BufferPoolError.WalNotFlushed, result);
+
+    // Now flush the WAL.
+    try wal.flush();
+    try std.testing.expectEqual(@as(u64, 1), wal.flushed_lsn);
+
+    // Now flushing the page should succeed.
+    try pool.flush(0);
+    try std.testing.expect(disk.hasPending(0));
+}
+
+test "WAL protocol: page with LSN 0 flushes without WAL" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 4);
+    defer pool.deinit();
+    pool.wal = &wal;
+
+    // Page with LSN 0 (no WAL record) should flush fine.
+    const page = try pool.pin(0);
+    @memset(&page.content, 0xBB);
+    pool.unpin(0, true);
+
+    try pool.flush(0);
+    try std.testing.expect(disk.hasPending(0));
 }

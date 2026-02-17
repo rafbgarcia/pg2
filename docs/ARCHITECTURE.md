@@ -1,5 +1,32 @@
 # Architecture Overview
 
+## Progress
+
+- [x] **Phase 1: Foundation**
+  - [x] I/O abstraction interfaces (`Storage`, `Clock`, `Network`) — `src/storage/io.zig`
+  - [x] Deterministic simulation harness (`SimulatedDisk`, `SimulatedClock`) — `src/simulator/`
+  - [x] Page struct with CRC-32C checksums — `src/storage/page.zig`
+  - [x] Buffer pool with clock-sweep eviction — `src/storage/buffer_pool.zig`
+  - [x] Build system (`zig build`, `zig build test`, `zig build sim`)
+- [x] **Phase 2: Storage Engine**
+  - [x] Write-ahead log (WAL) — `src/storage/wal.zig`
+  - [ ] B-tree indexes
+  - [x] Heap storage (slotted pages, in-place update) — `src/storage/heap.zig`
+  - [x] Undo-log MVCC + transaction manager — `src/mvcc/`
+  - [x] Buffer pool enforces WAL protocol (page LSN must be flushed before page flush)
+- [ ] **Phase 3: Query Layer**
+  - [ ] pg2 query language parser
+  - [ ] Executor (runtime-adaptive)
+  - [ ] Catalog stats
+  - [ ] Schema / catalog management
+- [ ] **Phase 4: Server**
+  - [ ] Connection handling (custom wire protocol)
+  - [ ] Runtime statistics + introspection
+- [ ] **Phase 5: Replication**
+  - [ ] WAL streaming to replicas
+  - [ ] Replica read path
+  - [ ] Promotion / failover
+
 ## Build Order
 
 The project is built bottom-up. Each layer depends only on the layers below it. The simulation harness is built alongside the storage engine, not after.
@@ -40,32 +67,47 @@ Every subsystem is parameterized over these interfaces so that the simulation ha
 
 ```zig
 const Storage = struct {
-    read: *const fn (offset: u64, buf: []u8) void,
-    write: *const fn (offset: u64, data: []const u8) void,
-    fsync: *const fn () void,
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    const VTable = struct {
+        read:  *const fn (ptr: *anyopaque, page_id: u64, buf: *[8192]u8) StorageError!void,
+        write: *const fn (ptr: *anyopaque, page_id: u64, data: *const [8192]u8) StorageError!void,
+        fsync: *const fn (ptr: *anyopaque) StorageError!void,
+    };
 };
 ```
 
 Production: wraps `preadv`/`pwritev` + `fdatasync`.
-Simulation: in-memory byte array with fault injection (partial writes, bit flips, delayed fsync).
+Simulation: `SimulatedDisk` — in-memory pages with pending/durable write separation and crash semantics.
 
 ### Clock Interface
 
 ```zig
 const Clock = struct {
-    now: *const fn () u64,  // monotonic nanoseconds
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    const VTable = struct {
+        now: *const fn (ptr: *anyopaque) u64,
+    };
 };
 ```
 
-Production: `std.time.nanoTimestamp`.
-Simulation: manually advanced by the scheduler.
+Production: `RealClock` wrapping `std.time.nanoTimestamp`.
+Simulation: `SimulatedClock` — manually advanced by the scheduler.
 
 ### Network Interface
 
 ```zig
 const Network = struct {
-    send: *const fn (peer: PeerId, msg: []const u8) void,
-    recv: *const fn () ?Message,
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    const VTable = struct {
+        send: *const fn (ptr: *anyopaque, to: PeerId, data: []const u8) void,
+        recv: *const fn (ptr: *anyopaque) ?Message,
+    };
 };
 ```
 
