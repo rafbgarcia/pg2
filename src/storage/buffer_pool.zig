@@ -142,6 +142,12 @@ pub const BufferPool = struct {
         }
     }
 
+    /// Returns true if the page is currently pinned (pin_count > 0).
+    pub fn isPinned(self: *BufferPool, page_id: u64) bool {
+        const frame_idx = self.page_table.get(page_id) orelse return false;
+        return self.frames[frame_idx].pin_count > 0;
+    }
+
     /// Flush a specific page to disk.
     pub fn flush(self: *BufferPool, page_id: u64) BufferPoolError!void {
         const frame_idx = self.page_table.get(page_id) orelse return;

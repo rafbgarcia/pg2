@@ -10,6 +10,11 @@ pub const RecordType = enum(u8) {
     update = 5,
     delete = 6,
     checkpoint = 7,
+    btree_insert = 8,
+    btree_delete = 9,
+    btree_split_leaf = 10,
+    btree_split_internal = 11,
+    btree_new_root = 12,
 };
 
 /// A single WAL record.

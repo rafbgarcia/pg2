@@ -1,6 +1,6 @@
 # pg2
 
-An experimental database built from scratch in Zig, focused on developer experience and transparency.
+A database built from scratch in Zig, focused on developer experience and transparency.
 
 ## Project Philosophy
 

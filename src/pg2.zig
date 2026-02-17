@@ -4,6 +4,7 @@ pub const storage = struct {
     pub const buffer_pool = @import("storage/buffer_pool.zig");
     pub const wal = @import("storage/wal.zig");
     pub const heap = @import("storage/heap.zig");
+    pub const btree = @import("storage/btree.zig");
 };
 
 pub const mvcc = struct {
@@ -23,6 +24,7 @@ comptime {
     _ = storage.buffer_pool;
     _ = storage.wal;
     _ = storage.heap;
+    _ = storage.btree;
     _ = mvcc.transaction;
     _ = mvcc.undo;
     _ = simulator.disk;

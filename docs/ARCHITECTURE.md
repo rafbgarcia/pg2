@@ -10,7 +10,7 @@
   - [x] Build system (`zig build`, `zig build test`, `zig build sim`)
 - [x] **Phase 2: Storage Engine**
   - [x] Write-ahead log (WAL) — `src/storage/wal.zig`
-  - [ ] B-tree indexes
+  - [x] B-tree indexes — `src/storage/btree.zig`
   - [x] Heap storage (slotted pages, in-place update) — `src/storage/heap.zig`
   - [x] Undo-log MVCC + transaction manager — `src/mvcc/`
   - [x] Buffer pool enforces WAL protocol (page LSN must be flushed before page flush)
