@@ -178,25 +178,16 @@ fn executeReadPipeline(
     ops: *const [max_operators]OpDescriptor,
     op_count: u16,
 ) void {
-    var scan_result = scan_mod.tableScan(
+    const scan_result = scan_mod.tableScanInto(
         ctx.catalog, ctx.pool, ctx.undo_log,
-        ctx.snapshot, ctx.tx_manager, model_id, ctx.allocator,
+        ctx.snapshot, ctx.tx_manager, model_id, result.rows,
     ) catch {
         setError(result, "table scan failed");
         return;
     };
-    defer scan_result.deinit();
-
-    // Copy scan results into query result.
     result.stats.pages_read = scan_result.pages_read;
     result.stats.rows_scanned = scan_result.row_count;
-    const copy_count = @min(
-        scan_result.row_count, scan_mod.max_result_rows,
-    );
-    for (0..copy_count) |i| {
-        result.rows[i] = scan_result.rows[i];
-    }
-    result.row_count = @intCast(copy_count);
+    result.row_count = scan_result.row_count;
 
     // Apply each operator.
     const schema = &ctx.catalog.models[model_id].row_schema;

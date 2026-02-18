@@ -94,6 +94,11 @@ pub const ScanResult = struct {
     }
 };
 
+pub const ScanIntoResult = struct {
+    row_count: u16,
+    pages_read: u32,
+};
+
 /// Full table scan with MVCC visibility.
 ///
 /// Iterates pages from the model's heap_first_page_id for total_pages.
@@ -115,37 +120,65 @@ pub fn tableScan(
     var result = try ScanResult.init(allocator);
     errdefer result.deinit();
 
+    const scan_into = try tableScanInto(
+        catalog, pool, undo_log, snapshot, tx_manager, model_id, result.rows,
+    );
+    result.row_count = scan_into.row_count;
+    result.pages_read = scan_into.pages_read;
+    return result;
+}
+
+/// Full table scan into caller-owned row storage.
+///
+/// This bounded path avoids scan-time heap allocation and enforces an
+/// explicit row-capacity contract through `out_rows.len`.
+pub fn tableScanInto(
+    catalog: *const Catalog,
+    pool: *BufferPool,
+    undo_log: *const UndoLog,
+    snapshot: *const Snapshot,
+    tx_manager: *const TxManager,
+    model_id: ModelId,
+    out_rows: []ResultRow,
+) ScanError!ScanIntoResult {
+    std.debug.assert(model_id < catalog.model_count);
+    std.debug.assert(out_rows.len <= std.math.maxInt(u16));
+
     const model = &catalog.models[model_id];
     const schema = &model.row_schema;
     const first_page = model.heap_first_page_id;
     const total_pages = model.total_pages;
 
-    if (total_pages == 0) return result;
+    if (total_pages == 0) {
+        return .{ .row_count = 0, .pages_read = 0 };
+    }
 
+    var row_count: u16 = 0;
+    var pages_read: u32 = 0;
     var page_idx: u32 = 0;
     while (page_idx < total_pages) : (page_idx += 1) {
         const page_id: u64 = @as(u64, first_page) + page_idx;
         const page = pool.pin(page_id) catch |e| return mapPoolError(e);
         defer pool.unpin(page_id, false);
-        result.pages_read += 1;
+        pages_read += 1;
 
         const slot_count = HeapPage.slot_count(page);
         var slot_idx: u16 = 0;
         while (slot_idx < slot_count) : (slot_idx += 1) {
-            if (result.row_count >= max_result_rows) break;
-            scanSlot(
+            if (@as(usize, row_count) >= out_rows.len) break;
+            try scanSlotInto(
                 page, page_id, slot_idx, schema,
-                undo_log, snapshot, tx_manager, &result,
-            ) catch |e| return e;
+                undo_log, snapshot, tx_manager, out_rows, &row_count,
+            );
         }
     }
 
-    std.debug.assert(result.row_count <= max_result_rows);
-    return result;
+    std.debug.assert(@as(usize, row_count) <= out_rows.len);
+    return .{ .row_count = row_count, .pages_read = pages_read };
 }
 
 /// Process a single slot during table scan.
-fn scanSlot(
+fn scanSlotInto(
     page: *const Page,
     page_id: u64,
     slot_idx: u16,
@@ -153,9 +186,10 @@ fn scanSlot(
     undo_log: *const UndoLog,
     snapshot: *const Snapshot,
     tx_manager: *const TxManager,
-    result: *ScanResult,
+    out_rows: []ResultRow,
+    row_count: *u16,
 ) ScanError!void {
-    std.debug.assert(result.row_count < max_result_rows);
+    std.debug.assert(@as(usize, row_count.*) < out_rows.len);
 
     // Read raw row data. Skip deleted slots.
     const row_data = HeapPage.read(page, slot_idx) catch return;
@@ -185,7 +219,8 @@ fn scanSlot(
     row.column_count = schema.column_count;
     row_mod.decodeRowChecked(schema, data_to_decode, &row.values) catch
         return error.Corruption;
-    result.appendRow(row);
+    out_rows[@as(usize, row_count.*)] = row;
+    row_count.* += 1;
 }
 
 /// Index point lookup: find a single row by exact key match.
@@ -402,6 +437,50 @@ test "scan with rows inserted via HeapPage" {
     try testing.expectEqualSlices(u8, "Alice", result.rows[0].values[1].string);
     try testing.expectEqual(@as(i64, 2), result.rows[1].values[0].bigint);
     try testing.expectEqualSlices(u8, "Bob", result.rows[1].values[1].string);
+}
+
+test "tableScanInto respects caller row capacity" {
+    var disk = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk.deinit();
+    var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
+    defer pool.deinit();
+    var tm = TxManager.init(testing.allocator);
+    defer tm.deinit();
+    var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
+    defer undo_log.deinit();
+
+    var catalog = Catalog{};
+    const model_id = try catalog.addModel("Cap");
+    _ = try catalog.addColumn(model_id, "id", .bigint, false);
+    catalog.models[model_id].heap_first_page_id = 40;
+    catalog.models[model_id].total_pages = 1;
+
+    const page = try pool.pin(40);
+    HeapPage.init(page);
+    const schema = &catalog.models[model_id].row_schema;
+
+    var buf: [256]u8 = undefined;
+    const vals1 = [_]Value{.{ .bigint = 11 }};
+    const len1 = try row_mod.encodeRow(schema, &vals1, &buf);
+    _ = try HeapPage.insert(page, buf[0..len1]);
+
+    const vals2 = [_]Value{.{ .bigint = 22 }};
+    const len2 = try row_mod.encodeRow(schema, &vals2, &buf);
+    _ = try HeapPage.insert(page, buf[0..len2]);
+    pool.unpin(40, true);
+
+    const tx = try tm.begin();
+    var snap = try tm.snapshot(tx);
+    defer snap.deinit();
+
+    var out_rows: [1]ResultRow = .{ResultRow.init()};
+    const out = try tableScanInto(
+        &catalog, &pool, &undo_log, &snap, &tm, model_id, &out_rows,
+    );
+
+    try testing.expectEqual(@as(u16, 1), out.row_count);
+    try testing.expectEqual(@as(u32, 1), out.pages_read);
+    try testing.expectEqual(@as(i64, 11), out_rows[0].values[0].bigint);
 }
 
 test "scan skips deleted slots" {
