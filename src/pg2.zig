@@ -45,6 +45,10 @@ pub const runtime = struct {
     pub const request = @import("runtime/request.zig");
 };
 
+pub const server = struct {
+    pub const session = @import("server/session.zig");
+};
+
 pub const tiger = struct {
     pub const error_taxonomy = @import("tiger/error_taxonomy.zig");
     pub const static_allocator = @import("tiger/static_allocator.zig");
@@ -78,6 +82,7 @@ comptime {
     _ = runtime.bootstrap;
     _ = runtime.config;
     _ = runtime.request;
+    _ = server.session;
     _ = tiger.error_taxonomy;
     _ = tiger.static_allocator;
 }
