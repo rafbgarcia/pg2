@@ -138,6 +138,8 @@ pub const max_payload_size = std.math.maxInt(u16);
 pub const WalError = error{
     OutOfMemory,
     PayloadTooLarge,
+    RecordBufferTooSmall,
+    PayloadBufferTooSmall,
     WalReadError,
     WalWriteError,
     WalFsyncError,
@@ -259,6 +261,11 @@ pub const Wal = struct {
     records_written: u64 = 0,
     flushes: u64 = 0,
     bytes_flushed: u64 = 0,
+
+    pub const ReadIntoResult = struct {
+        records_len: usize,
+        payload_bytes_used: usize,
+    };
 
     pub fn init(allocator: std.mem.Allocator, storage: io.Storage) Wal {
         return .{
@@ -389,6 +396,87 @@ pub const Wal = struct {
         return records.toOwnedSlice(allocator) catch return error.OutOfMemory;
     }
 
+    /// Bounded no-allocation WAL decode path. Caller provides fixed-capacity
+    /// record and payload buffers; returned payload slices point into payload_buf.
+    pub fn readFromInto(
+        self: *Wal,
+        from_lsn: u64,
+        out_records: []Record,
+        payload_buf: []u8,
+    ) WalError!ReadIntoResult {
+        const total_pages = self.wal_page_offset + @as(u64, if (self.wal_byte_offset > 0) 1 else 0);
+        if (total_pages == 0) return .{ .records_len = 0, .payload_bytes_used = 0 };
+
+        var parse_buf: [Record.header_size + max_payload_size + Record.crc_size]u8 = undefined;
+        var parse_len: usize = 0;
+        var payload_used: usize = 0;
+        var records_len: usize = 0;
+        var stop_parse = false;
+
+        var page_idx: u64 = 0;
+        while (page_idx < total_pages and !stop_parse) : (page_idx += 1) {
+            var page_buf: [io.page_size]u8 = undefined;
+            self.storage.read(self.wal_page_base + page_idx, &page_buf) catch
+                return error.WalReadError;
+
+            const page_data_len: usize = if (page_idx == self.wal_page_offset and self.wal_byte_offset > 0)
+                self.wal_byte_offset
+            else
+                io.page_size;
+
+            var offset: usize = 0;
+            while (offset < page_data_len and !stop_parse) {
+                const free_space = parse_buf.len - parse_len;
+                if (free_space == 0) break;
+                const to_copy = @min(free_space, page_data_len - offset);
+                @memcpy(parse_buf[parse_len..][0..to_copy], page_buf[offset..][0..to_copy]);
+                parse_len += to_copy;
+                offset += to_copy;
+
+                while (true) {
+                    const total_len = serializedRecordLen(parse_buf[0..parse_len]) orelse break;
+                    if (parse_len < total_len) break;
+
+                    const result = Record.deserialize(parse_buf[0..total_len]) catch {
+                        stop_parse = true;
+                        break;
+                    };
+
+                    if (result.record.lsn >= from_lsn) {
+                        if (records_len >= out_records.len) return error.RecordBufferTooSmall;
+                        if (payload_used + result.record.payload.len > payload_buf.len) {
+                            return error.PayloadBufferTooSmall;
+                        }
+
+                        const payload_start = payload_used;
+                        const payload_end = payload_start + result.record.payload.len;
+                        if (result.record.payload.len > 0) {
+                            @memcpy(payload_buf[payload_start..payload_end], result.record.payload);
+                        }
+                        payload_used = payload_end;
+
+                        out_records[records_len] = .{
+                            .lsn = result.record.lsn,
+                            .tx_id = result.record.tx_id,
+                            .record_type = result.record.record_type,
+                            .page_id = result.record.page_id,
+                            .payload = payload_buf[payload_start..payload_end],
+                        };
+                        records_len += 1;
+                    }
+
+                    const remaining = parse_len - total_len;
+                    if (remaining > 0) {
+                        std.mem.copyForwards(u8, parse_buf[0..remaining], parse_buf[total_len..parse_len]);
+                    }
+                    parse_len = remaining;
+                }
+            }
+        }
+
+        return .{ .records_len = records_len, .payload_bytes_used = payload_used };
+    }
+
     /// Restore in-memory WAL pointers from the on-disk recovery envelope.
     pub fn recover(self: *Wal) WalError!void {
         var page_buf: [io.page_size]u8 = undefined;
@@ -444,6 +532,12 @@ pub const Wal = struct {
         self.storage.fsync() catch return error.WalFsyncError;
     }
 };
+
+fn serializedRecordLen(prefix: []const u8) ?usize {
+    if (prefix.len < Record.header_size) return null;
+    const payload_len = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, prefix[25..27]).*);
+    return Record.header_size + @as(usize, payload_len) + Record.crc_size;
+}
 
 fn isAllZero(buf: *const [io.page_size]u8) bool {
     for (buf) |b| {
@@ -759,4 +853,64 @@ test "WAL recover handles deterministic torn-write corruption" {
     const records = try recovered.readFrom(1, std.testing.allocator);
     defer Wal.freeRecords(records, std.testing.allocator);
     try std.testing.expect(records.len <= 3);
+}
+
+test "WAL readFromInto decodes records with caller-owned buffers" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+
+    _ = try wal.beginTx(1);
+    _ = try wal.append(1, .insert, 11, "abc");
+    _ = try wal.commitTx(1);
+
+    var records_buf: [8]Record = undefined;
+    var payload_buf: [64]u8 = undefined;
+    const result = try wal.readFromInto(1, &records_buf, &payload_buf);
+
+    try std.testing.expectEqual(@as(usize, 3), result.records_len);
+    try std.testing.expectEqual(RecordType.tx_begin, records_buf[0].record_type);
+    try std.testing.expectEqual(RecordType.insert, records_buf[1].record_type);
+    try std.testing.expectEqualSlices(u8, "abc", records_buf[1].payload);
+    try std.testing.expectEqual(RecordType.tx_commit, records_buf[2].record_type);
+}
+
+test "WAL readFromInto returns RecordBufferTooSmall" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+
+    _ = try wal.beginTx(1);
+    _ = try wal.append(1, .insert, 22, "x");
+    _ = try wal.commitTx(1);
+
+    var tiny_records: [2]Record = undefined;
+    var payload_buf: [64]u8 = undefined;
+    try std.testing.expectError(error.RecordBufferTooSmall, wal.readFromInto(1, &tiny_records, &payload_buf));
+}
+
+test "WAL readFromInto returns PayloadBufferTooSmall" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+
+    var payload: [40]u8 = undefined;
+    @memset(&payload, 0xAA);
+
+    _ = try wal.beginTx(1);
+    _ = try wal.append(1, .insert, 33, &payload);
+    _ = try wal.commitTx(1);
+
+    var records_buf: [8]Record = undefined;
+    var tiny_payload: [8]u8 = undefined;
+    try std.testing.expectError(error.PayloadBufferTooSmall, wal.readFromInto(1, &records_buf, &tiny_payload));
 }

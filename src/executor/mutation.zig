@@ -523,6 +523,8 @@ fn mapWalAppendError(err: wal_mod.WalError) MutationError {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.PayloadTooLarge => error.RowTooLarge,
+        error.RecordBufferTooSmall => error.WalWriteError,
+        error.PayloadBufferTooSmall => error.WalWriteError,
         error.WalReadError => error.WalWriteError,
         error.WalWriteError => error.WalWriteError,
         error.WalFsyncError => error.WalFsyncError,

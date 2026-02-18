@@ -79,6 +79,8 @@ pub fn classifyWal(err: wal_mod.WalError) ErrorClass {
     return switch (err) {
         error.OutOfMemory => .resource_exhausted,
         error.PayloadTooLarge => .resource_exhausted,
+        error.RecordBufferTooSmall => .resource_exhausted,
+        error.PayloadBufferTooSmall => .resource_exhausted,
         error.WalReadError => .retryable,
         error.WalWriteError => .retryable,
         error.WalFsyncError => .retryable,
