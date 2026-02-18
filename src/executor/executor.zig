@@ -1270,6 +1270,75 @@ fn resolveGroupedAggregate(
     };
 }
 
+const JoinDescriptor = struct {
+    left_key_index: u16,
+    right_key_index: u16,
+};
+
+fn executeInnerJoinBounded(
+    result: *QueryResult,
+    left_rows: []const ResultRow,
+    right_rows: []const ResultRow,
+    join: JoinDescriptor,
+    caps: *const capacity_mod.OperatorCapacities,
+) bool {
+    if (left_rows.len > caps.join_build_rows) {
+        setError(result, "join build row capacity exceeded");
+        return false;
+    }
+    const state_bytes = left_rows.len * (@sizeOf(Value) + @sizeOf(u16));
+    if (state_bytes > caps.join_state_bytes) {
+        setError(result, "join state capacity exceeded");
+        return false;
+    }
+    if (left_rows.len > 0 and
+        join.left_key_index >= left_rows[0].column_count)
+    {
+        setError(result, "join key out of bounds");
+        return false;
+    }
+    if (right_rows.len > 0 and
+        join.right_key_index >= right_rows[0].column_count)
+    {
+        setError(result, "join key out of bounds");
+        return false;
+    }
+
+    result.row_count = 0;
+    for (left_rows) |left_row| {
+        const left_key = left_row.values[join.left_key_index];
+        for (right_rows) |right_row| {
+            if (compareValues(left_key, right_row.values[join.right_key_index]) !=
+                .eq) continue;
+            const total_columns = @as(usize, left_row.column_count) +
+                @as(usize, right_row.column_count);
+            if (total_columns > scan_mod.max_columns) {
+                setError(result, "join column capacity exceeded");
+                return false;
+            }
+            if (@as(usize, result.row_count) >= caps.join_output_rows) {
+                setError(result, "join output row capacity exceeded");
+                return false;
+            }
+
+            var out = ResultRow.init();
+            out.column_count = @intCast(total_columns);
+            out.row_id = left_row.row_id;
+            @memcpy(
+                out.values[0..left_row.column_count],
+                left_row.values[0..left_row.column_count],
+            );
+            @memcpy(
+                out.values[left_row.column_count..out.column_count],
+                right_row.values[0..right_row.column_count],
+            );
+            result.rows[result.row_count] = out;
+            result.row_count += 1;
+        }
+    }
+    return true;
+}
+
 /// Execute a mutation pipeline (insert, update, or delete).
 fn executeMutation(
     ctx: *const ExecContext,
@@ -1519,6 +1588,22 @@ const ExecTestEnv = struct {
         };
     }
 };
+
+fn makeJoinLeftRow(id: i64, name: []const u8) ResultRow {
+    var row = ResultRow.init();
+    row.column_count = 2;
+    row.values[0] = .{ .bigint = id };
+    row.values[1] = .{ .string = name };
+    return row;
+}
+
+fn makeJoinRightRow(id: i64, active: bool) ResultRow {
+    var row = ResultRow.init();
+    row.column_count = 2;
+    row.values[0] = .{ .bigint = id };
+    row.values[1] = .{ .boolean = active };
+    return row;
+}
 
 test "execute insert query" {
     var env: ExecTestEnv = undefined;
@@ -2046,4 +2131,129 @@ test "execute group enforces aggregate expression capacity contract" {
     try testing.expect(result.has_error);
     const msg = result.getError().?;
     try testing.expect(std.mem.indexOf(u8, msg, "aggregate expression capacity exceeded") != null);
+}
+
+test "bounded inner join preserves deterministic left-major ordering" {
+    const left = [_]ResultRow{
+        makeJoinLeftRow(1, "A"),
+        makeJoinLeftRow(2, "B"),
+        makeJoinLeftRow(1, "C"),
+    };
+    const right = [_]ResultRow{
+        makeJoinRightRow(1, true),
+        makeJoinRightRow(1, false),
+        makeJoinRightRow(2, true),
+    };
+
+    var result = try QueryResult.init(testing.allocator);
+    defer result.deinit();
+    const caps = capacity_mod.OperatorCapacities.defaults();
+    const ok = executeInnerJoinBounded(
+        &result,
+        left[0..],
+        right[0..],
+        .{ .left_key_index = 0, .right_key_index = 0 },
+        &caps,
+    );
+
+    try testing.expect(ok);
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(@as(u16, 5), result.row_count);
+    try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].bigint);
+    try testing.expectEqualSlices(u8, "A", result.rows[0].values[1].string);
+    try testing.expectEqual(true, result.rows[0].values[3].boolean);
+    try testing.expectEqual(@as(i64, 1), result.rows[1].values[0].bigint);
+    try testing.expectEqualSlices(u8, "A", result.rows[1].values[1].string);
+    try testing.expectEqual(false, result.rows[1].values[3].boolean);
+    try testing.expectEqual(@as(i64, 2), result.rows[2].values[0].bigint);
+    try testing.expectEqualSlices(u8, "B", result.rows[2].values[1].string);
+    try testing.expectEqual(true, result.rows[2].values[3].boolean);
+    try testing.expectEqual(@as(i64, 1), result.rows[3].values[0].bigint);
+    try testing.expectEqualSlices(u8, "C", result.rows[3].values[1].string);
+    try testing.expectEqual(true, result.rows[3].values[3].boolean);
+    try testing.expectEqual(@as(i64, 1), result.rows[4].values[0].bigint);
+    try testing.expectEqualSlices(u8, "C", result.rows[4].values[1].string);
+    try testing.expectEqual(false, result.rows[4].values[3].boolean);
+}
+
+test "bounded inner join enforces build row capacity contract" {
+    const left = [_]ResultRow{
+        makeJoinLeftRow(1, "A"),
+        makeJoinLeftRow(2, "B"),
+    };
+    const right = [_]ResultRow{
+        makeJoinRightRow(1, true),
+    };
+
+    var result = try QueryResult.init(testing.allocator);
+    defer result.deinit();
+    var caps = capacity_mod.OperatorCapacities.defaults();
+    caps.join_build_rows = 1;
+    const ok = executeInnerJoinBounded(
+        &result,
+        left[0..],
+        right[0..],
+        .{ .left_key_index = 0, .right_key_index = 0 },
+        &caps,
+    );
+
+    try testing.expect(!ok);
+    try testing.expect(result.has_error);
+    const msg = result.getError().?;
+    try testing.expect(std.mem.indexOf(u8, msg, "join build row capacity exceeded") != null);
+}
+
+test "bounded inner join enforces output row capacity contract" {
+    const left = [_]ResultRow{
+        makeJoinLeftRow(1, "A"),
+        makeJoinLeftRow(1, "B"),
+    };
+    const right = [_]ResultRow{
+        makeJoinRightRow(1, true),
+        makeJoinRightRow(1, false),
+    };
+
+    var result = try QueryResult.init(testing.allocator);
+    defer result.deinit();
+    var caps = capacity_mod.OperatorCapacities.defaults();
+    caps.join_output_rows = 3;
+    const ok = executeInnerJoinBounded(
+        &result,
+        left[0..],
+        right[0..],
+        .{ .left_key_index = 0, .right_key_index = 0 },
+        &caps,
+    );
+
+    try testing.expect(!ok);
+    try testing.expect(result.has_error);
+    const msg = result.getError().?;
+    try testing.expect(std.mem.indexOf(u8, msg, "join output row capacity exceeded") != null);
+}
+
+test "bounded inner join enforces state byte capacity contract" {
+    const left = [_]ResultRow{
+        makeJoinLeftRow(1, "A"),
+        makeJoinLeftRow(2, "B"),
+    };
+    const right = [_]ResultRow{
+        makeJoinRightRow(1, true),
+    };
+
+    var result = try QueryResult.init(testing.allocator);
+    defer result.deinit();
+    var caps = capacity_mod.OperatorCapacities.defaults();
+    caps.join_state_bytes = @sizeOf(Value);
+    const ok = executeInnerJoinBounded(
+        &result,
+        left[0..],
+        right[0..],
+        .{ .left_key_index = 0, .right_key_index = 0 },
+        &caps,
+    );
+
+    try testing.expect(!ok);
+    try testing.expect(result.has_error);
+    const msg = result.getError().?;
+    try testing.expect(std.mem.indexOf(u8, msg, "join state capacity exceeded") != null);
 }

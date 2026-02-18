@@ -18,7 +18,7 @@ pub const max_group_keys: usize = 8;
 pub const max_group_aggregate_exprs: usize = 4;
 pub const max_aggregate_state_bytes: usize = 256 * 1024;
 
-// Join operator contracts (for upcoming implementation).
+// Join operator contracts.
 pub const max_join_build_rows: usize = scan_mod.max_result_rows;
 pub const max_join_output_rows: usize = scan_mod.max_result_rows;
 pub const max_join_state_bytes: usize = 512 * 1024;

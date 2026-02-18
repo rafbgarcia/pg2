@@ -76,8 +76,8 @@ This tracker exists to keep continuity across sessions:
 6. Static allocation/allocator sealing policy not yet enforced.
    Status: `partial`
    Refs: runtime alloc paths across executor/storage/mvcc
-   Notes: Removed hot-path dynamic allocator usage from B-tree split logic by using fixed-capacity split scratch buffers derived from page-size bounds; removed `BTree` allocator dependency from runtime API/state after split-path sealing (`src/storage/btree.zig`). Added bounded no-allocation WAL decode path `readFromInto` with caller-owned record/payload buffers and explicit capacity errors (`src/storage/wal.zig`), reducing recovery-path dependence on heap-owned record payload copies. Migrated seeded recovery scenario to bounded decode (`src/simulator/fault_matrix.zig`) to exercise call-site capacity contracts. Added bounded `tableScanInto` scan path (`src/executor/scan.zig`) and switched read execution pipeline to scan directly into preallocated query-result storage (`src/executor/executor.zig`), removing one per-query scan allocation/copy path. Reworked mutation update/delete paths to iterate visible rows in-place without allocator-backed `tableScan` materialization (`src/executor/mutation.zig`), preserving predicate and MVCC visibility checks. Migrated WAL recovery/LSN/filter regressions to bounded `readFromInto` buffers by default (retaining targeted `readFrom` compatibility coverage), so validation now primarily exercises sealed decode paths. Added explicit executor operator capacity-contract module (`src/executor/capacity.zig`) with compile-time invariants for upcoming sort/aggregate/join paths and wired read pipeline operator-count bound to shared contract constants. Implemented bounded in-place executor sort (multi-key `asc`/`desc`, expression keys, no heap allocation) with explicit key/row capacity enforcement and deterministic insertion-sort ordering (`src/executor/executor.zig`), and disambiguated parser sort-key encoding for expression vs column keys (`src/parser/parser.zig`, `src/parser/ast.zig`). Implemented bounded in-place group-key collapsing in read execution (explicit `group_keys` / `aggregate_groups` enforcement, no runtime heap allocation) with regression coverage for group behavior and key-capacity overflow (`src/executor/executor.zig`). Added bounded grouped aggregate state/evaluation for `count(*)`, `sum`, `avg`, `min`, and `max` with explicit aggregate-expression and state-byte capacity contracts, fail-closed type/overflow behavior, and grouped resolver integration for post-group `sort`/`where` evaluation (`src/executor/executor.zig`, `src/executor/capacity.zig`).
-   Remaining: implement join operators that consume bounded contracts for state/scratch/output sizing, and eventually retire allocator-backed `readFrom` from non-compatibility usage.
+   Notes: Removed hot-path dynamic allocator usage from B-tree split logic by using fixed-capacity split scratch buffers derived from page-size bounds; removed `BTree` allocator dependency from runtime API/state after split-path sealing (`src/storage/btree.zig`). Added bounded no-allocation WAL decode path `readFromInto` with caller-owned record/payload buffers and explicit capacity errors (`src/storage/wal.zig`), reducing recovery-path dependence on heap-owned record payload copies. Migrated seeded recovery scenario to bounded decode (`src/simulator/fault_matrix.zig`) to exercise call-site capacity contracts. Added bounded `tableScanInto` scan path (`src/executor/scan.zig`) and switched read execution pipeline to scan directly into preallocated query-result storage (`src/executor/executor.zig`), removing one per-query scan allocation/copy path. Reworked mutation update/delete paths to iterate visible rows in-place without allocator-backed `tableScan` materialization (`src/executor/mutation.zig`), preserving predicate and MVCC visibility checks. Migrated WAL recovery/LSN/filter regressions to bounded `readFromInto` buffers by default (retaining targeted `readFrom` compatibility coverage), so validation now primarily exercises sealed decode paths. Added explicit executor operator capacity-contract module (`src/executor/capacity.zig`) with compile-time invariants for sort/aggregate/join paths and wired read pipeline operator-count bound to shared contract constants. Implemented bounded in-place executor sort (multi-key `asc`/`desc`, expression keys, no heap allocation) with explicit key/row capacity enforcement and deterministic insertion-sort ordering (`src/executor/executor.zig`), and disambiguated parser sort-key encoding for expression vs column keys (`src/parser/parser.zig`, `src/parser/ast.zig`). Implemented bounded in-place group-key collapsing in read execution (explicit `group_keys` / `aggregate_groups` enforcement, no runtime heap allocation) with regression coverage for group behavior and key-capacity overflow (`src/executor/executor.zig`). Added bounded grouped aggregate state/evaluation for `count(*)`, `sum`, `avg`, `min`, and `max` with explicit aggregate-expression and state-byte capacity contracts, fail-closed type/overflow behavior, and grouped resolver integration for post-group `sort`/`where` evaluation (`src/executor/executor.zig`, `src/executor/capacity.zig`). Added bounded deterministic inner-join execution foundation in the executor with explicit `join_build_rows`, `join_output_rows`, and `join_state_bytes` fail-closed contracts plus deterministic left-major ordering guarantees and contract-overflow regressions (`src/executor/executor.zig`).
+   Remaining: wire the bounded join path into user-visible query execution (nested relation traversal/planner path), and eventually retire allocator-backed `readFrom` from non-compatibility usage.
 
 7. Deterministic fault injection matrix incomplete.
    Status: `partial`
@@ -92,24 +92,24 @@ This tracker exists to keep continuity across sessions:
 ### Session Handoff
 
 - State summary:
-  - Bounded runtime contracts are in place for scan/sort/group/aggregate and most WAL read paths.
+  - Bounded runtime contracts are in place for scan/sort/group/aggregate/join foundations and most WAL read paths.
   - WAL compatibility path `readFrom` now reuses bounded `readFromInto` internally and is verified against it (`src/storage/wal.zig`).
   - Deterministic fault matrix includes multi-step schedules and CI-oriented seed sweeps with bounded budgets (`src/simulator/fault_matrix.zig`).
 - Still open:
-  - Allocator-sealing migration is `partial`; join execution is the largest missing bounded runtime path.
+  - Allocator-sealing migration is `partial`; bounded join foundations exist but are not yet wired to user-visible query execution.
   - Deterministic fault matrix should keep expanding as new persistence/recovery paths land.
 - Blockers / decisions:
   - None currently.
 - Last validation run:
-  - `zig build test`
+  - `zig build test` (pass)
 
 #### Next Codex Session Plan
 
-1. Implement bounded join operator execution in `src/executor/executor.zig` using existing capacity contracts from `src/executor/capacity.zig`.
-   Done criteria: join path enforces `join_build_rows`, `join_output_rows`, and `join_state_bytes` with fail-closed query errors.
-2. Add deterministic join regressions in `src/executor/executor.zig` tests.
-   Done criteria: coverage for normal join behavior, each capacity-overflow failure path, and deterministic output ordering.
-3. Wire tracker updates after code lands.
-   Update `Remaining Findings` item 6 and this handoff section in `TIGER_STYLE_FINDINGS.md` with concrete refs and test evidence.
+1. Wire join execution into user-visible read paths.
+   Done criteria: pipeline/nested-relation execution can invoke bounded join contracts in normal query flow.
+2. Add parser/planner coverage for join-triggering shapes.
+   Done criteria: regression tests prove deterministic ordering and fail-closed join-capacity handling through the query surface, not only direct helper tests.
+3. Continue allocator-sealing migration for remaining compatibility paths.
+   Done criteria: allocator-backed WAL `readFrom` usage reduced to explicit compatibility-only call sites with docs/tests proving bounded default usage.
 4. Validation before handoff.
    Run `zig build test` and record pass/fail outcome in this file.
