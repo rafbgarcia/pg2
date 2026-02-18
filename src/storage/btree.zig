@@ -16,6 +16,7 @@ pub const BTreeError = error{
     DuplicateKey,
     KeyNotFound,
     InvalidPage,
+    Corruption,
     TreeEmpty,
     AllFramesPinned,
     ChecksumMismatch,
@@ -418,6 +419,7 @@ pub const BTree = struct {
 
             switch (page.header.page_type) {
                 .btree_leaf => {
+                    if (!validateLeafStructure(&page.content)) return error.Corruption;
                     const result = LeafNode.search(&page.content, key);
                     if (result.found) {
                         return LeafNode.getRowId(&page.content, result.index);
@@ -425,6 +427,7 @@ pub const BTree = struct {
                     return null;
                 },
                 .btree_internal => {
+                    if (!validateInternalStructure(&page.content)) return error.Corruption;
                     page_id = InternalNode.findChild(&page.content, key);
                 },
                 else => return error.InvalidPage,
@@ -444,10 +447,18 @@ pub const BTree = struct {
 
             switch (page.header.page_type) {
                 .btree_leaf => {
+                    if (!validateLeafStructure(&page.content)) {
+                        self.pool.unpin(page_id, false);
+                        return error.Corruption;
+                    }
                     self.pool.unpin(page_id, false);
                     break;
                 },
                 .btree_internal => {
+                    if (!validateInternalStructure(&page.content)) {
+                        self.pool.unpin(page_id, false);
+                        return error.Corruption;
+                    }
                     const child_index = InternalNode.findChildIndex(&page.content, key);
                     self.pool.unpin(page_id, false);
 
@@ -470,6 +481,10 @@ pub const BTree = struct {
 
         // Try to insert into the leaf.
         const leaf_page = self.pool.pin(page_id) catch |e| return mapPoolError(e);
+        if (!validateLeafStructure(&leaf_page.content)) {
+            self.pool.unpin(page_id, false);
+            return error.Corruption;
+        }
 
         const leaf_result = LeafNode.insert(&leaf_page.content, key, row_id);
         if (leaf_result) |_| {
@@ -508,6 +523,10 @@ pub const BTree = struct {
 
             switch (page.header.page_type) {
                 .btree_leaf => {
+                    if (!validateLeafStructure(&page.content)) {
+                        self.pool.unpin(page_id, false);
+                        return error.Corruption;
+                    }
                     LeafNode.delete(&page.content, key) catch |err| {
                         self.pool.unpin(page_id, false);
                         return err;
@@ -522,6 +541,10 @@ pub const BTree = struct {
                     return;
                 },
                 .btree_internal => {
+                    if (!validateInternalStructure(&page.content)) {
+                        self.pool.unpin(page_id, false);
+                        return error.Corruption;
+                    }
                     const next = InternalNode.findChild(&page.content, key);
                     self.pool.unpin(page_id, false);
                     page_id = next;
@@ -545,6 +568,10 @@ pub const BTree = struct {
 
             switch (page.header.page_type) {
                 .btree_leaf => {
+                    if (!validateLeafStructure(&page.content)) {
+                        self.pool.unpin(page_id, false);
+                        return error.Corruption;
+                    }
                     // Find starting position within the leaf.
                     var start_idx: u16 = 0;
                     if (lo) |lo_key| {
@@ -563,6 +590,10 @@ pub const BTree = struct {
                     };
                 },
                 .btree_internal => {
+                    if (!validateInternalStructure(&page.content)) {
+                        self.pool.unpin(page_id, false);
+                        return error.Corruption;
+                    }
                     const next = if (lo) |lo_key|
                         InternalNode.findChild(&page.content, lo_key)
                     else
@@ -586,6 +617,10 @@ pub const BTree = struct {
         // Keys point into page content, so we must copy them into a contiguous
         // buffer BEFORE re-initializing the page.
         const leaf_page = self.pool.pin(leaf_id) catch |e| return mapPoolError(e);
+        if (!validateLeafStructure(&leaf_page.content)) {
+            self.pool.unpin(leaf_id, false);
+            return error.Corruption;
+        }
         const old_count = LeafNode.cellCount(&leaf_page.content);
         const total: usize = @as(usize, old_count) + 1;
 
@@ -719,6 +754,10 @@ pub const BTree = struct {
 
     fn splitInternal(self: *BTree, node_id: u64, new_key: []const u8, new_right_child: u64, path: []const PathEntry) BTreeError!void {
         const node_page = self.pool.pin(node_id) catch |e| return mapPoolError(e);
+        if (!validateInternalStructure(&node_page.content)) {
+            self.pool.unpin(node_id, false);
+            return error.Corruption;
+        }
         const old_count = InternalNode.cellCount(&node_page.content);
         const old_left_child = InternalNode.leftChild(&node_page.content);
 
@@ -854,7 +893,7 @@ pub const RangeScanIterator = struct {
 
     /// Advance the iterator. Returns the next key/RowId pair, or null when exhausted.
     /// The returned key slice is valid until the next call to `next()` or `close()`.
-    pub fn next(self: *RangeScanIterator) BTreeError!?Entry {
+        pub fn next(self: *RangeScanIterator) BTreeError!?Entry {
         while (!self.done) {
             // Release the pin from the previous next() call.
             if (self.has_pinned_page) {
@@ -863,6 +902,13 @@ pub const RangeScanIterator = struct {
             }
 
             const page = self.pool.pin(self.current_page_id) catch |e| return mapPoolError(e);
+            if (page.header.page_type != .btree_leaf or !validateLeafStructure(&page.content)) {
+                self.pool.unpin(self.current_page_id, false);
+                return if (page.header.page_type != .btree_leaf)
+                    error.InvalidPage
+                else
+                    error.Corruption;
+            }
             const count = LeafNode.cellCount(&page.content);
 
             if (self.current_index >= count) {
@@ -948,6 +994,78 @@ fn readU64(content: *const [content_size]u8, offset: anytype) u64 {
 fn writeU64(content: *[content_size]u8, offset: anytype, value: u64) void {
     const off: usize = @intCast(offset);
     @memcpy(content[off..][0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, value)));
+}
+
+fn validateLeafStructure(content: *const [content_size]u8) bool {
+    const count = LeafNode.cellCount(content);
+    const free_start = readU16(content, 2);
+    const free_end = readU16(content, 4);
+    if (free_start < LeafNode.header_size) return false;
+    if (free_start > content_size) return false;
+    if (free_end > content_size) return false;
+    if (free_start > free_end) return false;
+
+    const ptr_bytes = free_start - LeafNode.header_size;
+    if (ptr_bytes % LeafNode.cell_ptr_size != 0) return false;
+    if (count != ptr_bytes / LeafNode.cell_ptr_size) return false;
+
+    var i: usize = 0;
+    while (i < @as(usize, count)) : (i += 1) {
+        const ptr_pos = LeafNode.header_size + i * LeafNode.cell_ptr_size;
+        if (ptr_pos + LeafNode.cell_ptr_size > free_start) return false;
+
+        const cell_off = readU16(content, ptr_pos);
+        const cell_off_usize: usize = cell_off;
+        if (cell_off < free_end) return false;
+        if (cell_off_usize > content_size) return false;
+        if (cell_off_usize + 2 > content_size) return false;
+
+        const key_len = readU16(content, cell_off_usize);
+        const cell_end = addMany(&[_]usize{ cell_off_usize, 2, key_len, 8, 2 }) orelse
+            return false;
+        if (cell_end > content_size) return false;
+    }
+    return true;
+}
+
+fn validateInternalStructure(content: *const [content_size]u8) bool {
+    const count = InternalNode.cellCount(content);
+    const free_start = readU16(content, 2);
+    const free_end = readU16(content, 4);
+    if (free_start < InternalNode.header_size) return false;
+    if (free_start > content_size) return false;
+    if (free_end > content_size) return false;
+    if (free_start > free_end) return false;
+
+    const ptr_bytes = free_start - InternalNode.header_size;
+    if (ptr_bytes % InternalNode.cell_ptr_size != 0) return false;
+    if (count != ptr_bytes / InternalNode.cell_ptr_size) return false;
+
+    var i: usize = 0;
+    while (i < @as(usize, count)) : (i += 1) {
+        const ptr_pos = InternalNode.header_size + i * InternalNode.cell_ptr_size;
+        if (ptr_pos + InternalNode.cell_ptr_size > free_start) return false;
+
+        const cell_off = readU16(content, ptr_pos);
+        const cell_off_usize: usize = cell_off;
+        if (cell_off < free_end) return false;
+        if (cell_off_usize > content_size) return false;
+        if (cell_off_usize + 2 > content_size) return false;
+
+        const key_len = readU16(content, cell_off_usize);
+        const cell_end = addMany(&[_]usize{ cell_off_usize, 2, key_len, 8 }) orelse
+            return false;
+        if (cell_end > content_size) return false;
+    }
+    return true;
+}
+
+fn addMany(parts: []const usize) ?usize {
+    var total: usize = 0;
+    for (parts) |part| {
+        total = std.math.add(usize, total, part) catch return null;
+    }
+    return total;
 }
 
 // ============================================================================
@@ -1209,6 +1327,24 @@ test "btree: empty find returns null" {
     var tree = try BTree.init(testing.allocator, &pool, null, 0);
     const result = try tree.find("anything");
     try testing.expect(result == null);
+}
+
+test "btree: corrupted leaf structure returns Corruption" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
+    defer pool.deinit();
+
+    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    const root = try pool.pin(tree.root_page_id);
+    // Break invariant: free_start must be >= leaf header size.
+    writeU16(&root.content, 2, 0);
+    pool.unpin(tree.root_page_id, true);
+
+    const result = tree.find("anything");
+    try testing.expectError(error.Corruption, result);
 }
 
 test "btree: single insert and find" {

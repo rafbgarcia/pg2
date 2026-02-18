@@ -105,8 +105,11 @@ pub const RowSchema = struct {
         name: []const u8,
         col_type: ColumnType,
         nullable: bool,
-    ) error{TooManyColumns}!u16 {
+    ) error{ TooManyColumns, NameBufferFull }!u16 {
         if (self.column_count >= max_columns) return error.TooManyColumns;
+        if (name.len > std.math.maxInt(u16)) return error.NameBufferFull;
+        const remaining = self.name_buffer.len - self.name_buffer_len;
+        if (name.len > remaining) return error.NameBufferFull;
         const idx = self.column_count;
 
         // Copy name into buffer.
@@ -640,4 +643,13 @@ test "empty string roundtrip" {
 
     const decoded = decodeColumn(&schema, buf[0..written], 0);
     try testing.expectEqualSlices(u8, "", decoded.string);
+}
+
+test "addColumn returns NameBufferFull when name buffer is exhausted" {
+    var schema = RowSchema{};
+    var long_name = [_]u8{'x'} ** 4096;
+    _ = try schema.addColumn(long_name[0..], .int, false);
+
+    const result = schema.addColumn("y", .int, false);
+    try testing.expectError(error.NameBufferFull, result);
 }

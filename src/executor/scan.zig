@@ -205,7 +205,7 @@ pub fn indexFind(
     const model = &catalog.models[model_id];
     const schema = &model.row_schema;
 
-    const row_id_opt = btree.find(key) catch return error.StorageRead;
+    const row_id_opt = btree.find(key) catch |e| return mapBTreeError(e);
     const row_id = row_id_opt orelse return null;
 
     const page = pool.pin(row_id.page_id) catch |e| return mapPoolError(e);
@@ -248,11 +248,11 @@ pub fn indexRange(
     const model = &catalog.models[model_id];
     const schema = &model.row_schema;
 
-    var iter = btree.rangeScan(lo, hi) catch return error.StorageRead;
+    var iter = btree.rangeScan(lo, hi) catch |e| return mapBTreeError(e);
     defer iter.close();
 
     while (true) {
-        const entry_opt = iter.next() catch return error.StorageRead;
+        const entry_opt = iter.next() catch |e| return mapBTreeError(e);
         const entry = entry_opt orelse break;
         if (result.row_count >= max_result_rows) break;
 
@@ -308,6 +308,14 @@ fn mapPoolError(err: buffer_pool_mod.BufferPoolError) ScanError {
         error.StorageWrite => error.StorageWrite,
         error.StorageFsync => error.StorageFsync,
         error.WalNotFlushed => error.WalNotFlushed,
+    };
+}
+
+fn mapBTreeError(err: btree_mod.BTreeError) ScanError {
+    return switch (err) {
+        error.Corruption => error.Corruption,
+        error.ChecksumMismatch => error.ChecksumMismatch,
+        else => error.StorageRead,
     };
 }
 

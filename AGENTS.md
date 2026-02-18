@@ -9,6 +9,7 @@ A database built from scratch in Zig, focused on developer experience and transp
 - **Teaches as you go.** Explain planner/executor decisions in plain language and expose internals progressively so users build intuition while using the system.
 - **Transparent optimization.** Developers express logical intent (models, filters, relations, result shape). pg2 chooses physical execution (join strategy/order, dataflow, materialization) using runtime observations plus catalog stats when needed. Every automatic decision is visible in always-on stats, and critical decisions are developer-steerable through query shape, schema metadata, and explicit control constructs.
 - **Deterministic and debuggable behavior.** All I/O is abstracted and scheduling is seed-controlled. Any execution can be replayed exactly from a seed, including injected failures.
+- **Foundation-first engineering.** Prioritize core correctness, determinism, and recovery guarantees early to avoid costly rewrites later. Feature work should extend proven foundations, not bypass them.
 
 ## Project Structure
 

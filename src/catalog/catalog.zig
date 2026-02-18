@@ -177,8 +177,12 @@ pub const Catalog = struct {
         model.column_count += 1;
 
         // Mirror into row_schema.
-        _ = model.row_schema.addColumn(name, col_type, nullable) catch
-            return error.TooManyColumns;
+        _ = model.row_schema.addColumn(name, col_type, nullable) catch |e| {
+            return switch (e) {
+                error.TooManyColumns => error.TooManyColumns,
+                error.NameBufferFull => error.NameBufferFull,
+            };
+        };
 
         return col_id;
     }
