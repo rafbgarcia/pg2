@@ -2,7 +2,7 @@
 
 ## Design Principles
 
-1. **You write what. The DB handles how.** The developer writes the logical query — which models, which filters, which relations to traverse. The DB handles physical execution — join strategy, join order, memory management. Every automatic decision is visible in the stats.
+1. **You write what. The DB handles how.** Developers express logical intent (models, filters, relations, result shape). The DB chooses physical execution (join strategy/order, dataflow, materialization) using runtime observations plus catalog stats when needed. Every automatic decision is visible in stats, and critical decisions are developer-steerable through query shape, schema metadata, and explicit control constructs.
 2. **Selection sets for shape. Pipelines for transforms.** Queries combine GraphQL-like selection sets (nested relation traversal) with pipeline operators (filter, sort, group). Selection sets define *what to return*. Pipelines define *how to transform*.
 3. **Always-on stats.** Every query returns execution stats — rows per operator, pages read, join strategies chosen, and the reasoning behind every automatic decision. No EXPLAIN needed.
 4. **Low cognitive load.** The language has a small surface area. Scopes, filters, aggregates, and relation traversal all compose with one consistent mechanism (pipelines + selection sets).

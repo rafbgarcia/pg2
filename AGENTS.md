@@ -4,10 +4,11 @@ A database built from scratch in Zig, focused on developer experience and transp
 
 ## Project Philosophy
 
-- **Transparent optimization.** The developer writes the logical query — which tables, filters, and joins. The DB handles physical execution — join order, join strategy, and mechanical optimizations — using runtime-adaptive decisions based on actual row counts, not cost estimates. Every automatic decision is visible in always-on stats output, and the developer can override any of them.
-- **Undo-log MVCC.** Updates happen in-place; old versions live in an undo log. No vacuum, no heap bloat.
-- **Deterministic simulation testing.** All I/O is abstracted. A seeded PRNG controls scheduling. Any execution can be replayed exactly from a seed. Fault injection (disk corruption, partial writes, OOM, network partitions) is built in from day one.
-- **Async read replicas.** Primary handles all writes; replicas stream the WAL and serve reads.
+- **One obvious way for common tasks.** Prefer a single clear default path for schema design, querying, and operations; advanced controls are explicit opt-ins.
+- **Low cognitive load by default.** Keep syntax, errors, and operational workflows simple; minimize required tuning knobs and hidden behavior.
+- **Teaches as you go.** Explain planner/executor decisions in plain language and expose internals progressively so users build intuition while using the system.
+- **Transparent optimization.** Developers express logical intent (models, filters, relations, result shape). pg2 chooses physical execution (join strategy/order, dataflow, materialization) using runtime observations plus catalog stats when needed. Every automatic decision is visible in always-on stats, and critical decisions are developer-steerable through query shape, schema metadata, and explicit control constructs.
+- **Deterministic and debuggable behavior.** All I/O is abstracted and scheduling is seed-controlled. Any execution can be replayed exactly from a seed, including injected failures.
 
 ## Project Structure
 

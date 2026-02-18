@@ -123,7 +123,16 @@ This is a deliberate architectural choice, not a simplification:
 - **Simplicity.** The buffer pool, WAL, and undo-log MVCC are dramatically simpler without concurrent writers. Less code means fewer bugs, and fewer bugs matter more in a database than in any other kind of software.
 - **Deterministic simulation.** Single-writer execution is inherently more deterministic, which strengthens the simulation testing model.
 
-This model is used successfully in production by SQLite (WAL mode), LMDB, and TigerBeetle. Read scalability comes from async replicas, not from concurrent writers on the primary.
+This model is used successfully in production by SQLite (WAL mode), LMDB, and TigerBeetle. Read scalability should come from replicas and/or topology decisions, not from concurrent writers on the primary.
+
+## MVCC Model
+
+pg2 uses undo-log MVCC with in-place updates.
+
+- Updates modify the current row version in place.
+- The previous committed image is stored in the undo log with version metadata.
+- Snapshot reads resolve visibility by following undo history when needed.
+- This design avoids heap bloat and avoids vacuum as a correctness mechanism.
 
 ## Memory Model
 
@@ -133,13 +142,13 @@ Summary: on startup, pg2 `mmap`s a single contiguous region sized by the `--memo
 
 The total budget is subdivided by fixed compile-time ratios:
 
-| Component | Share | Purpose |
-|-----------|-------|---------|
-| Buffer pool | ~70% | Page cache |
-| WAL buffers | ~5% | Write-ahead log |
-| Connection arenas | ~10% | Per-query execution memory |
-| Undo log pool | ~10% | MVCC version storage |
-| Catalog/metadata | ~5% | Schema, indexes metadata |
+| Component         | Share | Purpose                    |
+| ----------------- | ----- | -------------------------- |
+| Buffer pool       | ~70%  | Page cache                 |
+| WAL buffers       | ~5%   | Write-ahead log            |
+| Connection arenas | ~10%  | Per-query execution memory |
+| Undo log pool     | ~10%  | MVCC version storage       |
+| Catalog/metadata  | ~5%   | Schema, indexes metadata   |
 
 Per-query memory uses arena allocators carved from the connection pool at startup. Arenas are reset (not freed) after each query.
 
@@ -147,18 +156,18 @@ Per-query memory uses arena allocators carved from the connection pool at startu
 
 Every resource has a fixed upper bound, configured at startup:
 
-| Resource | Default | Configurable |
-|----------|---------|-------------|
-| Total memory | 512 MiB | `--memory` |
-| Buffer pool frames | derived from memory budget | no (fixed ratio) |
-| Max connections | 64 | `--max-connections` |
-| Max tables | 1024 | compile-time |
-| Max columns per table | 256 | compile-time |
-| Max indexes per table | 32 | compile-time |
-| Max query result rows | bounded by connection arena | no |
-| WAL segment size | 64 MiB | compile-time |
-| WAL retention segments | 16 | `--wal-retention` |
-| Undo log entries | bounded by undo log pool | no |
+| Resource               | Default                     | Configurable        |
+| ---------------------- | --------------------------- | ------------------- |
+| Total memory           | 512 MiB                     | `--memory`          |
+| Buffer pool frames     | derived from memory budget  | no (fixed ratio)    |
+| Max connections        | 64                          | `--max-connections` |
+| Max tables             | 1024                        | compile-time        |
+| Max columns per table  | 256                         | compile-time        |
+| Max indexes per table  | 32                          | compile-time        |
+| Max query result rows  | bounded by connection arena | no                  |
+| WAL segment size       | 64 MiB                      | compile-time        |
+| WAL retention segments | 16                          | `--wal-retention`   |
+| Undo log entries       | bounded by undo log pool    | no                  |
 
 Exceeding any limit produces an explicit error or panic (for invariant violations), never silent degradation.
 
@@ -166,14 +175,15 @@ Exceeding any limit produces an explicit error or panic (for invariant violation
 
 The DB maintains exact, O(1) statistics for every table and index. These are not stale estimates — they are updated on every mutation. No `ANALYZE` command, no sampling.
 
-| Stat | Scope | Updated on |
-|---|---|---|
-| `row_count` | per table, per index | insert, delete |
-| `avg_row_size` | per table | insert, update (running average) |
-| `total_pages` | per table | page alloc/dealloc |
-| `min` / `max` | per indexed column | insert; lazy-corrected on delete |
-| `distinct_count` | per indexed column | insert (HyperLogLog, approximate) |
+| Stat             | Scope                | Updated on                        |
+| ---------------- | -------------------- | --------------------------------- |
+| `row_count`      | per table, per index | insert, delete                    |
+| `avg_row_size`   | per table            | insert, update (running average)  |
+| `total_pages`    | per table            | page alloc/dealloc                |
+| `min` / `max`    | per indexed column   | insert; lazy-corrected on delete  |
+| `distinct_count` | per indexed column   | insert (HyperLogLog, approximate) |
 
 These stats serve two purposes:
+
 1. **Developer visibility** — queryable via `stats(table)` and `stats(index)` in the query language.
 2. **Automatic dataflow decisions** — for unfiltered inputs, the executor uses `row_count * avg_row_size` vs the query memory budget as a baseline for dataflow and join strategy decisions. When inputs have been transformed by filters or other operators, the executor uses **runtime observation** of actual row counts instead. All decisions are deterministic and reported in stats output.
