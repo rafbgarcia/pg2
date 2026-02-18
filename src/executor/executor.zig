@@ -17,6 +17,7 @@ const Ast = ast_mod.Ast;
 const NodeIndex = ast_mod.NodeIndex;
 const NodeTag = ast_mod.NodeTag;
 const null_node = ast_mod.null_node;
+const TokenType = tokenizer_mod.TokenType;
 const TokenizeResult = tokenizer_mod.TokenizeResult;
 const Value = row_mod.Value;
 const RowSchema = row_mod.RowSchema;
@@ -33,6 +34,14 @@ const compareValues = row_mod.compareValues;
 const max_sort_keys = capacity_mod.max_sort_keys;
 const sort_key_desc_mask: u16 = 0x0001;
 const sort_key_expr_mask: u16 = 0x8000;
+
+const GroupRuntime = struct {
+    active: bool = false,
+    group_key_count: u16 = 0,
+    group_key_indices: [capacity_mod.max_group_keys]u16 = undefined,
+    group_counts: [scan_mod.max_result_rows]u32 =
+        [_]u32{0} ** scan_mod.max_result_rows,
+};
 
 /// Maximum pipeline operators in a single query.
 pub const max_operators = capacity_mod.max_pipeline_operators;
@@ -192,6 +201,7 @@ fn executeReadPipeline(
     op_count: u16,
 ) void {
     const caps = capacity_mod.OperatorCapacities.defaults();
+    var group_runtime = GroupRuntime{};
 
     const scan_result = scan_mod.tableScanInto(
         ctx.catalog,
@@ -215,14 +225,34 @@ fn executeReadPipeline(
     while (i < op_count) : (i += 1) {
         const op = ops[i];
         switch (op.kind) {
-            .where_filter => applyWhereFilter(ctx, result, op.node, schema),
+            .where_filter => applyWhereFilter(
+                ctx,
+                result,
+                op.node,
+                schema,
+                &group_runtime,
+            ),
             .group_op => {
-                if (!applyGroup(ctx, result, op.node, schema, &caps)) return;
+                if (!applyGroup(
+                    ctx,
+                    result,
+                    op.node,
+                    schema,
+                    &caps,
+                    &group_runtime,
+                )) return;
             },
             .limit_op => applyLimit(ctx, result, op.node),
-            .offset_op => applyOffset(ctx, result, op.node),
+            .offset_op => applyOffset(ctx, result, op.node, &group_runtime),
             .sort_op => {
-                if (!applySort(ctx, result, op.node, schema, &caps)) return;
+                if (!applySort(
+                    ctx,
+                    result,
+                    op.node,
+                    schema,
+                    &caps,
+                    &group_runtime,
+                )) return;
             },
             .inspect_op => {},
             .insert_op, .update_op, .delete_op => {},
@@ -239,6 +269,7 @@ fn applyWhereFilter(
     result: *QueryResult,
     where_node: NodeIndex,
     schema: *const RowSchema,
+    group_runtime: *GroupRuntime,
 ) void {
     const node = ctx.ast.getNode(where_node);
     const predicate = node.data.unary;
@@ -249,18 +280,32 @@ fn applyWhereFilter(
     var read_idx: u16 = 0;
     while (read_idx < result.row_count) : (read_idx += 1) {
         const row = &result.rows[read_idx];
-        const matches = filter_mod.evaluatePredicate(
-            ctx.ast,
-            ctx.tokens,
-            ctx.source,
-            predicate,
-            row.values[0..row.column_count],
-            schema,
-        ) catch false;
+        const matches = if (group_runtime.active)
+            evaluateGroupedPredicate(
+                ctx,
+                group_runtime,
+                predicate,
+                row.values[0..row.column_count],
+                schema,
+                read_idx,
+            ) catch false
+        else
+            filter_mod.evaluatePredicate(
+                ctx.ast,
+                ctx.tokens,
+                ctx.source,
+                predicate,
+                row.values[0..row.column_count],
+                schema,
+            ) catch false;
 
         if (matches) {
             if (write_idx != read_idx) {
                 result.rows[write_idx] = result.rows[read_idx];
+                if (group_runtime.active) {
+                    group_runtime.group_counts[write_idx] =
+                        group_runtime.group_counts[read_idx];
+                }
             }
             write_idx += 1;
         }
@@ -311,6 +356,7 @@ fn applyOffset(
     ctx: *const ExecContext,
     result: *QueryResult,
     offset_node: NodeIndex,
+    group_runtime: *GroupRuntime,
 ) void {
     const node = ctx.ast.getNode(offset_node);
     const expr = node.data.unary;
@@ -346,6 +392,10 @@ fn applyOffset(
     var i: u16 = 0;
     while (i < remaining) : (i += 1) {
         result.rows[i] = result.rows[i + offset];
+        if (group_runtime.active) {
+            group_runtime.group_counts[i] =
+                group_runtime.group_counts[i + offset];
+        }
     }
     result.row_count = remaining;
     std.debug.assert(result.row_count == remaining);
@@ -369,6 +419,7 @@ fn applySort(
     sort_node: NodeIndex,
     schema: *const RowSchema,
     caps: *const capacity_mod.OperatorCapacities,
+    group_runtime: *GroupRuntime,
 ) bool {
     const node = ctx.ast.getNode(sort_node);
     const key_count = ctx.ast.listLen(node.data.unary);
@@ -397,7 +448,13 @@ fn applySort(
         return false;
     }
 
-    sortRowsInPlace(ctx, result, schema, sort_keys[0..key_count]) catch {
+    sortRowsInPlace(
+        ctx,
+        result,
+        schema,
+        sort_keys[0..key_count],
+        group_runtime,
+    ) catch {
         setError(result, "sort key evaluation failed");
         return false;
     };
@@ -410,6 +467,7 @@ fn applyGroup(
     group_node: NodeIndex,
     schema: *const RowSchema,
     caps: *const capacity_mod.OperatorCapacities,
+    group_runtime: *GroupRuntime,
 ) bool {
     const node = ctx.ast.getNode(group_node);
     const group_key_count = ctx.ast.listLen(node.data.unary);
@@ -433,20 +491,31 @@ fn applyGroup(
         return false;
     }
 
+    group_runtime.active = true;
+    group_runtime.group_key_count = group_key_count;
+    @memcpy(
+        group_runtime.group_key_indices[0..group_key_count],
+        group_key_indices[0..group_key_count],
+    );
+    @memset(group_runtime.group_counts[0..], 0);
+
     var write_idx: u16 = 0;
     var read_idx: u16 = 0;
     while (read_idx < result.row_count) : (read_idx += 1) {
         const candidate = &result.rows[read_idx];
-        if (!groupAlreadyExists(
+        if (findGroupIndex(
             result.rows[0..write_idx],
             candidate,
             group_key_indices[0..group_key_count],
-        )) {
+        )) |group_index| {
+            group_runtime.group_counts[group_index] += 1;
+        } else {
             if (@as(usize, write_idx) >= caps.aggregate_groups) {
                 setError(result, "aggregate group capacity exceeded");
                 return false;
             }
             result.rows[write_idx] = candidate.*;
+            group_runtime.group_counts[write_idx] = 1;
             write_idx += 1;
         }
     }
@@ -483,17 +552,19 @@ fn buildGroupKeyIndices(
     return key_idx == group_key_count;
 }
 
-fn groupAlreadyExists(
+fn findGroupIndex(
     grouped_rows: []const ResultRow,
     candidate: *const ResultRow,
     key_indices: []const u16,
-) bool {
+) ?u16 {
+    var idx: u16 = 0;
     for (grouped_rows) |grouped| {
         if (rowsEqualOnGroupKeys(&grouped, candidate, key_indices)) {
-            return true;
+            return idx;
         }
+        idx += 1;
     }
-    return false;
+    return null;
 }
 
 fn rowsEqualOnGroupKeys(
@@ -573,6 +644,7 @@ fn sortRowsInPlace(
     result: *QueryResult,
     schema: *const RowSchema,
     sort_keys: []const SortKeyDescriptor,
+    group_runtime: *GroupRuntime,
 ) SortEvalError!void {
     if (result.row_count <= 1) return;
 
@@ -584,6 +656,9 @@ fn sortRowsInPlace(
             const order = compareRowsBySortKeys(
                 ctx,
                 schema,
+                group_runtime,
+                prev_idx,
+                j,
                 &result.rows[prev_idx],
                 &result.rows[j],
                 sort_keys,
@@ -592,6 +667,12 @@ fn sortRowsInPlace(
             const temp = result.rows[prev_idx];
             result.rows[prev_idx] = result.rows[j];
             result.rows[j] = temp;
+            if (group_runtime.active) {
+                const count_tmp = group_runtime.group_counts[prev_idx];
+                group_runtime.group_counts[prev_idx] =
+                    group_runtime.group_counts[j];
+                group_runtime.group_counts[j] = count_tmp;
+            }
             j -= 1;
         }
     }
@@ -600,6 +681,9 @@ fn sortRowsInPlace(
 fn compareRowsBySortKeys(
     ctx: *const ExecContext,
     schema: *const RowSchema,
+    group_runtime: *const GroupRuntime,
+    lhs_row_index: u16,
+    rhs_row_index: u16,
     lhs_row: *const ResultRow,
     rhs_row: *const ResultRow,
     sort_keys: []const SortKeyDescriptor,
@@ -608,12 +692,16 @@ fn compareRowsBySortKeys(
         const lhs_value = evaluateSortKeyValue(
             ctx,
             schema,
+            group_runtime,
+            lhs_row_index,
             lhs_row,
             key,
         ) catch return error.EvalFailed;
         const rhs_value = evaluateSortKeyValue(
             ctx,
             schema,
+            group_runtime,
+            rhs_row_index,
             rhs_row,
             key,
         ) catch return error.EvalFailed;
@@ -633,20 +721,121 @@ fn compareRowsBySortKeys(
 fn evaluateSortKeyValue(
     ctx: *const ExecContext,
     schema: *const RowSchema,
+    group_runtime: *const GroupRuntime,
+    row_index: u16,
     row: *const ResultRow,
     key: SortKeyDescriptor,
 ) filter_mod.EvalError!Value {
     return switch (key.kind) {
         .column => row.values[key.column_index],
-        .expression => filter_mod.evaluateExpression(
-            ctx.ast,
-            ctx.tokens,
-            ctx.source,
-            key.expr_node,
-            row.values[0..row.column_count],
-            schema,
-        ),
+        .expression => if (group_runtime.active)
+            evaluateGroupedExpression(
+                ctx,
+                group_runtime,
+                key.expr_node,
+                row.values[0..row.column_count],
+                schema,
+                row_index,
+            )
+        else
+            filter_mod.evaluateExpression(
+                ctx.ast,
+                ctx.tokens,
+                ctx.source,
+                key.expr_node,
+                row.values[0..row.column_count],
+                schema,
+            ),
     };
+}
+
+const GroupAggregateContext = struct {
+    ctx: *const ExecContext,
+    group_runtime: *const GroupRuntime,
+    row_index: u16,
+};
+
+fn evaluateGroupedPredicate(
+    ctx: *const ExecContext,
+    group_runtime: *const GroupRuntime,
+    predicate: NodeIndex,
+    row_values: []const Value,
+    schema: *const RowSchema,
+    row_index: u16,
+) filter_mod.EvalError!bool {
+    const agg_ctx = GroupAggregateContext{
+        .ctx = ctx,
+        .group_runtime = group_runtime,
+        .row_index = row_index,
+    };
+    const resolver = filter_mod.AggregateResolver{
+        .ctx = &agg_ctx,
+        .resolve = resolveGroupedAggregate,
+    };
+    return filter_mod.evaluatePredicateWithResolver(
+        ctx.ast,
+        ctx.tokens,
+        ctx.source,
+        predicate,
+        row_values,
+        schema,
+        &resolver,
+    );
+}
+
+fn evaluateGroupedExpression(
+    ctx: *const ExecContext,
+    group_runtime: *const GroupRuntime,
+    expr: NodeIndex,
+    row_values: []const Value,
+    schema: *const RowSchema,
+    row_index: u16,
+) filter_mod.EvalError!Value {
+    const agg_ctx = GroupAggregateContext{
+        .ctx = ctx,
+        .group_runtime = group_runtime,
+        .row_index = row_index,
+    };
+    const resolver = filter_mod.AggregateResolver{
+        .ctx = &agg_ctx,
+        .resolve = resolveGroupedAggregate,
+    };
+    return filter_mod.evaluateExpressionWithResolver(
+        ctx.ast,
+        ctx.tokens,
+        ctx.source,
+        expr,
+        row_values,
+        schema,
+        &resolver,
+    );
+}
+
+fn resolveGroupedAggregate(
+    raw_ctx: *const anyopaque,
+    node_index: NodeIndex,
+    row_values: []const Value,
+    schema: *const RowSchema,
+) filter_mod.EvalError!Value {
+    _ = row_values;
+    _ = schema;
+
+    const agg_ctx: *const GroupAggregateContext = @ptrCast(@alignCast(raw_ctx));
+    if (!agg_ctx.group_runtime.active) return error.UnknownFunction;
+
+    const node = agg_ctx.ctx.ast.getNode(node_index);
+    if (node.tag != .expr_aggregate) return error.UnknownFunction;
+
+    const agg_token_type: TokenType =
+        agg_ctx.ctx.tokens.tokens[node.extra].token_type;
+    switch (agg_token_type) {
+        .agg_count => {
+            if (node.data.unary != null_node) return error.UnknownFunction;
+            const count = agg_ctx.group_runtime.group_counts[agg_ctx.row_index];
+            return .{ .bigint = @intCast(count) };
+        },
+        else => return error.UnknownFunction,
+    }
 }
 
 /// Execute a mutation pipeline (insert, update, or delete).
@@ -1274,4 +1463,69 @@ test "execute group enforces key capacity contract" {
     try testing.expect(result.has_error);
     const msg = result.getError().?;
     try testing.expect(std.mem.indexOf(u8, msg, "group key capacity exceeded") != null);
+}
+
+test "execute group supports sort by count star" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const inserts = [_][]const u8{
+        "User |> insert(id = 1, name = \"A\", active = true)",
+        "User |> insert(id = 2, name = \"B\", active = true)",
+        "User |> insert(id = 3, name = \"C\", active = false)",
+    };
+    for (inserts) |src| {
+        const tok = tokenizer_mod.tokenize(src);
+        const p = parser_mod.parse(&tok, src);
+        var r = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+        defer r.deinit();
+    }
+
+    const src = "User |> group(active) |> sort(count(*) desc)";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(@as(u16, 2), result.row_count);
+    try testing.expectEqual(true, result.rows[0].values[2].boolean);
+    try testing.expectEqual(false, result.rows[1].values[2].boolean);
+}
+
+test "execute group supports where on count star" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const inserts = [_][]const u8{
+        "User |> insert(id = 1, name = \"A\", active = true)",
+        "User |> insert(id = 2, name = \"B\", active = true)",
+        "User |> insert(id = 3, name = \"C\", active = false)",
+    };
+    for (inserts) |src| {
+        const tok = tokenizer_mod.tokenize(src);
+        const p = parser_mod.parse(&tok, src);
+        var r = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+        defer r.deinit();
+    }
+
+    const src = "User |> group(active) |> where(count(*) > 1)";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(@as(u16, 1), result.row_count);
+    try testing.expectEqual(true, result.rows[0].values[2].boolean);
 }

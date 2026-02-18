@@ -29,6 +29,16 @@ pub const EvalError = error{
     NullInPredicate,
 };
 
+pub const AggregateResolver = struct {
+    ctx: *const anyopaque,
+    resolve: *const fn (
+        ctx: *const anyopaque,
+        node_index: NodeIndex,
+        row_values: []const Value,
+        schema: *const RowSchema,
+    ) EvalError!Value,
+};
+
 /// Work items for iterative post-order traversal.
 const WorkItem = union(enum) {
     evaluate: NodeIndex,
@@ -36,6 +46,7 @@ const WorkItem = union(enum) {
     apply_unary: u16,
     apply_column_ref: u16,
     apply_literal: u16,
+    apply_aggregate: NodeIndex,
     apply_function: struct { token_index: u16, arg_count: u16 },
 };
 
@@ -47,6 +58,26 @@ pub fn evaluateExpression(
     node_index: NodeIndex,
     row_values: []const Value,
     schema: *const RowSchema,
+) EvalError!Value {
+    return evaluateExpressionWithResolver(
+        tree,
+        tokens,
+        source,
+        node_index,
+        row_values,
+        schema,
+        null,
+    );
+}
+
+pub fn evaluateExpressionWithResolver(
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    node_index: NodeIndex,
+    row_values: []const Value,
+    schema: *const RowSchema,
+    resolver: ?*const AggregateResolver,
 ) EvalError!Value {
     var eval_stack: [max_eval_stack]Value = undefined;
     var eval_count: u16 = 0;
@@ -62,7 +93,11 @@ pub fn evaluateExpression(
         const item = work_stack[work_count];
         switch (item) {
             .evaluate => |idx| try pushNodeWork(
-                tree, tokens, idx, &work_stack, &work_count,
+                tree,
+                tokens,
+                idx,
+                &work_stack,
+                &work_count,
             ),
             .apply_literal => |tok_idx| {
                 const val = try parseLiteralValue(tokens, source, tok_idx);
@@ -100,9 +135,20 @@ pub fn evaluateExpression(
                     args[i] = evalPop(&eval_stack, &eval_count);
                 }
                 const result = try applyBuiltinFunction(
-                    fn_type, args[0..count],
+                    fn_type,
+                    args[0..count],
                 );
                 try evalPush(&eval_stack, &eval_count, result);
+            },
+            .apply_aggregate => |agg_node_idx| {
+                const r = resolver orelse return error.UnknownFunction;
+                const val = try r.resolve(
+                    r.ctx,
+                    agg_node_idx,
+                    row_values,
+                    schema,
+                );
+                try evalPush(&eval_stack, &eval_count, val);
             },
         }
     }
@@ -120,8 +166,34 @@ pub fn evaluatePredicate(
     row_values: []const Value,
     schema: *const RowSchema,
 ) EvalError!bool {
-    const val = try evaluateExpression(
-        tree, tokens, source, node_index, row_values, schema,
+    return evaluatePredicateWithResolver(
+        tree,
+        tokens,
+        source,
+        node_index,
+        row_values,
+        schema,
+        null,
+    );
+}
+
+pub fn evaluatePredicateWithResolver(
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    node_index: NodeIndex,
+    row_values: []const Value,
+    schema: *const RowSchema,
+    resolver: ?*const AggregateResolver,
+) EvalError!bool {
+    const val = try evaluateExpressionWithResolver(
+        tree,
+        tokens,
+        source,
+        node_index,
+        row_values,
+        schema,
+        resolver,
     );
     if (val == .null_value) return error.NullInPredicate;
     if (val != .boolean) return error.TypeMismatch;
@@ -179,8 +251,17 @@ fn pushNodeWork(
             });
             // Push args in reverse order (last arg pushed first onto work stack).
             try pushLinkedListReverse(
-                tree, work_stack, work_count, node.data.unary, arg_count,
+                tree,
+                work_stack,
+                work_count,
+                node.data.unary,
+                arg_count,
             );
+        },
+        .expr_aggregate => {
+            try workPush(work_stack, work_count, .{
+                .apply_aggregate = idx,
+            });
         },
         else => {
             // Fallback: treat as literal token reference.
@@ -522,7 +603,12 @@ test "literal integer evaluation" {
     const schema = RowSchema{};
 
     const result = try evaluateExpression(
-        &tree, &tokens, "42", node, &.{}, &schema,
+        &tree,
+        &tokens,
+        "42",
+        node,
+        &.{},
+        &schema,
     );
     try testing.expectEqual(@as(i64, 42), result.bigint);
 }
@@ -534,7 +620,12 @@ test "literal float evaluation" {
     const schema = RowSchema{};
 
     const result = try evaluateExpression(
-        &tree, &tokens, "3.14", node, &.{}, &schema,
+        &tree,
+        &tokens,
+        "3.14",
+        node,
+        &.{},
+        &schema,
     );
     try testing.expectEqual(@as(f64, 3.14), result.float);
 }
@@ -547,7 +638,12 @@ test "literal string evaluation" {
     const schema = RowSchema{};
 
     const result = try evaluateExpression(
-        &tree, &tokens, source, node, &.{}, &schema,
+        &tree,
+        &tokens,
+        source,
+        node,
+        &.{},
+        &schema,
     );
     try testing.expectEqualSlices(u8, "hello", result.string);
 }
@@ -559,7 +655,12 @@ test "literal boolean evaluation" {
     const schema = RowSchema{};
 
     const result = try evaluateExpression(
-        &tree, &tokens, "true", node, &.{}, &schema,
+        &tree,
+        &tokens,
+        "true",
+        node,
+        &.{},
+        &schema,
     );
     try testing.expect(result.boolean);
 }
@@ -571,7 +672,12 @@ test "literal null evaluation" {
     const schema = RowSchema{};
 
     const result = try evaluateExpression(
-        &tree, &tokens, "null", node, &.{}, &schema,
+        &tree,
+        &tokens,
+        "null",
+        node,
+        &.{},
+        &schema,
     );
     try testing.expect(result == .null_value);
 }
@@ -592,7 +698,12 @@ test "binary addition" {
     const schema = RowSchema{};
 
     const result = try evaluateExpression(
-        &tree, &tokens, source, bin, &.{}, &schema,
+        &tree,
+        &tokens,
+        source,
+        bin,
+        &.{},
+        &schema,
     );
     try testing.expectEqual(@as(i64, 30), result.bigint);
 }
@@ -612,7 +723,12 @@ test "binary comparison" {
     const schema = RowSchema{};
 
     const result = try evaluateExpression(
-        &tree, &tokens, source, bin, &.{}, &schema,
+        &tree,
+        &tokens,
+        source,
+        bin,
+        &.{},
+        &schema,
     );
     try testing.expect(result.boolean);
 }
@@ -632,7 +748,12 @@ test "logical and" {
     const schema = RowSchema{};
 
     const result = try evaluateExpression(
-        &tree, &tokens, source, bin, &.{}, &schema,
+        &tree,
+        &tokens,
+        source,
+        bin,
+        &.{},
+        &schema,
     );
     try testing.expect(!result.boolean);
 }
@@ -652,7 +773,12 @@ test "logical or" {
     const schema = RowSchema{};
 
     const result = try evaluateExpression(
-        &tree, &tokens, source, bin, &.{}, &schema,
+        &tree,
+        &tokens,
+        source,
+        bin,
+        &.{},
+        &schema,
     );
     try testing.expect(result.boolean);
 }
@@ -668,7 +794,12 @@ test "column reference evaluation" {
     const row_values = [_]Value{.{ .bigint = 25 }};
 
     const result = try evaluateExpression(
-        &tree, &tokens, source, node, &row_values, &schema,
+        &tree,
+        &tokens,
+        source,
+        node,
+        &row_values,
+        &schema,
     );
     try testing.expectEqual(@as(i64, 25), result.bigint);
 }
@@ -761,7 +892,12 @@ test "predicate wrapper — true" {
     const schema = RowSchema{};
 
     const result = try evaluatePredicate(
-        &tree, &tokens, source, node, &.{}, &schema,
+        &tree,
+        &tokens,
+        source,
+        node,
+        &.{},
+        &schema,
     );
     try testing.expect(result);
 }
@@ -774,7 +910,12 @@ test "predicate wrapper — null returns error" {
     const schema = RowSchema{};
 
     const result = evaluatePredicate(
-        &tree, &tokens, source, node, &.{}, &schema,
+        &tree,
+        &tokens,
+        source,
+        node,
+        &.{},
+        &schema,
     );
     try testing.expectError(error.NullInPredicate, result);
 }
