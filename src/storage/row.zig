@@ -171,12 +171,19 @@ pub const EncodeError = error{
 
 pub const DecodeError = error{
     Corruption,
+    InvalidRowFormat,
+    UnsupportedRowVersion,
 };
+
+pub const row_format_magic: u16 = 0x5232; // "R2"
+pub const row_format_version: u8 = 1;
+const row_header_size: usize = 3; // magic:u16 + version:u8
 
 /// Encode a row of values into a byte buffer.
 ///
 /// Layout:
-///   [null_bitmap: N bytes] [fixed columns in order] [variable-length data]
+///   [magic:u16][version:u8][null_bitmap: N bytes]
+///   [fixed columns in order] [variable-length data]
 ///
 /// Variable-length strings are stored as u16 length prefix + data, appended
 /// after all fixed columns. Fixed-column slots for strings store a u16 offset
@@ -191,7 +198,7 @@ pub fn encodeRow(
     std.debug.assert(values.len == schema.column_count);
 
     // First pass: compute total size needed.
-    var total: usize = schema.null_bitmap_bytes;
+    var total: usize = row_header_size + schema.null_bitmap_bytes;
     for (0..schema.column_count) |i| {
         const col = schema.columns[i];
         if (values[i] == .null_value) {
@@ -218,17 +225,24 @@ pub fn encodeRow(
     // Zero the buffer region.
     @memset(buf[0..total], 0);
 
+    // Write row format header.
+    @memcpy(
+        buf[0..2],
+        std.mem.asBytes(&std.mem.nativeToLittle(u16, row_format_magic)),
+    );
+    buf[2] = row_format_version;
+
     // Write null bitmap.
     for (0..schema.column_count) |i| {
         if (values[i] == .null_value) {
-            buf[i / 8] |= @as(u8, 1) << @intCast(i % 8);
+            buf[row_header_size + i / 8] |= @as(u8, 1) << @intCast(i % 8);
         }
     }
 
     // Second pass: write fixed columns, track variable data offset.
-    var fixed_offset: usize = schema.null_bitmap_bytes;
+    var fixed_offset: usize = row_header_size + schema.null_bitmap_bytes;
     // Variable data starts after all fixed columns.
-    var var_data_start: usize = schema.null_bitmap_bytes;
+    var var_data_start: usize = row_header_size + schema.null_bitmap_bytes;
     for (0..schema.column_count) |i| {
         const col = schema.columns[i];
         if (col.column_type == .string) {
@@ -315,9 +329,10 @@ pub fn decodeColumnChecked(
     col_index: u16,
 ) DecodeError!Value {
     if (col_index >= schema.column_count) return error.Corruption;
+    try validateRowHeader(row_data);
 
     // Check null bitmap.
-    const byte_idx = col_index / 8;
+    const byte_idx = row_header_size + col_index / 8;
     try requireRange(row_data, byte_idx, 1);
     const bit_idx: u3 = @intCast(col_index % 8);
     if (row_data[byte_idx] & (@as(u8, 1) << bit_idx) != 0) {
@@ -325,7 +340,7 @@ pub fn decodeColumnChecked(
     }
 
     // Compute offset to this column's fixed slot.
-    var offset: usize = schema.null_bitmap_bytes;
+    var offset: usize = row_header_size + schema.null_bitmap_bytes;
     for (0..col_index) |i| {
         const col = schema.columns[i];
         const slot_size: usize = if (col.column_type == .string)
@@ -427,6 +442,16 @@ pub fn decodeRow(schema: *const RowSchema, row_data: []const u8, out: []Value) v
 fn requireRange(row_data: []const u8, start: usize, len: usize) DecodeError!void {
     const end = std.math.add(usize, start, len) catch return error.Corruption;
     if (end > row_data.len) return error.Corruption;
+}
+
+fn validateRowHeader(row_data: []const u8) DecodeError!void {
+    try requireRange(row_data, 0, row_header_size);
+    const magic = std.mem.littleToNative(
+        u16,
+        std.mem.bytesAsValue(u16, row_data[0..2]).*,
+    );
+    if (magic != row_format_magic) return error.InvalidRowFormat;
+    if (row_data[2] != row_format_version) return error.UnsupportedRowVersion;
 }
 
 // --- Tests ---
@@ -652,4 +677,30 @@ test "addColumn returns NameBufferFull when name buffer is exhausted" {
 
     const result = schema.addColumn("y", .int, false);
     try testing.expectError(error.NameBufferFull, result);
+}
+
+test "decode rejects unsupported row format version" {
+    var schema = RowSchema{};
+    _ = try schema.addColumn("id", .bigint, false);
+
+    const values = [_]Value{.{ .bigint = 42 }};
+    var buf: [256]u8 = undefined;
+    const written = try encodeRow(&schema, &values, &buf);
+    buf[2] = row_format_version + 1;
+
+    const result = decodeColumnChecked(&schema, buf[0..written], 0);
+    try testing.expectError(error.UnsupportedRowVersion, result);
+}
+
+test "decode rejects invalid row format magic" {
+    var schema = RowSchema{};
+    _ = try schema.addColumn("id", .bigint, false);
+
+    const values = [_]Value{.{ .bigint = 42 }};
+    var buf: [256]u8 = undefined;
+    const written = try encodeRow(&schema, &values, &buf);
+    @memset(buf[0..2], 0);
+
+    const result = decodeColumnChecked(&schema, buf[0..written], 0);
+    try testing.expectError(error.InvalidRowFormat, result);
 }

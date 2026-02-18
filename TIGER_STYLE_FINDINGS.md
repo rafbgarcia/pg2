@@ -68,8 +68,10 @@ Refs: `src/executor/filter.zig`
 Notes: Replaced unchecked integer arithmetic with checked ops and explicit `error.NumericOverflow` handling (binary arithmetic, unary negate, `abs`), with regression tests for overflow edges.
 
 5. Persistent format versioning still incomplete outside WAL envelope.
-Status: `pending`
+Status: `partial`
 Refs: `src/storage/page.zig` and broader on-disk structs
+Notes: Added page-header on-disk format metadata (`format_version` + `format_magic`) with explicit deserialize validation and incompatibility tests; added row payload format header (`magic` + `version`) with checked decode validation tests.
+Remaining: extend explicit format-version metadata/validation to remaining on-disk structures (e.g., heap/btree payload-level metadata where needed).
 
 6. Static allocation/allocator sealing policy not yet enforced.
 Status: `pending`

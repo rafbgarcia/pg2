@@ -108,7 +108,7 @@ pub const BufferPool = struct {
         var raw: [page_size]u8 = undefined;
         self.storage.read(page_id, &raw) catch return error.StorageRead;
         frame.page = Page.deserialize(&raw) catch blk: {
-            // If checksum fails, the page might be new (all zeroes).
+            // If deserialize validation fails, the page might be new (all zeroes).
             // All-zero pages are valid — they're just uninitialized.
             const all_zero = for (raw) |b| {
                 if (b != 0) break false;

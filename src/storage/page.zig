@@ -15,16 +15,29 @@ pub const PageType = enum(u8) {
 ///
 /// Layout:
 ///   page_id:    u64  (bytes 0..8)
-///   page_type:  u8   (byte 8), padding 3 bytes (9..12)
+///   page_type:  u8   (byte 8)
+///   version:    u8   (byte 9)
+///   magic:      u16  (bytes 10..12)
 ///   lsn:        u64  (bytes 12..20)
 ///   checksum:   u32  (bytes 20..24)
 pub const PageHeader = struct {
     page_id: u64,
     page_type: PageType,
+    format_version: u8,
+    format_magic: u16,
     lsn: u64,
     checksum: u32,
 
     pub const size = 24;
+};
+
+pub const page_format_version: u8 = 1;
+pub const page_format_magic: u16 = 0x4732; // "G2"
+pub const PageDeserializeError = error{
+    ChecksumMismatch,
+    InvalidPageType,
+    InvalidPageFormat,
+    UnsupportedPageVersion,
 };
 
 /// Content area size after the header.
@@ -47,9 +60,16 @@ pub const Page = struct {
         buf[offset] = @intFromEnum(self.header.page_type);
         offset += 1;
 
-        // padding
-        @memset(buf[offset..][0..3], 0);
-        offset += 3;
+        // version
+        buf[offset] = self.header.format_version;
+        offset += 1;
+
+        // magic
+        @memcpy(
+            buf[offset..][0..2],
+            std.mem.asBytes(&std.mem.nativeToLittle(u16, self.header.format_magic)),
+        );
+        offset += 2;
 
         // lsn
         @memcpy(buf[offset..][0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, self.header.lsn)));
@@ -70,7 +90,7 @@ pub const Page = struct {
     }
 
     /// Deserialize a raw byte buffer into a Page. Returns error if checksum fails.
-    pub fn deserialize(buf: *const [page_size]u8) error{ChecksumMismatch}!Page {
+    pub fn deserialize(buf: *const [page_size]u8) PageDeserializeError!Page {
         // Read stored checksum.
         const stored_cksum = std.mem.littleToNative(u32, std.mem.bytesAsValue(u32, buf[20..24]).*);
 
@@ -84,13 +104,20 @@ pub const Page = struct {
         }
 
         const page_id = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, buf[0..8]).*);
-        const page_type: PageType = @enumFromInt(buf[8]);
+        const page_type = std.meta.intToEnum(PageType, buf[8]) catch
+            return error.InvalidPageType;
+        const format_version = buf[9];
+        const format_magic = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, buf[10..12]).*);
+        if (format_magic != page_format_magic) return error.InvalidPageFormat;
+        if (format_version != page_format_version) return error.UnsupportedPageVersion;
         const lsn = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, buf[12..20]).*);
 
         var page = Page{
             .header = .{
                 .page_id = page_id,
                 .page_type = page_type,
+                .format_version = format_version,
+                .format_magic = format_magic,
                 .lsn = lsn,
                 .checksum = stored_cksum,
             },
@@ -106,6 +133,8 @@ pub const Page = struct {
             .header = .{
                 .page_id = page_id,
                 .page_type = page_type,
+                .format_version = page_format_version,
+                .format_magic = page_format_magic,
                 .lsn = 0,
                 .checksum = 0,
             },
@@ -186,4 +215,31 @@ test "all page types roundtrip" {
         const restored = try Page.deserialize(&buf);
         try std.testing.expectEqual(pt, restored.header.page_type);
     }
+}
+
+test "reject page with unsupported format version" {
+    var page = Page.init(7, .heap);
+    var buf: [page_size]u8 = undefined;
+    page.serialize(&buf);
+
+    buf[9] = page_format_version + 1;
+    @memset(buf[20..24], 0);
+    const cksum = computeChecksum(&buf);
+    @memcpy(buf[20..24], std.mem.asBytes(&std.mem.nativeToLittle(u32, cksum)));
+
+    try std.testing.expectError(error.UnsupportedPageVersion, Page.deserialize(&buf));
+}
+
+test "reject page with invalid format magic" {
+    var page = Page.init(9, .heap);
+    var buf: [page_size]u8 = undefined;
+    page.serialize(&buf);
+
+    const bad_magic = std.mem.nativeToLittle(u16, @as(u16, 0x0000));
+    @memcpy(buf[10..12], std.mem.asBytes(&bad_magic));
+    @memset(buf[20..24], 0);
+    const cksum = computeChecksum(&buf);
+    @memcpy(buf[20..24], std.mem.asBytes(&std.mem.nativeToLittle(u32, cksum)));
+
+    try std.testing.expectError(error.InvalidPageFormat, Page.deserialize(&buf));
 }
