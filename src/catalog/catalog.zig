@@ -244,6 +244,35 @@ pub const Catalog = struct {
         return assoc_id;
     }
 
+    pub fn setAssociationKeys(
+        self: *Catalog,
+        model_id: ModelId,
+        assoc_id: AssociationId,
+        local_column_name: []const u8,
+        foreign_column_name: []const u8,
+    ) CatalogError!void {
+        if (self.sealed) return error.CatalogSealed;
+        std.debug.assert(model_id < self.model_count);
+        var model = &self.models[model_id];
+        std.debug.assert(assoc_id < model.association_count);
+        const assoc = &model.associations[assoc_id];
+        const target_model_id = if (assoc.target_model_id != null_model)
+            assoc.target_model_id
+        else blk: {
+            const target_name = self.getName(
+                assoc.target_model_name_offset,
+                assoc.target_model_name_len,
+            );
+            break :blk self.findModel(target_name) orelse return error.ModelNotFound;
+        };
+        assoc.local_column_id = self.findColumn(model_id, local_column_name) orelse
+            return error.ColumnNotFound;
+        assoc.foreign_key_column_id = self.findColumn(
+            target_model_id,
+            foreign_column_name,
+        ) orelse return error.ColumnNotFound;
+    }
+
     pub fn addScope(
         self: *Catalog,
         model_id: ModelId,
@@ -383,6 +412,21 @@ pub const Catalog = struct {
                 const target_id = self.findModel(target_name) orelse
                     return error.ModelNotFound;
                 assoc.target_model_id = target_id;
+
+                if (assoc.local_column_id == null_column) {
+                    assoc.local_column_id = inferAssociationLocalKey(
+                        self,
+                        @intCast(mi),
+                        assoc,
+                    ) orelse return error.ColumnNotFound;
+                }
+                if (assoc.foreign_key_column_id == null_column) {
+                    assoc.foreign_key_column_id = inferAssociationForeignKey(
+                        self,
+                        @intCast(mi),
+                        assoc,
+                    ) orelse return error.ColumnNotFound;
+                }
             }
         }
     }
@@ -395,6 +439,85 @@ pub const Catalog = struct {
         model.columns[col_id].is_primary_key = true;
     }
 };
+
+fn inferAssociationLocalKey(
+    catalog: *const Catalog,
+    source_model_id: ModelId,
+    assoc: *const AssociationInfo,
+) ?ColumnId {
+    return switch (assoc.kind) {
+        .has_many, .has_one => findPrimaryKeyOrId(catalog, source_model_id),
+        .belongs_to => findModelForeignKey(
+            catalog,
+            source_model_id,
+            catalog.getModelName(assoc.target_model_id),
+        ),
+    };
+}
+
+fn inferAssociationForeignKey(
+    catalog: *const Catalog,
+    source_model_id: ModelId,
+    assoc: *const AssociationInfo,
+) ?ColumnId {
+    return switch (assoc.kind) {
+        .has_many, .has_one => findModelForeignKey(
+            catalog,
+            assoc.target_model_id,
+            catalog.getModelName(source_model_id),
+        ),
+        .belongs_to => findPrimaryKeyOrId(catalog, assoc.target_model_id),
+    };
+}
+
+fn findPrimaryKeyOrId(
+    catalog: *const Catalog,
+    model_id: ModelId,
+) ?ColumnId {
+    const model = &catalog.models[model_id];
+    var i: ColumnId = 0;
+    while (i < model.column_count) : (i += 1) {
+        if (model.columns[i].is_primary_key) return i;
+    }
+    return catalog.findColumn(model_id, "id");
+}
+
+fn findModelForeignKey(
+    catalog: *const Catalog,
+    model_id: ModelId,
+    base_model_name: []const u8,
+) ?ColumnId {
+    var buf: [96]u8 = undefined;
+    const key_name = modelForeignKeyName(base_model_name, &buf) orelse
+        return null;
+    return catalog.findColumn(model_id, key_name);
+}
+
+fn modelForeignKeyName(
+    model_name: []const u8,
+    out: []u8,
+) ?[]const u8 {
+    var write_idx: usize = 0;
+    var prev_was_lower = false;
+    for (model_name, 0..) |ch, i| {
+        const is_upper = std.ascii.isUpper(ch);
+        if (is_upper and i > 0 and prev_was_lower) {
+            if (write_idx >= out.len) return null;
+            out[write_idx] = '_';
+            write_idx += 1;
+        }
+        if (write_idx >= out.len) return null;
+        out[write_idx] = std.ascii.toLower(ch);
+        write_idx += 1;
+        prev_was_lower = std.ascii.isLower(ch);
+    }
+    if (write_idx + 3 > out.len) return null;
+    out[write_idx] = '_';
+    out[write_idx + 1] = 'i';
+    out[write_idx + 2] = 'd';
+    write_idx += 3;
+    return out[0..write_idx];
+}
 
 // --- Tests ---
 
@@ -455,7 +578,9 @@ test "add and find index" {
 test "add and find association" {
     var cat = Catalog{};
     const uid = try cat.addModel("User");
-    _ = try cat.addModel("Post");
+    _ = try cat.addColumn(uid, "id", .bigint, false);
+    const post_id = try cat.addModel("Post");
+    _ = try cat.addColumn(post_id, "user_id", .bigint, false);
 
     const assoc = try cat.addAssociation(uid, "posts", .has_many, "Post");
     try testing.expectEqual(@as(AssociationId, 0), assoc);
@@ -525,4 +650,50 @@ test "resolve missing association target fails" {
     const uid = try cat.addModel("User");
     _ = try cat.addAssociation(uid, "posts", .has_many, "Post");
     try testing.expectError(error.ModelNotFound, cat.resolveAssociations());
+}
+
+test "resolve associations infers default key columns" {
+    var cat = Catalog{};
+    const user_id = try cat.addModel("User");
+    const user_pk = try cat.addColumn(user_id, "id", .bigint, false);
+    cat.setColumnPrimaryKey(user_id, user_pk);
+
+    const post_id = try cat.addModel("Post");
+    _ = try cat.addColumn(post_id, "id", .bigint, false);
+    const post_fk = try cat.addColumn(post_id, "user_id", .bigint, false);
+
+    _ = try cat.addAssociation(user_id, "posts", .has_many, "Post");
+    try cat.resolveAssociations();
+
+    const assoc = cat.models[user_id].associations[0];
+    try testing.expectEqual(user_pk, assoc.local_column_id);
+    try testing.expectEqual(post_fk, assoc.foreign_key_column_id);
+}
+
+test "resolve associations keeps explicit key metadata" {
+    var cat = Catalog{};
+    const user_id = try cat.addModel("User");
+    _ = try cat.addColumn(user_id, "id", .bigint, false);
+
+    const post_id = try cat.addModel("Post");
+    _ = try cat.addColumn(post_id, "id", .bigint, false);
+    const owner_fk = try cat.addColumn(post_id, "owner_id", .bigint, false);
+
+    const assoc_id = try cat.addAssociation(user_id, "posts", .has_many, "Post");
+    try cat.setAssociationKeys(user_id, assoc_id, "id", "owner_id");
+    try cat.resolveAssociations();
+
+    const assoc = cat.models[user_id].associations[assoc_id];
+    try testing.expectEqual(@as(ColumnId, 0), assoc.local_column_id);
+    try testing.expectEqual(owner_fk, assoc.foreign_key_column_id);
+}
+
+test "resolve associations fails when inferred key columns are missing" {
+    var cat = Catalog{};
+    const user_id = try cat.addModel("User");
+    _ = try cat.addColumn(user_id, "pk", .bigint, false);
+
+    _ = try cat.addModel("Post");
+    _ = try cat.addAssociation(user_id, "posts", .has_many, "Post");
+    try testing.expectError(error.ColumnNotFound, cat.resolveAssociations());
 }

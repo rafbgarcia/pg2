@@ -483,93 +483,20 @@ fn inferAssociationJoinDescriptor(
     assoc: *const AssociationInfo,
     result: *QueryResult,
 ) ?JoinDescriptor {
-    switch (assoc.kind) {
-        .has_many, .has_one => {
-            const left_key = findPrimaryKeyOrId(catalog, source_model_id) orelse {
-                setError(result, "association local key not found");
-                return null;
-            };
-            const right_key = findModelForeignKey(
-                catalog,
-                assoc.target_model_id,
-                catalog.getModelName(source_model_id),
-            ) orelse {
-                setError(result, "association foreign key not found");
-                return null;
-            };
-            return .{
-                .left_key_index = left_key,
-                .right_key_index = right_key,
-            };
-        },
-        .belongs_to => {
-            const left_key = findModelForeignKey(
-                catalog,
-                source_model_id,
-                catalog.getModelName(assoc.target_model_id),
-            ) orelse {
-                setError(result, "association foreign key not found");
-                return null;
-            };
-            const right_key = findPrimaryKeyOrId(catalog, assoc.target_model_id) orelse {
-                setError(result, "association target key not found");
-                return null;
-            };
-            return .{
-                .left_key_index = left_key,
-                .right_key_index = right_key,
-            };
-        },
-    }
-}
-
-fn findPrimaryKeyOrId(
-    catalog: *const Catalog,
-    model_id: ModelId,
-) ?u16 {
-    const model = &catalog.models[model_id];
-    var i: u16 = 0;
-    while (i < model.column_count) : (i += 1) {
-        if (model.columns[i].is_primary_key) return i;
-    }
-    return catalog.findColumn(model_id, "id");
-}
-
-fn findModelForeignKey(
-    catalog: *const Catalog,
-    model_id: ModelId,
-    base_model_name: []const u8,
-) ?u16 {
-    var buf: [96]u8 = undefined;
-    const key_name = modelForeignKeyName(base_model_name, &buf) orelse
+    _ = catalog;
+    _ = source_model_id;
+    if (assoc.local_column_id == catalog_mod.null_column) {
+        setError(result, "association local key not configured");
         return null;
-    return catalog.findColumn(model_id, key_name);
-}
-
-fn modelForeignKeyName(
-    model_name: []const u8,
-    out: []u8,
-) ?[]const u8 {
-    var write_idx: usize = 0;
-    var prev_was_lower = false;
-    for (model_name, 0..) |ch, i| {
-        const is_upper = std.ascii.isUpper(ch);
-        if (is_upper and i > 0 and prev_was_lower) {
-            if (write_idx >= out.len) return null;
-            out[write_idx] = '_';
-            write_idx += 1;
-        }
-        if (write_idx >= out.len) return null;
-        out[write_idx] = std.ascii.toLower(ch);
-        write_idx += 1;
-        prev_was_lower = std.ascii.isLower(ch) or std.ascii.isDigit(ch);
     }
-    if (write_idx + 3 > out.len) return null;
-    out[write_idx] = '_';
-    out[write_idx + 1] = 'i';
-    out[write_idx + 2] = 'd';
-    write_idx += 3;
-    return out[0..write_idx];
+    if (assoc.foreign_key_column_id == catalog_mod.null_column) {
+        setError(result, "association foreign key not configured");
+        return null;
+    }
+    return .{
+        .left_key_index = assoc.local_column_id,
+        .right_key_index = assoc.foreign_key_column_id,
+    };
 }
 
 /// Filter rows in-place using a where predicate.
@@ -2238,6 +2165,69 @@ test "execute nested relation fails closed when association is missing" {
         msg,
         "nested relation association not found",
     ) != null);
+}
+
+test "execute nested relation uses explicit association keys" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const post_model = try env.catalog.addModel("Post");
+    _ = try env.catalog.addColumn(post_model, "id", .bigint, false);
+    _ = try env.catalog.addColumn(post_model, "owner_user", .bigint, false);
+    env.catalog.models[post_model].heap_first_page_id = 122;
+    env.catalog.models[post_model].total_pages = 1;
+
+    const assoc_id = try env.catalog.addAssociation(
+        env.model_id,
+        "posts",
+        AssociationKind.has_many,
+        "Post",
+    );
+    try env.catalog.setAssociationKeys(
+        env.model_id,
+        assoc_id,
+        "id",
+        "owner_user",
+    );
+    try env.catalog.resolveAssociations();
+
+    const post_page = try env.pool.pin(122);
+    heap_mod.HeapPage.init(post_page);
+    env.pool.unpin(122, true);
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const inserts = [_][]const u8{
+        "User |> insert(id = 1, name = \"Alice\", active = true)",
+        "User |> insert(id = 2, name = \"Bob\", active = true)",
+        "Post |> insert(id = 20, owner_user = 1)",
+        "Post |> insert(id = 15, owner_user = 2)",
+    };
+    for (inserts) |src| {
+        const tok = tokenizer_mod.tokenize(src);
+        const p = parser_mod.parse(&tok, src);
+        try testing.expect(!p.has_error);
+        var r = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+        defer r.deinit();
+        try testing.expect(!r.has_error);
+    }
+
+    const src = "User |> sort(id asc) { id posts |> sort(id asc) { id } }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(@as(u16, 2), result.row_count);
+    try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].bigint);
+    try testing.expectEqual(@as(i64, 20), result.rows[0].values[3].bigint);
+    try testing.expectEqual(@as(i64, 2), result.rows[1].values[0].bigint);
+    try testing.expectEqual(@as(i64, 15), result.rows[1].values[3].bigint);
 }
 
 test "execute delete via pipeline" {
