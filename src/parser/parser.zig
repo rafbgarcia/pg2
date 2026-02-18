@@ -14,6 +14,7 @@ const TokenizeResult = tokenizer_mod.TokenizeResult;
 const max_nesting_depth = 16;
 const sort_key_desc_mask: u16 = 0x0001;
 const sort_key_expr_mask: u16 = 0x8000;
+const null_token_index: u16 = std.math.maxInt(u16);
 
 pub const ParseError = error{
     AstFull,
@@ -929,23 +930,94 @@ fn parseSchemaIndex(
     tag: NodeTag,
 ) ParseError!NodeResult {
     var pos = start_pos + 1;
+    var index_name_tok: u16 = null_token_index;
+    var index_tag = tag;
 
     var first_col: NodeIndex = null_node;
     var last_col: NodeIndex = null_node;
-    while (pos < tokens.count and tokens.tokens[pos].token_type == .identifier) {
-        const col_node = try ast.addNode(.expr_column_ref, .{ .token = pos });
+
+    if (pos < tokens.count and tokens.tokens[pos].token_type == .left_paren) {
         pos += 1;
-        if (first_col == null_node) {
-            first_col = col_node;
-            last_col = col_node;
-        } else {
-            ast.setNext(last_col, col_node);
-            last_col = col_node;
+        if (pos >= tokens.count or tokens.tokens[pos].token_type != .identifier) {
+            return error.UnexpectedToken;
         }
-        if (pos < tokens.count and tokens.tokens[pos].token_type == .comma) pos += 1;
+        index_name_tok = pos;
+        pos += 1;
+        if (pos >= tokens.count or tokens.tokens[pos].token_type != .comma) {
+            return error.UnexpectedToken;
+        }
+        pos += 1;
+        if (pos >= tokens.count or tokens.tokens[pos].token_type != .left_bracket) {
+            return error.UnexpectedToken;
+        }
+        pos += 1;
+
+        var expect_column = true;
+        while (pos < tokens.count and tokens.tokens[pos].token_type != .right_bracket) {
+            const tt = tokens.tokens[pos].token_type;
+            if (expect_column) {
+                if (tt != .identifier) return error.UnexpectedToken;
+                const col_node = try ast.addNode(.expr_column_ref, .{ .token = pos });
+                pos += 1;
+                if (first_col == null_node) {
+                    first_col = col_node;
+                    last_col = col_node;
+                } else {
+                    ast.setNext(last_col, col_node);
+                    last_col = col_node;
+                }
+                expect_column = false;
+                continue;
+            }
+            if (tt == .comma) {
+                pos += 1;
+                expect_column = true;
+                continue;
+            }
+            return error.UnexpectedToken;
+        }
+
+        if (first_col == null_node) return error.UnexpectedToken;
+        if (expect_column) return error.UnexpectedToken;
+        if (pos >= tokens.count or tokens.tokens[pos].token_type != .right_bracket) {
+            return error.UnexpectedToken;
+        }
+        pos += 1;
+
+        if (pos < tokens.count and tokens.tokens[pos].token_type == .comma) {
+            pos += 1;
+            if (pos >= tokens.count or tokens.tokens[pos].token_type != .kw_unique) {
+                return error.UnexpectedToken;
+            }
+            if (tag == .schema_index) index_tag = .schema_unique_index;
+            pos += 1;
+        }
+
+        if (pos >= tokens.count or tokens.tokens[pos].token_type != .right_paren) {
+            return error.UnexpectedToken;
+        }
+        pos += 1;
+    } else {
+        while (pos < tokens.count and tokens.tokens[pos].token_type == .identifier) {
+            const col_node = try ast.addNode(.expr_column_ref, .{ .token = pos });
+            pos += 1;
+            if (first_col == null_node) {
+                first_col = col_node;
+                last_col = col_node;
+            } else {
+                ast.setNext(last_col, col_node);
+                last_col = col_node;
+            }
+            if (pos < tokens.count and tokens.tokens[pos].token_type == .comma) pos += 1;
+        }
     }
 
-    const node = try ast.addNode(tag, .{ .unary = first_col });
+    const node = try ast.addNodeFull(
+        index_tag,
+        .{ .unary = first_col },
+        index_name_tok,
+        null_node,
+    );
     return .{ .node = node, .pos = pos };
 }
 
@@ -1151,4 +1223,53 @@ test "parse reference syntax in schema" {
     const tokens = tokenizer_mod.tokenize(source);
     const result = parse(&tokens, source);
     try testing.expect(!result.has_error);
+}
+
+test "parse parenthesized index syntax in schema" {
+    const source =
+        \\User {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(email, string, notNull)
+        \\  index(idx_email, [email], unique)
+        \\}
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(!result.has_error);
+}
+
+test "parse schema index rejects empty field array" {
+    const source =
+        \\User {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  index(idx_empty, [], unique)
+        \\}
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(result.has_error);
+}
+
+test "parse schema index rejects missing field array brackets" {
+    const source =
+        \\User {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  index(idx_email, email, unique)
+        \\}
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(result.has_error);
+}
+
+test "parse schema index rejects trailing comma in field array" {
+    const source =
+        \\User {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  index(idx_email, [email,], unique)
+        \\}
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(result.has_error);
 }
