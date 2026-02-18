@@ -688,8 +688,10 @@ test "WAL readFrom filters by LSN" {
     _ = try wal.commitTx(2);    // lsn 6
 
     // Read from LSN 4 onwards.
-    const records = try wal.readFrom(4, std.testing.allocator);
-    defer Wal.freeRecords(records, std.testing.allocator);
+    var records_buf: [8]Record = undefined;
+    var payload_buf: [64]u8 = undefined;
+    const decoded = try wal.readFromInto(4, &records_buf, &payload_buf);
+    const records = records_buf[0..decoded.records_len];
 
     try std.testing.expectEqual(@as(usize, 3), records.len);
     try std.testing.expectEqual(@as(u64, 4), records[0].lsn);
@@ -716,8 +718,10 @@ test "WAL survives crash after flush" {
     defer wal2.deinit();
     try wal2.recover();
 
-    const records = try wal2.readFrom(1, std.testing.allocator);
-    defer Wal.freeRecords(records, std.testing.allocator);
+    var records_buf: [8]Record = undefined;
+    var payload_buf: [64]u8 = undefined;
+    const decoded = try wal2.readFromInto(1, &records_buf, &payload_buf);
+    const records = records_buf[0..decoded.records_len];
 
     try std.testing.expectEqual(@as(usize, 3), records.len);
     try std.testing.expectEqual(RecordType.tx_begin, records[0].record_type);
@@ -747,8 +751,10 @@ test "WAL unflushed data lost on crash" {
     defer wal2.deinit();
     wal2.wal_page_offset = 1;
 
-    const records = try wal2.readFrom(1, std.testing.allocator);
-    defer Wal.freeRecords(records, std.testing.allocator);
+    var records_buf: [8]Record = undefined;
+    var payload_buf: [64]u8 = undefined;
+    const decoded = try wal2.readFromInto(1, &records_buf, &payload_buf);
+    const records = records_buf[0..decoded.records_len];
 
     try std.testing.expectEqual(@as(usize, 0), records.len);
 }
@@ -818,8 +824,10 @@ test "WAL spanning multiple pages" {
     }
     try wal.flush();
 
-    const records = try wal.readFrom(1, std.testing.allocator);
-    defer Wal.freeRecords(records, std.testing.allocator);
+    var records_buf: [128]Record = undefined;
+    var payload_buf: [24 * 1024]u8 = undefined;
+    const decoded = try wal.readFromInto(1, &records_buf, &payload_buf);
+    const records = records_buf[0..decoded.records_len];
 
     try std.testing.expectEqual(@as(usize, 100), records.len);
     try std.testing.expectEqual(@as(u64, 1), records[0].lsn);
@@ -850,8 +858,10 @@ test "WAL recover handles deterministic torn-write corruption" {
     defer recovered.deinit();
     try recovered.recover();
 
-    const records = try recovered.readFrom(1, std.testing.allocator);
-    defer Wal.freeRecords(records, std.testing.allocator);
+    var records_buf: [8]Record = undefined;
+    var payload_buf: [64]u8 = undefined;
+    const decoded = try recovered.readFromInto(1, &records_buf, &payload_buf);
+    const records = records_buf[0..decoded.records_len];
     try std.testing.expect(records.len <= 3);
 }
 
