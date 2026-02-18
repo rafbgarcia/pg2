@@ -41,6 +41,7 @@ pub const simulator = struct {
 
 pub const runtime = struct {
     pub const bootstrap = @import("runtime/bootstrap.zig");
+    pub const config = @import("runtime/config.zig");
 };
 
 pub const tiger = struct {
@@ -74,6 +75,7 @@ comptime {
     _ = simulator.clock;
     _ = simulator.fault_matrix;
     _ = runtime.bootstrap;
+    _ = runtime.config;
     _ = tiger.error_taxonomy;
     _ = tiger.static_allocator;
 }
