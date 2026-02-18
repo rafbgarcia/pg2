@@ -69,7 +69,7 @@ pub const AssociationInfo = struct {
     foreign_key_name_len: u16 = 0,
     foreign_key_column_id: ColumnId = null_column,
     local_column_id: ColumnId = null_column,
-    ri_mode: ReferentialIntegrityMode = .unspecified,
+    referential_integrity_mode: ReferentialIntegrityMode = .unspecified,
     on_delete: ReferentialAction = .unspecified,
     on_update: ReferentialAction = .unspecified,
 };
@@ -334,7 +334,7 @@ pub const Catalog = struct {
         var model = &self.models[model_id];
         std.debug.assert(assoc_id < model.association_count);
         const assoc = &model.associations[assoc_id];
-        assoc.ri_mode = mode;
+        assoc.referential_integrity_mode = mode;
         assoc.on_delete = on_delete;
         assoc.on_update = on_update;
     }
@@ -516,14 +516,14 @@ pub const Catalog = struct {
                     }
                 }
 
-                if (assoc.ri_mode == .with_referential_integrity) {
+                if (assoc.referential_integrity_mode == .with_referential_integrity) {
                     if (assoc.on_delete == .unspecified or
                         assoc.on_update == .unspecified)
                     {
                         return error.InvalidAssociationConfig;
                     }
                 }
-                if (assoc.ri_mode == .without_referential_integrity) {
+                if (assoc.referential_integrity_mode == .without_referential_integrity) {
                     if (assoc.on_delete != .unspecified or
                         assoc.on_update != .unspecified)
                     {

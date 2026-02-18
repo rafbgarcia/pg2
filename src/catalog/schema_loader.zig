@@ -454,14 +454,14 @@ test "load schema with reference and explicit RI config" {
     try testing.expectEqual(@as(u16, 1), user_posts.foreign_key_column_id);
     try testing.expectEqual(
         catalog_mod.ReferentialIntegrityMode.without_referential_integrity,
-        user_posts.ri_mode,
+        user_posts.referential_integrity_mode,
     );
 
     try testing.expectEqual(@as(u16, 1), post_author.local_column_id);
     try testing.expectEqual(@as(u16, 0), post_author.foreign_key_column_id);
     try testing.expectEqual(
         catalog_mod.ReferentialIntegrityMode.with_referential_integrity,
-        post_author.ri_mode,
+        post_author.referential_integrity_mode,
     );
     try testing.expectEqual(catalog_mod.ReferentialAction.restrict, post_author.on_delete);
     try testing.expectEqual(catalog_mod.ReferentialAction.cascade, post_author.on_update);

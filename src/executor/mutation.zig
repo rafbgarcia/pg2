@@ -498,7 +498,7 @@ fn enforceOutgoingReferentialIntegrity(
     var assoc_idx: u16 = 0;
     while (assoc_idx < model.association_count) : (assoc_idx += 1) {
         const assoc = &model.associations[assoc_idx];
-        if (assoc.ri_mode != .with_referential_integrity) continue;
+        if (assoc.referential_integrity_mode != .with_referential_integrity) continue;
         if (assoc.target_model_id == catalog_mod.null_model) {
             return error.ReferentialIntegrityViolation;
         }
@@ -540,7 +540,7 @@ fn enforceIncomingDeleteReferentialIntegrity(
         var assoc_idx: u16 = 0;
         while (assoc_idx < source_model.association_count) : (assoc_idx += 1) {
             const assoc = &source_model.associations[assoc_idx];
-            if (assoc.ri_mode != .with_referential_integrity) continue;
+            if (assoc.referential_integrity_mode != .with_referential_integrity) continue;
             if (assoc.target_model_id != target_model_id) continue;
             if (assoc.local_column_id == catalog_mod.null_column or
                 assoc.foreign_key_column_id == catalog_mod.null_column)
@@ -606,7 +606,7 @@ fn enforceIncomingUpdateReferentialIntegrity(
         var assoc_idx: u16 = 0;
         while (assoc_idx < source_model.association_count) : (assoc_idx += 1) {
             const assoc = &source_model.associations[assoc_idx];
-            if (assoc.ri_mode != .with_referential_integrity) continue;
+            if (assoc.referential_integrity_mode != .with_referential_integrity) continue;
             if (assoc.target_model_id != target_model_id) continue;
             if (assoc.local_column_id == catalog_mod.null_column or
                 assoc.foreign_key_column_id == catalog_mod.null_column)
