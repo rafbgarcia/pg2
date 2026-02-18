@@ -75,12 +75,14 @@ Notes: Added page-header on-disk format metadata (`format_version` + `format_mag
 6. Static allocation/allocator sealing policy not yet enforced.
 Status: `partial`
 Refs: runtime alloc paths across executor/storage/mvcc
-Notes: Removed hot-path dynamic allocator usage from B-tree split logic by using fixed-capacity split scratch buffers derived from page-size bounds (`src/storage/btree.zig`).
+Notes: Removed hot-path dynamic allocator usage from B-tree split logic by using fixed-capacity split scratch buffers derived from page-size bounds; removed `BTree` allocator dependency from runtime API/state after split-path sealing (`src/storage/btree.zig`).
 Remaining: apply similar allocator-sealing strategy across executor result buffering, WAL decode ownership, and other core runtime allocation paths.
 
 7. Deterministic fault injection matrix incomplete.
-Status: `pending`
+Status: `partial`
 Refs: `src/simulator/disk.zig`, simulation tests
+Notes: Added deterministic one-shot fault injection controls for Nth read/write/fsync in `SimulatedDisk` with regression tests for each path.
+Remaining: expand matrix to partial writes/bitflip corruption and end-to-end recovery scenarios using seeded schedules.
 
 ## Current Build State
 

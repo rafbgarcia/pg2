@@ -7,8 +7,8 @@ const page_size = io.page_size;
 /// buffer; only fsync persists them to the durable store. This accurately
 /// models real disk semantics where data can be lost on crash if not fsynced.
 ///
-/// Fault injection (partial writes, read errors, bit flips) is not yet
-/// implemented — this is the correct-behavior baseline.
+/// Fault injection supports deterministic one-shot failures on the Nth
+/// read/write/fsync operation.
 pub const SimulatedDisk = struct {
     /// Durable pages — survive crashes.
     pages: std.AutoHashMap(u64, [page_size]u8),
@@ -20,6 +20,9 @@ pub const SimulatedDisk = struct {
     reads: u64 = 0,
     writes: u64 = 0,
     fsyncs: u64 = 0,
+    fail_read_at: ?u64 = null,
+    fail_write_at: ?u64 = null,
+    fail_fsync_at: ?u64 = null,
 
     pub fn init(allocator: std.mem.Allocator) SimulatedDisk {
         return .{
@@ -50,6 +53,12 @@ pub const SimulatedDisk = struct {
     fn readImpl(ptr: *anyopaque, page_id: u64, buf: *[page_size]u8) io.StorageError!void {
         const self: *SimulatedDisk = @ptrCast(@alignCast(ptr));
         self.reads += 1;
+        if (self.fail_read_at) |n| {
+            if (self.reads == n) {
+                self.fail_read_at = null;
+                return error.ReadError;
+            }
+        }
 
         // Pending writes are visible to reads (models OS page cache behavior).
         if (self.pending.get(page_id)) |data| {
@@ -67,12 +76,24 @@ pub const SimulatedDisk = struct {
     fn writeImpl(ptr: *anyopaque, page_id: u64, data: *const [page_size]u8) io.StorageError!void {
         const self: *SimulatedDisk = @ptrCast(@alignCast(ptr));
         self.writes += 1;
+        if (self.fail_write_at) |n| {
+            if (self.writes == n) {
+                self.fail_write_at = null;
+                return error.WriteError;
+            }
+        }
         self.pending.put(page_id, data.*) catch return error.WriteError;
     }
 
     fn fsyncImpl(ptr: *anyopaque) io.StorageError!void {
         const self: *SimulatedDisk = @ptrCast(@alignCast(ptr));
         self.fsyncs += 1;
+        if (self.fail_fsync_at) |n| {
+            if (self.fsyncs == n) {
+                self.fail_fsync_at = null;
+                return error.FsyncError;
+            }
+        }
 
         // Move all pending writes to durable storage.
         var it = self.pending.iterator();
@@ -95,6 +116,24 @@ pub const SimulatedDisk = struct {
     /// Returns true if the page has a pending (unfsynced) write.
     pub fn hasPending(self: *SimulatedDisk, page_id: u64) bool {
         return self.pending.contains(page_id);
+    }
+
+    /// Inject a one-shot read failure on the Nth read operation.
+    pub fn failReadAt(self: *SimulatedDisk, n: u64) void {
+        std.debug.assert(n > 0);
+        self.fail_read_at = n;
+    }
+
+    /// Inject a one-shot write failure on the Nth write operation.
+    pub fn failWriteAt(self: *SimulatedDisk, n: u64) void {
+        std.debug.assert(n > 0);
+        self.fail_write_at = n;
+    }
+
+    /// Inject a one-shot fsync failure on the Nth fsync operation.
+    pub fn failFsyncAt(self: *SimulatedDisk, n: u64) void {
+        std.debug.assert(n > 0);
+        self.fail_fsync_at = n;
     }
 };
 
@@ -218,4 +257,49 @@ test "stats track operations" {
     try std.testing.expectEqual(@as(u64, 1), disk.reads);
     try std.testing.expectEqual(@as(u64, 1), disk.writes);
     try std.testing.expectEqual(@as(u64, 1), disk.fsyncs);
+}
+
+test "deterministic read failure injection" {
+    var disk = SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+    const s = disk.storage();
+
+    disk.failReadAt(1);
+    var buf: [page_size]u8 = undefined;
+    try std.testing.expectError(error.ReadError, s.read(0, &buf));
+
+    // One-shot failure should clear; second read succeeds.
+    try s.read(0, &buf);
+}
+
+test "deterministic write failure injection" {
+    var disk = SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+    const s = disk.storage();
+
+    disk.failWriteAt(1);
+    var data: [page_size]u8 = undefined;
+    @memset(&data, 0xAB);
+    try std.testing.expectError(error.WriteError, s.write(0, &data));
+
+    // One-shot failure should clear; second write succeeds.
+    try s.write(0, &data);
+}
+
+test "deterministic fsync failure injection" {
+    var disk = SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+    const s = disk.storage();
+
+    var data: [page_size]u8 = undefined;
+    @memset(&data, 0x11);
+    try s.write(0, &data);
+
+    disk.failFsyncAt(1);
+    try std.testing.expectError(error.FsyncError, s.fsync());
+    try std.testing.expect(disk.hasPending(0));
+
+    // One-shot failure should clear; next fsync succeeds and persists.
+    try s.fsync();
+    try std.testing.expect(disk.isDurable(0));
 }

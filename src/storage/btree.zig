@@ -399,20 +399,18 @@ const PathEntry = struct {
 };
 
 pub const BTree = struct {
-    allocator: std.mem.Allocator,
     root_page_id: u64,
     next_page_id: u64,
     pool: *BufferPool,
     wal: ?*Wal,
 
     /// Create a new B+ tree, allocating an empty root leaf page.
-    pub fn init(allocator: std.mem.Allocator, pool: *BufferPool, wal: ?*Wal, start_page_id: u64) BTreeError!BTree {
+    pub fn init(pool: *BufferPool, wal: ?*Wal, start_page_id: u64) BTreeError!BTree {
         const page = pool.pin(start_page_id) catch |e| return mapPoolError(e);
         LeafNode.init(page);
         pool.unpin(start_page_id, true);
 
         return .{
-            .allocator = allocator,
             .root_page_id = start_page_id,
             .next_page_id = start_page_id + 1,
             .pool = pool,
@@ -1377,7 +1375,7 @@ test "btree: empty find returns null" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
     const result = try tree.find("anything");
     try testing.expect(result == null);
 }
@@ -1390,7 +1388,7 @@ test "btree: corrupted leaf structure returns Corruption" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
     const root = try pool.pin(tree.root_page_id);
     // Break invariant: free_start must be >= leaf header size.
     writeU16(&root.content, 2, 0);
@@ -1408,7 +1406,7 @@ test "btree: invalid leaf format version returns Corruption" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
     const root = try pool.pin(tree.root_page_id);
     root.content[16] = LeafNode.format_version + 1;
     pool.unpin(tree.root_page_id, true);
@@ -1424,7 +1422,7 @@ test "btree: corrupted leaf cell pointer returns Corruption" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
     try tree.insert("k", RowId{ .page_id = 1, .slot = 1 });
 
     const root = try pool.pin(tree.root_page_id);
@@ -1443,7 +1441,7 @@ test "btree: corrupted internal key length returns Corruption" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
     const root = try pool.pin(tree.root_page_id);
     InternalNode.init(root);
     InternalNode.setLeftChild(&root.content, 1);
@@ -1467,7 +1465,7 @@ test "btree: invalid internal format magic returns Corruption" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
     const root = try pool.pin(tree.root_page_id);
     InternalNode.init(root);
     InternalNode.setLeftChild(&root.content, 1);
@@ -1490,7 +1488,7 @@ test "btree: traversal depth guard returns Corruption" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 32);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     var page_id: u64 = tree.root_page_id;
     var level: usize = 0;
@@ -1517,7 +1515,7 @@ test "btree: range scan sibling cycle returns Corruption" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     const leaf0 = try pool.pin(tree.root_page_id);
     LeafNode.init(leaf0);
@@ -1542,7 +1540,7 @@ test "btree: single insert and find" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     const rid = RowId{ .page_id = 10, .slot = 5 };
     try tree.insert("mykey", rid);
@@ -1561,7 +1559,7 @@ test "btree: multiple inserts and finds" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     try tree.insert("cherry", RowId{ .page_id = 1, .slot = 0 });
     try tree.insert("apple", RowId{ .page_id = 2, .slot = 0 });
@@ -1585,7 +1583,7 @@ test "btree: duplicate key returns error" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     try tree.insert("key", RowId{ .page_id = 0, .slot = 0 });
     const result = tree.insert("key", RowId{ .page_id = 1, .slot = 1 });
@@ -1602,7 +1600,7 @@ test "btree: leaf split on insert" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 32);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     // Insert enough keys to trigger a split. With 8-byte keys, ~370 fit per leaf.
     var buf: [8]u8 = undefined;
@@ -1634,7 +1632,7 @@ test "btree: multi-level splits with sequential inserts" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 64);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     const n: u64 = 2000;
     var buf: [8]u8 = undefined;
@@ -1664,7 +1662,7 @@ test "btree: reverse order inserts" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 64);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     const n: u64 = 1000;
     var buf: [8]u8 = undefined;
@@ -1699,7 +1697,7 @@ test "btree: insert then delete" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     try tree.insert("key1", RowId{ .page_id = 1, .slot = 0 });
     try tree.insert("key2", RowId{ .page_id = 2, .slot = 0 });
@@ -1717,7 +1715,7 @@ test "btree: delete non-existent key returns error" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     const result = tree.delete("nope");
     try testing.expectError(error.KeyNotFound, result);
@@ -1731,7 +1729,7 @@ test "btree: insert delete reinsert" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     try tree.insert("key", RowId{ .page_id = 1, .slot = 0 });
     try tree.delete("key");
@@ -1753,7 +1751,7 @@ test "btree: full range scan" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     try tree.insert("a", RowId{ .page_id = 1, .slot = 0 });
     try tree.insert("b", RowId{ .page_id = 2, .slot = 0 });
@@ -1779,7 +1777,7 @@ test "btree: bounded range scan" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     try tree.insert("a", RowId{ .page_id = 1, .slot = 0 });
     try tree.insert("b", RowId{ .page_id = 2, .slot = 0 });
@@ -1804,7 +1802,7 @@ test "btree: empty range scan" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     try tree.insert("a", RowId{ .page_id = 1, .slot = 0 });
     try tree.insert("c", RowId{ .page_id = 3, .slot = 0 });
@@ -1823,7 +1821,7 @@ test "btree: range scan across split pages" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 64);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     // Insert enough to cause splits.
     const n: u64 = 500;
@@ -1862,7 +1860,7 @@ test "btree: open-ended range scans" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     try tree.insert("a", RowId{ .page_id = 1, .slot = 0 });
     try tree.insert("b", RowId{ .page_id = 2, .slot = 0 });
@@ -1902,7 +1900,7 @@ test "btree: WAL records logged on insert" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, &wal, 0);
+    var tree = try BTree.init(&pool, &wal, 0);
 
     try tree.insert("key1", RowId{ .page_id = 1, .slot = 0 });
     try tree.insert("key2", RowId{ .page_id = 2, .slot = 0 });
@@ -1921,7 +1919,7 @@ test "btree: page LSN updated on insert" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, &wal, 0);
+    var tree = try BTree.init(&pool, &wal, 0);
 
     try tree.insert("key1", RowId{ .page_id = 1, .slot = 0 });
 
@@ -1945,7 +1943,7 @@ test "btree: survives buffer pool eviction and reload" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     // Insert enough keys to use many pages (triggering evictions).
     var buf: [8]u8 = undefined;
@@ -1987,7 +1985,7 @@ test "btree: range scan keeps current leaf pinned" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     try tree.insert("a", RowId{ .page_id = 1, .slot = 0 });
     try tree.insert("b", RowId{ .page_id = 2, .slot = 0 });
@@ -2010,7 +2008,7 @@ test "btree: range scan close unpins page" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    var tree = try BTree.init(&pool, null, 0);
 
     try tree.insert("a", RowId{ .page_id = 1, .slot = 0 });
 
@@ -2034,7 +2032,7 @@ test "btree: no WAL record on failed delete" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, &wal, 0);
+    var tree = try BTree.init(&pool, &wal, 0);
 
     const before = wal.records_written;
     const result = tree.delete("nonexistent");
@@ -2054,7 +2052,7 @@ test "btree: no spurious WAL record on split" {
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 32);
     defer pool.deinit();
 
-    var tree = try BTree.init(testing.allocator, &pool, &wal, 0);
+    var tree = try BTree.init(&pool, &wal, 0);
 
     // Fill a leaf to capacity. Each insert produces exactly one btree_insert WAL record.
     var buf: [8]u8 = undefined;
