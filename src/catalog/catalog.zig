@@ -28,6 +28,20 @@ pub const AssociationKind = enum(u8) {
     belongs_to,
 };
 
+pub const ReferentialIntegrityMode = enum(u8) {
+    unspecified,
+    with_referential_integrity,
+    without_referential_integrity,
+};
+
+pub const ReferentialAction = enum(u8) {
+    unspecified,
+    restrict,
+    cascade,
+    set_null,
+    set_default,
+};
+
 pub const IndexInfo = struct {
     name_offset: u32,
     name_len: u16,
@@ -49,8 +63,15 @@ pub const AssociationInfo = struct {
     target_model_id: ModelId = null_model,
     target_model_name_offset: u32 = 0,
     target_model_name_len: u16 = 0,
+    local_key_name_offset: u32 = 0,
+    local_key_name_len: u16 = 0,
+    foreign_key_name_offset: u32 = 0,
+    foreign_key_name_len: u16 = 0,
     foreign_key_column_id: ColumnId = null_column,
     local_column_id: ColumnId = null_column,
+    ri_mode: ReferentialIntegrityMode = .unspecified,
+    on_delete: ReferentialAction = .unspecified,
+    on_update: ReferentialAction = .unspecified,
 };
 
 pub const ScopeInfo = struct {
@@ -105,6 +126,7 @@ pub const CatalogError = error{
     DuplicateName,
     ModelNotFound,
     ColumnNotFound,
+    InvalidAssociationConfig,
 };
 
 pub const Catalog = struct {
@@ -256,6 +278,12 @@ pub const Catalog = struct {
         var model = &self.models[model_id];
         std.debug.assert(assoc_id < model.association_count);
         const assoc = &model.associations[assoc_id];
+        const local_stored = try self.storeName(local_column_name);
+        assoc.local_key_name_offset = local_stored.offset;
+        assoc.local_key_name_len = local_stored.len;
+        const foreign_stored = try self.storeName(foreign_column_name);
+        assoc.foreign_key_name_offset = foreign_stored.offset;
+        assoc.foreign_key_name_len = foreign_stored.len;
         const target_model_id = if (assoc.target_model_id != null_model)
             assoc.target_model_id
         else blk: {
@@ -271,6 +299,44 @@ pub const Catalog = struct {
             target_model_id,
             foreign_column_name,
         ) orelse return error.ColumnNotFound;
+    }
+
+    pub fn setAssociationKeyNames(
+        self: *Catalog,
+        model_id: ModelId,
+        assoc_id: AssociationId,
+        local_column_name: []const u8,
+        foreign_column_name: []const u8,
+    ) CatalogError!void {
+        if (self.sealed) return error.CatalogSealed;
+        std.debug.assert(model_id < self.model_count);
+        var model = &self.models[model_id];
+        std.debug.assert(assoc_id < model.association_count);
+        const assoc = &model.associations[assoc_id];
+        const local_stored = try self.storeName(local_column_name);
+        assoc.local_key_name_offset = local_stored.offset;
+        assoc.local_key_name_len = local_stored.len;
+        const foreign_stored = try self.storeName(foreign_column_name);
+        assoc.foreign_key_name_offset = foreign_stored.offset;
+        assoc.foreign_key_name_len = foreign_stored.len;
+    }
+
+    pub fn setAssociationReferentialIntegrity(
+        self: *Catalog,
+        model_id: ModelId,
+        assoc_id: AssociationId,
+        mode: ReferentialIntegrityMode,
+        on_delete: ReferentialAction,
+        on_update: ReferentialAction,
+    ) CatalogError!void {
+        if (self.sealed) return error.CatalogSealed;
+        std.debug.assert(model_id < self.model_count);
+        var model = &self.models[model_id];
+        std.debug.assert(assoc_id < model.association_count);
+        const assoc = &model.associations[assoc_id];
+        assoc.ri_mode = mode;
+        assoc.on_delete = on_delete;
+        assoc.on_update = on_update;
     }
 
     pub fn addScope(
@@ -414,18 +480,55 @@ pub const Catalog = struct {
                 assoc.target_model_id = target_id;
 
                 if (assoc.local_column_id == null_column) {
-                    assoc.local_column_id = inferAssociationLocalKey(
-                        self,
-                        @intCast(mi),
-                        assoc,
-                    ) orelse return error.ColumnNotFound;
+                    if (assoc.local_key_name_len > 0) {
+                        const local_name = self.getName(
+                            assoc.local_key_name_offset,
+                            assoc.local_key_name_len,
+                        );
+                        assoc.local_column_id = self.findColumn(
+                            @intCast(mi),
+                            local_name,
+                        ) orelse return error.ColumnNotFound;
+                    } else {
+                        assoc.local_column_id = inferAssociationLocalKey(
+                            self,
+                            @intCast(mi),
+                            assoc,
+                        ) orelse return error.ColumnNotFound;
+                    }
                 }
                 if (assoc.foreign_key_column_id == null_column) {
-                    assoc.foreign_key_column_id = inferAssociationForeignKey(
-                        self,
-                        @intCast(mi),
-                        assoc,
-                    ) orelse return error.ColumnNotFound;
+                    if (assoc.foreign_key_name_len > 0) {
+                        const foreign_name = self.getName(
+                            assoc.foreign_key_name_offset,
+                            assoc.foreign_key_name_len,
+                        );
+                        assoc.foreign_key_column_id = self.findColumn(
+                            target_id,
+                            foreign_name,
+                        ) orelse return error.ColumnNotFound;
+                    } else {
+                        assoc.foreign_key_column_id = inferAssociationForeignKey(
+                            self,
+                            @intCast(mi),
+                            assoc,
+                        ) orelse return error.ColumnNotFound;
+                    }
+                }
+
+                if (assoc.ri_mode == .with_referential_integrity) {
+                    if (assoc.on_delete == .unspecified or
+                        assoc.on_update == .unspecified)
+                    {
+                        return error.InvalidAssociationConfig;
+                    }
+                }
+                if (assoc.ri_mode == .without_referential_integrity) {
+                    if (assoc.on_delete != .unspecified or
+                        assoc.on_update != .unspecified)
+                    {
+                        return error.InvalidAssociationConfig;
+                    }
                 }
             }
         }

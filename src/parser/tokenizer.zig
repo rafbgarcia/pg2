@@ -40,6 +40,17 @@ pub const TokenType = enum(u8) {
     kw_index,
     kw_unique_index,
     kw_scope,
+    kw_reference,
+    kw_with_referential_integrity,
+    kw_without_referential_integrity,
+    kw_on_delete_restrict,
+    kw_on_delete_cascade,
+    kw_on_delete_set_null,
+    kw_on_delete_set_default,
+    kw_on_update_restrict,
+    kw_on_update_cascade,
+    kw_on_update_set_null,
+    kw_on_update_set_default,
 
     // Keywords — control
     kw_let,
@@ -350,6 +361,17 @@ fn classifyWord(text: []const u8, starts_upper: bool) TokenType {
         .{ .word = "index", .tok = .kw_index },
         .{ .word = "uniqueIndex", .tok = .kw_unique_index },
         .{ .word = "scope", .tok = .kw_scope },
+        .{ .word = "reference", .tok = .kw_reference },
+        .{ .word = "withReferentialIntegrity", .tok = .kw_with_referential_integrity },
+        .{ .word = "withoutReferentialIntegrity", .tok = .kw_without_referential_integrity },
+        .{ .word = "onDeleteRestrict", .tok = .kw_on_delete_restrict },
+        .{ .word = "onDeleteCascade", .tok = .kw_on_delete_cascade },
+        .{ .word = "onDeleteSetNull", .tok = .kw_on_delete_set_null },
+        .{ .word = "onDeleteSetDefault", .tok = .kw_on_delete_set_default },
+        .{ .word = "onUpdateRestrict", .tok = .kw_on_update_restrict },
+        .{ .word = "onUpdateCascade", .tok = .kw_on_update_cascade },
+        .{ .word = "onUpdateSetNull", .tok = .kw_on_update_set_null },
+        .{ .word = "onUpdateSetDefault", .tok = .kw_on_update_set_default },
         .{ .word = "let", .tok = .kw_let },
         .{ .word = "fn", .tok = .kw_fn },
         .{ .word = "pipe", .tok = .kw_pipe },
@@ -596,4 +618,15 @@ test "type keywords" {
     try testing.expectEqual(TokenType.kw_boolean, result.tokens[3].token_type);
     try testing.expectEqual(TokenType.kw_string, result.tokens[4].token_type);
     try testing.expectEqual(TokenType.kw_timestamp, result.tokens[5].token_type);
+}
+
+test "reference and RI keywords" {
+    const source =
+        "reference withReferentialIntegrity withoutReferentialIntegrity onDeleteRestrict onUpdateCascade";
+    const result = tokenize(source);
+    try testing.expectEqual(TokenType.kw_reference, result.tokens[0].token_type);
+    try testing.expectEqual(TokenType.kw_with_referential_integrity, result.tokens[1].token_type);
+    try testing.expectEqual(TokenType.kw_without_referential_integrity, result.tokens[2].token_type);
+    try testing.expectEqual(TokenType.kw_on_delete_restrict, result.tokens[3].token_type);
+    try testing.expectEqual(TokenType.kw_on_update_cascade, result.tokens[4].token_type);
 }

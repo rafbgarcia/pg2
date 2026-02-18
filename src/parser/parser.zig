@@ -167,6 +167,7 @@ fn isSchemaKeyword(tok_type: TokenType) bool {
         .kw_index,
         .kw_unique_index,
         .kw_scope,
+        .kw_reference,
         => true,
         else => false,
     };
@@ -704,6 +705,7 @@ fn parseSchemaMember(
     if (tok_type == .kw_belongs_to) return parseSchemaRelation(ast, tokens, pos, .schema_belongs_to);
     if (tok_type == .kw_index) return parseSchemaIndex(ast, tokens, pos, .schema_index);
     if (tok_type == .kw_unique_index) return parseSchemaIndex(ast, tokens, pos, .schema_unique_index);
+    if (tok_type == .kw_reference) return parseSchemaReference(ast, tokens, pos);
 
     if (tok_type == .kw_scope) {
         pos += 1;
@@ -743,26 +745,51 @@ fn parseSchemaField(
     start_pos: u16,
 ) ParseError!NodeResult {
     var pos = start_pos + 1; // skip 'field'
+    var has_parens = false;
+
+    if (pos < tokens.count and tokens.tokens[pos].token_type == .left_paren) {
+        has_parens = true;
+        pos += 1;
+    }
 
     if (pos >= tokens.count) return error.UnexpectedToken;
     const name_tok = pos;
     pos += 1;
+    if (has_parens) {
+        if (pos >= tokens.count or tokens.tokens[pos].token_type != .comma) {
+            return error.UnexpectedToken;
+        }
+        pos += 1;
+    }
 
     if (pos >= tokens.count) return error.UnexpectedToken;
     const type_tok = pos;
     pos += 1;
 
-    // Parse optional constraints.
+    // Parse optional constraints/modifiers.
     while (pos < tokens.count) {
         const ct = tokens.tokens[pos].token_type;
+        if (ct == .comma) {
+            pos += 1;
+            continue;
+        }
         if (ct == .kw_primary_key or ct == .kw_not_null) {
             pos += 1;
-        } else if (ct == .kw_default) {
-            pos += 1;
-            if (pos < tokens.count) pos += 1; // skip default value
-        } else {
-            break;
+            continue;
         }
+        if (ct == .kw_default) {
+            pos += 1;
+            if (pos < tokens.count) pos += 1; // default value token
+            continue;
+        }
+        break;
+    }
+
+    if (has_parens) {
+        if (pos >= tokens.count or tokens.tokens[pos].token_type != .right_paren) {
+            return error.UnexpectedToken;
+        }
+        pos += 1;
     }
 
     const node = try ast.addNodeFull(
@@ -784,6 +811,115 @@ fn parseSchemaRelation(
     if (pos >= tokens.count) return error.UnexpectedToken;
     const node = try ast.addNode(tag, .{ .token = pos });
     return .{ .node = node, .pos = pos + 1 };
+}
+
+fn parseSchemaReference(
+    ast: *Ast,
+    tokens: *const TokenizeResult,
+    start_pos: u16,
+) ParseError!NodeResult {
+    var pos = start_pos + 1; // skip 'reference'
+    if (pos >= tokens.count or tokens.tokens[pos].token_type != .left_paren) {
+        return error.UnexpectedToken;
+    }
+    pos += 1;
+
+    var first_payload: NodeIndex = null_node;
+
+    const alias_tok = pos;
+    if (tokens.tokens[pos].token_type != .identifier) return error.UnexpectedToken;
+    pos += 1;
+    if (tokens.tokens[pos].token_type != .comma) return error.UnexpectedToken;
+    pos += 1;
+
+    const local_field_tok = pos;
+    if (tokens.tokens[pos].token_type != .identifier) return error.UnexpectedToken;
+    pos += 1;
+    if (tokens.tokens[pos].token_type != .comma) return error.UnexpectedToken;
+    pos += 1;
+
+    const target_model_tok = pos;
+    if (tokens.tokens[pos].token_type != .model_name and
+        tokens.tokens[pos].token_type != .identifier)
+    {
+        return error.UnexpectedToken;
+    }
+    pos += 1;
+    if (tokens.tokens[pos].token_type != .dot) return error.UnexpectedToken;
+    pos += 1;
+    const target_field_tok = pos;
+    if (tokens.tokens[pos].token_type != .identifier) return error.UnexpectedToken;
+    pos += 1;
+    if (tokens.tokens[pos].token_type != .comma) return error.UnexpectedToken;
+    pos += 1;
+
+    const ri_mode_tok = pos;
+    if (tokens.tokens[pos].token_type == .kw_without_referential_integrity) {
+        pos += 1;
+    } else if (tokens.tokens[pos].token_type == .kw_with_referential_integrity) {
+        pos += 1;
+        if (tokens.tokens[pos].token_type != .left_paren) return error.UnexpectedToken;
+        pos += 1;
+        const on_delete_tok = pos;
+        if (!isOnDeleteAction(tokens.tokens[pos].token_type)) return error.UnexpectedToken;
+        pos += 1;
+        if (tokens.tokens[pos].token_type != .comma) return error.UnexpectedToken;
+        pos += 1;
+        const on_update_tok = pos;
+        if (!isOnUpdateAction(tokens.tokens[pos].token_type)) return error.UnexpectedToken;
+        pos += 1;
+        if (tokens.tokens[pos].token_type != .right_paren) return error.UnexpectedToken;
+        pos += 1;
+
+        const on_delete_node = try ast.addNode(.expr_literal, .{ .token = on_delete_tok });
+        const on_update_node = try ast.addNode(.expr_literal, .{ .token = on_update_tok });
+        ast.setNext(on_delete_node, on_update_node);
+        first_payload = on_delete_node;
+    } else {
+        return error.UnexpectedToken;
+    }
+
+    if (tokens.tokens[pos].token_type != .right_paren) return error.UnexpectedToken;
+    pos += 1;
+
+    const alias_node = try ast.addNode(.expr_literal, .{ .token = alias_tok });
+    const local_node = try ast.addNode(.expr_literal, .{ .token = local_field_tok });
+    const target_model_node = try ast.addNode(.expr_literal, .{ .token = target_model_tok });
+    const target_field_node = try ast.addNode(.expr_literal, .{ .token = target_field_tok });
+    const ri_mode_node = try ast.addNode(.expr_literal, .{ .token = ri_mode_tok });
+
+    ast.setNext(alias_node, local_node);
+    ast.setNext(local_node, target_model_node);
+    ast.setNext(target_model_node, target_field_node);
+    ast.setNext(target_field_node, ri_mode_node);
+    if (first_payload != null_node) {
+        ast.setNext(ri_mode_node, first_payload);
+    }
+
+    const node = try ast.addNode(.schema_reference, .{ .unary = alias_node });
+    return .{ .node = node, .pos = pos };
+}
+
+fn isOnDeleteAction(tok_type: TokenType) bool {
+    return switch (tok_type) {
+        .kw_on_delete_restrict,
+        .kw_on_delete_cascade,
+        .kw_on_delete_set_null,
+        .kw_on_delete_set_default,
+        => true,
+        else => false,
+    };
+}
+
+fn isOnUpdateAction(tok_type: TokenType) bool {
+    return switch (tok_type) {
+        .kw_on_update_restrict,
+        .kw_on_update_cascade,
+        .kw_on_update_set_null,
+        .kw_on_update_set_default,
+        => true,
+        else => false,
+    };
 }
 
 fn parseSchemaIndex(
@@ -993,6 +1129,23 @@ test "parse scope in schema" {
         \\  field id bigint primaryKey
         \\  field active boolean
         \\  scope active |> where(active = true)
+        \\}
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(!result.has_error);
+}
+
+test "parse reference syntax in schema" {
+    const source =
+        \\User {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  reference(posts, id, Post.user_id, withoutReferentialIntegrity)
+        \\}
+        \\Post {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(user_id, bigint, notNull)
+        \\  reference(author, user_id, User.id, withReferentialIntegrity(onDeleteRestrict, onUpdateCascade))
         \\}
     ;
     const tokens = tokenizer_mod.tokenize(source);

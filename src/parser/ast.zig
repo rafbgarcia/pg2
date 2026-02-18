@@ -67,6 +67,7 @@ pub const NodeTag = enum(u8) {
     schema_index, // data.unary = first column ref (linked by next)
     schema_unique_index,
     schema_scope, // data.token = scope name, data.unary = pipeline
+    schema_reference, // data.unary = linked token payload list (alias/local/target/model/ri/actions)
 
     // Control flow
     let_binding, // data.token = name, data.unary = expression/pipeline

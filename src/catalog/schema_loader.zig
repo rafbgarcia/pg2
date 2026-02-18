@@ -6,6 +6,7 @@ const tokenizer_mod = @import("../parser/tokenizer.zig");
 const Catalog = catalog_mod.Catalog;
 const ModelId = catalog_mod.ModelId;
 const AssociationKind = catalog_mod.AssociationKind;
+const ReferentialAction = catalog_mod.ReferentialAction;
 const Ast = ast_mod.Ast;
 const NodeTag = ast_mod.NodeTag;
 const NodeIndex = ast_mod.NodeIndex;
@@ -24,6 +25,7 @@ pub const LoadError = error{
     DuplicateName,
     ModelNotFound,
     ColumnNotFound,
+    InvalidAssociationConfig,
     InvalidSchema,
     UnexpectedNodeTag,
 };
@@ -90,6 +92,14 @@ fn loadModelMembers(
             .schema_belongs_to => try loadAssociation(
                 catalog, tokens, source, model_id, node, .belongs_to,
             ),
+            .schema_reference => try loadReference(
+                catalog,
+                tree,
+                tokens,
+                source,
+                model_id,
+                node,
+            ),
             .schema_index => try loadIndex(catalog, tree, tokens, source, model_id, node, false),
             .schema_unique_index => try loadIndex(
                 catalog, tree, tokens, source, model_id, node, true,
@@ -126,14 +136,20 @@ fn loadField(
     var scan = type_tok_idx + 1;
     while (scan < tokens.count) {
         const tt = tokens.tokens[scan].token_type;
-        if (tt == .kw_primary_key) {
+        if (tt == .comma) {
+            scan += 1;
+        } else if (tt == .kw_primary_key) {
             is_primary_key = true;
             scan += 1;
         } else if (tt == .kw_not_null) {
             nullable = false;
             scan += 1;
         } else if (tt == .kw_default) {
-            scan += 2; // skip default + value
+            scan += 1;
+            if (scan < tokens.count) scan += 1; // skip default value
+        } else if (tt == .right_paren) {
+            scan += 1;
+            break;
         } else {
             break;
         }
@@ -160,6 +176,108 @@ fn loadAssociation(
     const target_text = tokens.getText(node.data.token, source);
     // Association name is lowercase version (e.g. "posts" for hasMany posts).
     _ = try catalog.addAssociation(model_id, target_text, kind, target_text);
+}
+
+fn loadReference(
+    catalog: *Catalog,
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    model_id: ModelId,
+    node: *const ast_mod.AstNode,
+) LoadError!void {
+    var current = node.data.unary;
+    if (current == null_node) return error.InvalidSchema;
+    const alias_tok = current;
+
+    current = tree.getNode(alias_tok).next;
+    if (current == null_node) return error.InvalidSchema;
+    const local_tok = current;
+
+    current = tree.getNode(local_tok).next;
+    if (current == null_node) return error.InvalidSchema;
+    const target_model_tok = current;
+
+    current = tree.getNode(target_model_tok).next;
+    if (current == null_node) return error.InvalidSchema;
+    const target_field_tok = current;
+
+    current = tree.getNode(target_field_tok).next;
+    if (current == null_node) return error.InvalidSchema;
+    const mode_tok = current;
+
+    const alias = tokens.getText(tree.getNode(alias_tok).data.token, source);
+    const local_field = tokens.getText(tree.getNode(local_tok).data.token, source);
+    const target_model = tokens.getText(tree.getNode(target_model_tok).data.token, source);
+    const target_field = tokens.getText(tree.getNode(target_field_tok).data.token, source);
+    const mode_token_type = tokens.tokens[tree.getNode(mode_tok).data.token].token_type;
+
+    const assoc_id = try catalog.addAssociation(
+        model_id,
+        alias,
+        .has_many,
+        target_model,
+    );
+    try catalog.setAssociationKeyNames(
+        model_id,
+        assoc_id,
+        local_field,
+        target_field,
+    );
+
+    switch (mode_token_type) {
+        .kw_without_referential_integrity => {
+            try catalog.setAssociationReferentialIntegrity(
+                model_id,
+                assoc_id,
+                .without_referential_integrity,
+                .unspecified,
+                .unspecified,
+            );
+        },
+        .kw_with_referential_integrity => {
+            current = tree.getNode(mode_tok).next;
+            if (current == null_node) return error.InvalidSchema;
+            const on_delete_token_type = tokens.tokens[tree.getNode(current).data.token].token_type;
+            const on_delete = mapDeleteAction(on_delete_token_type) orelse
+                return error.InvalidSchema;
+
+            const on_update_node = tree.getNode(current).next;
+            if (on_update_node == null_node) return error.InvalidSchema;
+            const on_update_token_type = tokens.tokens[tree.getNode(on_update_node).data.token].token_type;
+            const on_update = mapUpdateAction(on_update_token_type) orelse
+                return error.InvalidSchema;
+
+            try catalog.setAssociationReferentialIntegrity(
+                model_id,
+                assoc_id,
+                .with_referential_integrity,
+                on_delete,
+                on_update,
+            );
+        },
+        else => return error.InvalidSchema,
+    }
+}
+
+fn mapDeleteAction(tok_type: TokenType) ?ReferentialAction {
+    return switch (tok_type) {
+        .kw_on_delete_restrict => .restrict,
+        .kw_on_delete_cascade => .cascade,
+        .kw_on_delete_set_null => .set_null,
+        .kw_on_delete_set_default => .set_default,
+        else => null,
+    };
+}
+
+fn mapUpdateAction(tok_type: TokenType) ?ReferentialAction {
+    return switch (tok_type) {
+        .kw_on_update_restrict => .restrict,
+        .kw_on_update_cascade => .cascade,
+        .kw_on_update_set_null => .set_null,
+        .kw_on_update_set_default => .set_default,
+        else => null,
+    };
 }
 
 fn loadIndex(
@@ -294,6 +412,47 @@ test "load schema with associations" {
     // Association targets resolved.
     try testing.expectEqual(post_id, catalog.models[user_id].associations[0].target_model_id);
     try testing.expectEqual(user_id, catalog.models[post_id].associations[0].target_model_id);
+}
+
+test "load schema with reference and explicit RI config" {
+    const source =
+        \\User {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  reference(posts, id, Post.user_id, withoutReferentialIntegrity)
+        \\}
+        \\Post {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(user_id, bigint, notNull)
+        \\  reference(author, user_id, User.id, withReferentialIntegrity(onDeleteRestrict, onUpdateCascade))
+        \\}
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const parsed = parser_mod.parse(&tokens, source);
+    try testing.expect(!parsed.has_error);
+
+    var catalog = Catalog{};
+    try loadSchema(&catalog, &parsed.ast, &tokens, source);
+
+    const user_id: ModelId = 0;
+    const post_id: ModelId = 1;
+    const user_posts = catalog.models[user_id].associations[0];
+    const post_author = catalog.models[post_id].associations[0];
+
+    try testing.expectEqual(@as(u16, 0), user_posts.local_column_id);
+    try testing.expectEqual(@as(u16, 1), user_posts.foreign_key_column_id);
+    try testing.expectEqual(
+        catalog_mod.ReferentialIntegrityMode.without_referential_integrity,
+        user_posts.ri_mode,
+    );
+
+    try testing.expectEqual(@as(u16, 1), post_author.local_column_id);
+    try testing.expectEqual(@as(u16, 0), post_author.foreign_key_column_id);
+    try testing.expectEqual(
+        catalog_mod.ReferentialIntegrityMode.with_referential_integrity,
+        post_author.ri_mode,
+    );
+    try testing.expectEqual(catalog_mod.ReferentialAction.restrict, post_author.on_delete);
+    try testing.expectEqual(catalog_mod.ReferentialAction.cascade, post_author.on_update);
 }
 
 test "load schema with index" {
