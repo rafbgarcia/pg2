@@ -35,6 +35,7 @@ pub const executor = struct {
 pub const simulator = struct {
     pub const disk = @import("simulator/disk.zig");
     pub const clock = @import("simulator/clock.zig");
+    pub const fault_matrix = @import("simulator/fault_matrix.zig");
 };
 
 pub const tiger = struct {
@@ -64,5 +65,6 @@ comptime {
     _ = executor.mutation;
     _ = simulator.disk;
     _ = simulator.clock;
+    _ = simulator.fault_matrix;
     _ = tiger.error_taxonomy;
 }

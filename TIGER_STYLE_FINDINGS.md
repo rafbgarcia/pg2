@@ -81,8 +81,8 @@ Remaining: apply similar allocator-sealing strategy across executor result buffe
 7. Deterministic fault injection matrix incomplete.
 Status: `partial`
 Refs: `src/simulator/disk.zig`, simulation tests
-Notes: Added deterministic one-shot fault injection controls for Nth read/write/fsync plus partial-write and bitflip-on-write corruption in `SimulatedDisk` with regression tests for each path; added buffer-pool propagation tests validating deterministic `StorageRead`/`StorageWrite`/`StorageFsync` error surfacing; added WAL end-to-end torn-write recovery regression (`recover` + `readFrom`) to validate corruption-path safety.
-Remaining: expand matrix into seeded multi-step schedule scenarios (interleaving faults across WAL/page flush/recovery flows), not just single-fault injections.
+Notes: Added deterministic one-shot fault injection controls for Nth read/write/fsync plus partial-write and bitflip-on-write corruption in `SimulatedDisk` with regression tests for each path; added buffer-pool propagation tests validating deterministic `StorageRead`/`StorageWrite`/`StorageFsync` error surfacing; added WAL end-to-end torn-write recovery regression (`recover` + `readFrom`) and a new seeded fault-matrix module covering multi-step replay-deterministic scenarios (partial WAL write + crash + recover, data-page bitflip + checksum detection, WAL fsync failure + WAL-gated page flush).
+Remaining: broaden seeded matrix coverage to more interleavings and longer schedules.
 
 ## Current Build State
 
