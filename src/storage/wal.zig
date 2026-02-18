@@ -135,6 +135,93 @@ pub const Record = struct {
 /// Maximum payload size (u16 max).
 pub const max_payload_size = std.math.maxInt(u16);
 
+pub const WalError = error{
+    OutOfMemory,
+    PayloadTooLarge,
+    WalReadError,
+    WalWriteError,
+    WalFsyncError,
+    InvalidEnvelope,
+    CorruptEnvelope,
+    UnsupportedEnvelopeVersion,
+};
+
+const envelope_magic: u32 = 0x50473257; // "PG2W"
+const envelope_version: u16 = 1;
+
+const RecoveryEnvelope = struct {
+    magic: u32,
+    version: u16,
+    reserved: u16,
+    wal_page_offset: u64,
+    wal_byte_offset: u64,
+    next_lsn: u64,
+    flushed_lsn: u64,
+    checksum: u32,
+
+    const size: usize = 4 + 2 + 2 + 8 + 8 + 8 + 8 + 4;
+
+    fn init(wal: *const Wal) RecoveryEnvelope {
+        return .{
+            .magic = envelope_magic,
+            .version = envelope_version,
+            .reserved = 0,
+            .wal_page_offset = wal.wal_page_offset,
+            .wal_byte_offset = wal.wal_byte_offset,
+            .next_lsn = wal.next_lsn,
+            .flushed_lsn = wal.flushed_lsn,
+            .checksum = 0,
+        };
+    }
+
+    fn serialize(self: *const RecoveryEnvelope, out: *[size]u8) void {
+        var offset: usize = 0;
+        @memcpy(out[offset..][0..4], std.mem.asBytes(&std.mem.nativeToLittle(u32, self.magic)));
+        offset += 4;
+        @memcpy(out[offset..][0..2], std.mem.asBytes(&std.mem.nativeToLittle(u16, self.version)));
+        offset += 2;
+        @memcpy(out[offset..][0..2], std.mem.asBytes(&std.mem.nativeToLittle(u16, self.reserved)));
+        offset += 2;
+        @memcpy(out[offset..][0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, self.wal_page_offset)));
+        offset += 8;
+        @memcpy(out[offset..][0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, self.wal_byte_offset)));
+        offset += 8;
+        @memcpy(out[offset..][0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, self.next_lsn)));
+        offset += 8;
+        @memcpy(out[offset..][0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, self.flushed_lsn)));
+        offset += 8;
+        @memset(out[offset..][0..4], 0);
+
+        const cksum = std.hash.crc.Crc32Iscsi.hash(out[0 .. size - 4]);
+        @memcpy(out[size - 4 ..][0..4], std.mem.asBytes(&std.mem.nativeToLittle(u32, cksum)));
+    }
+
+    fn deserialize(in: []const u8) WalError!RecoveryEnvelope {
+        if (in.len < size) return error.InvalidEnvelope;
+
+        const stored_cksum = std.mem.littleToNative(u32, std.mem.bytesAsValue(u32, in[size - 4 ..][0..4]).*);
+        const computed_cksum = std.hash.crc.Crc32Iscsi.hash(in[0 .. size - 4]);
+        if (stored_cksum != computed_cksum) return error.CorruptEnvelope;
+
+        const magic = std.mem.littleToNative(u32, std.mem.bytesAsValue(u32, in[0..4]).*);
+        if (magic != envelope_magic) return error.InvalidEnvelope;
+
+        const version = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, in[4..6]).*);
+        if (version != envelope_version) return error.UnsupportedEnvelopeVersion;
+
+        return .{
+            .magic = magic,
+            .version = version,
+            .reserved = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, in[6..8]).*),
+            .wal_page_offset = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, in[8..16]).*),
+            .wal_byte_offset = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, in[16..24]).*),
+            .next_lsn = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, in[24..32]).*),
+            .flushed_lsn = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, in[32..40]).*),
+            .checksum = stored_cksum,
+        };
+    }
+};
+
 /// Write-Ahead Log.
 ///
 /// Append-only log of records backed by the Storage interface. Records
@@ -161,6 +248,8 @@ pub const Wal = struct {
     /// is stored in sequential pages starting at a high page_id range
     /// to avoid collision with data pages.
     wal_page_base: u64 = 1_000_000,
+    /// Metadata page storing recovery envelope.
+    wal_meta_page_id: u64 = 999_999,
     /// Next WAL page to write.
     wal_page_offset: u64 = 0,
     /// Byte offset within the current WAL page.
@@ -184,7 +273,8 @@ pub const Wal = struct {
 
     /// Append a record to the WAL. Returns the LSN assigned to this record.
     /// The record is buffered in memory — call `flush()` to make it durable.
-    pub fn append(self: *Wal, tx_id: u64, record_type: RecordType, page_id: u64, payload: []const u8) !u64 {
+    pub fn append(self: *Wal, tx_id: u64, record_type: RecordType, page_id: u64, payload: []const u8) WalError!u64 {
+        if (payload.len > max_payload_size) return error.PayloadTooLarge;
         const lsn = self.next_lsn;
         self.next_lsn += 1;
 
@@ -198,7 +288,8 @@ pub const Wal = struct {
 
         const size = rec.serializedSize();
         const start = self.buffer.items.len;
-        try self.buffer.resize(self.allocator, start + size);
+        self.buffer.resize(self.allocator, start + size) catch
+            return error.OutOfMemory;
         _ = rec.serialize(self.buffer.items[start..]);
 
         self.buffer_max_lsn = lsn;
@@ -209,7 +300,7 @@ pub const Wal = struct {
 
     /// Flush the WAL buffer to storage and fsync. After this returns,
     /// all appended records are durable.
-    pub fn flush(self: *Wal) !void {
+    pub fn flush(self: *Wal) WalError!void {
         if (self.buffer.items.len == 0) return;
 
         const page_size = io.page_size;
@@ -223,7 +314,8 @@ pub const Wal = struct {
 
             // If continuing a partial page, read it first.
             if (self.wal_byte_offset > 0) {
-                self.storage.read(self.wal_page_base + self.wal_page_offset, &page_buf) catch {};
+                self.storage.read(self.wal_page_base + self.wal_page_offset, &page_buf) catch
+                    return error.WalReadError;
             }
 
             @memcpy(page_buf[self.wal_byte_offset..][0..to_copy], self.buffer.items[buf_offset..][0..to_copy]);
@@ -245,24 +337,27 @@ pub const Wal = struct {
         self.flushed_lsn = self.buffer_max_lsn;
         self.buffer.clearRetainingCapacity();
         self.flushes += 1;
+
+        try self.persistEnvelope();
     }
 
     /// Read all records from WAL storage starting from a given LSN.
     /// Used for recovery. Returns owned slice — caller must free.
-    pub fn readFrom(self: *Wal, from_lsn: u64, allocator: std.mem.Allocator) ![]Record {
+    pub fn readFrom(self: *Wal, from_lsn: u64, allocator: std.mem.Allocator) WalError![]Record {
         // Read all WAL pages into a contiguous buffer.
         const page_size = io.page_size;
         const total_pages = self.wal_page_offset + @as(u64, if (self.wal_byte_offset > 0) 1 else 0);
-        if (total_pages == 0) return try allocator.alloc(Record, 0);
+        if (total_pages == 0) return allocator.alloc(Record, 0) catch
+            return error.OutOfMemory;
 
-        const raw = try allocator.alloc(u8, @intCast(total_pages * page_size));
+        const raw = allocator.alloc(u8, @intCast(total_pages * page_size)) catch
+            return error.OutOfMemory;
         defer allocator.free(raw);
 
         for (0..@intCast(total_pages)) |i| {
             var page_buf: [page_size]u8 = undefined;
-            self.storage.read(self.wal_page_base + @as(u64, @intCast(i)), &page_buf) catch {
-                @memset(page_buf[0..], 0);
-            };
+            self.storage.read(self.wal_page_base + @as(u64, @intCast(i)), &page_buf) catch
+                return error.WalReadError;
             @memcpy(raw[i * page_size ..][0..page_size], &page_buf);
         }
 
@@ -281,16 +376,33 @@ pub const Wal = struct {
             if (result.record.lsn >= from_lsn) {
                 var rec = result.record;
                 if (rec.payload.len > 0) {
-                    const owned = try allocator.alloc(u8, rec.payload.len);
+                    const owned = allocator.alloc(u8, rec.payload.len) catch
+                        return error.OutOfMemory;
                     @memcpy(owned, rec.payload);
                     rec.payload = owned;
                 }
-                try records.append(allocator, rec);
+                records.append(allocator, rec) catch return error.OutOfMemory;
             }
             offset += result.bytes_consumed;
         }
 
-        return try records.toOwnedSlice(allocator);
+        return records.toOwnedSlice(allocator) catch return error.OutOfMemory;
+    }
+
+    /// Restore in-memory WAL pointers from the on-disk recovery envelope.
+    pub fn recover(self: *Wal) WalError!void {
+        var page_buf: [io.page_size]u8 = undefined;
+        self.storage.read(self.wal_meta_page_id, &page_buf) catch
+            return error.WalReadError;
+
+        if (isAllZero(&page_buf)) return;
+
+        const envelope = try RecoveryEnvelope.deserialize(page_buf[0..RecoveryEnvelope.size]);
+        self.wal_page_offset = envelope.wal_page_offset;
+        self.wal_byte_offset = @intCast(envelope.wal_byte_offset);
+        self.next_lsn = envelope.next_lsn;
+        self.flushed_lsn = envelope.flushed_lsn;
+        self.buffer.clearRetainingCapacity();
     }
 
     /// Free a slice of records returned by `readFrom`, including owned payloads.
@@ -304,22 +416,41 @@ pub const Wal = struct {
     }
 
     /// Convenience: begin a transaction.
-    pub fn beginTx(self: *Wal, tx_id: u64) !u64 {
+    pub fn beginTx(self: *Wal, tx_id: u64) WalError!u64 {
         return self.append(tx_id, .tx_begin, 0, &.{});
     }
 
     /// Convenience: commit a transaction. Flushes the WAL (group commit point).
-    pub fn commitTx(self: *Wal, tx_id: u64) !u64 {
+    pub fn commitTx(self: *Wal, tx_id: u64) WalError!u64 {
         const lsn = try self.append(tx_id, .tx_commit, 0, &.{});
         try self.flush();
         return lsn;
     }
 
     /// Convenience: abort a transaction.
-    pub fn abortTx(self: *Wal, tx_id: u64) !u64 {
+    pub fn abortTx(self: *Wal, tx_id: u64) WalError!u64 {
         return self.append(tx_id, .tx_abort, 0, &.{});
     }
+
+    fn persistEnvelope(self: *Wal) WalError!void {
+        var page_buf: [io.page_size]u8 = std.mem.zeroes([io.page_size]u8);
+        const envelope = RecoveryEnvelope.init(self);
+        var env_bytes: [RecoveryEnvelope.size]u8 = undefined;
+        envelope.serialize(&env_bytes);
+        @memcpy(page_buf[0..RecoveryEnvelope.size], &env_bytes);
+
+        self.storage.write(self.wal_meta_page_id, &page_buf) catch
+            return error.WalWriteError;
+        self.storage.fsync() catch return error.WalFsyncError;
+    }
 };
+
+fn isAllZero(buf: *const [io.page_size]u8) bool {
+    for (buf) |b| {
+        if (b != 0) return false;
+    }
+    return true;
+}
 
 // --- Tests ---
 
@@ -416,7 +547,8 @@ test "WAL commitTx flushes automatically" {
     try std.testing.expectEqual(@as(u64, 3), commit_lsn);
     try std.testing.expectEqual(@as(u64, 3), wal.flushed_lsn);
     // WAL is durable — verify fsync was called.
-    try std.testing.expectEqual(@as(u64, 1), disk.fsyncs);
+    // One fsync for WAL data, one for recovery envelope.
+    try std.testing.expectEqual(@as(u64, 2), disk.fsyncs);
 }
 
 test "WAL readFrom recovers records" {
@@ -535,6 +667,51 @@ test "WAL unflushed data lost on crash" {
     defer Wal.freeRecords(records, std.testing.allocator);
 
     try std.testing.expectEqual(@as(usize, 0), records.len);
+}
+
+test "WAL recover restores offsets from envelope" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+
+    _ = try wal.beginTx(1);
+    _ = try wal.append(1, .insert, 42, "envelope");
+    _ = try wal.commitTx(1);
+
+    var wal2 = Wal.init(std.testing.allocator, disk.storage());
+    defer wal2.deinit();
+    try wal2.recover();
+
+    try std.testing.expectEqual(wal.wal_page_offset, wal2.wal_page_offset);
+    try std.testing.expectEqual(wal.wal_byte_offset, wal2.wal_byte_offset);
+    try std.testing.expectEqual(wal.next_lsn, wal2.next_lsn);
+    try std.testing.expectEqual(wal.flushed_lsn, wal2.flushed_lsn);
+}
+
+test "WAL recover detects corrupt envelope" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+
+    _ = try wal.beginTx(1);
+    _ = try wal.commitTx(1);
+
+    var meta_page: [io.page_size]u8 = undefined;
+    try disk.storage().read(wal.wal_meta_page_id, &meta_page);
+    meta_page[10] ^= 0xFF;
+    try disk.storage().write(wal.wal_meta_page_id, &meta_page);
+    try disk.storage().fsync();
+
+    var wal2 = Wal.init(std.testing.allocator, disk.storage());
+    defer wal2.deinit();
+
+    try std.testing.expectError(error.CorruptEnvelope, wal2.recover());
 }
 
 test "WAL spanning multiple pages" {

@@ -32,6 +32,7 @@ pub const max_columns = 128;
 pub const ScanError = error{
     AllFramesPinned,
     ChecksumMismatch,
+    Corruption,
     StorageRead,
     StorageWrite,
     StorageFsync,
@@ -135,7 +136,7 @@ pub fn tableScan(
             scanSlot(
                 page, page_id, slot_idx, schema,
                 undo_log, snapshot, tx_manager, &result,
-            );
+            ) catch |e| return e;
         }
     }
 
@@ -153,7 +154,7 @@ fn scanSlot(
     snapshot: *const Snapshot,
     tx_manager: *const TxManager,
     result: *ScanResult,
-) void {
+) ScanError!void {
     std.debug.assert(result.row_count < max_result_rows);
 
     // Read raw row data. Skip deleted slots.
@@ -182,7 +183,8 @@ fn scanSlot(
     var row = ResultRow.init();
     row.row_id = .{ .page_id = page_id, .slot = slot_idx };
     row.column_count = schema.column_count;
-    row_mod.decodeRow(schema, data_to_decode, &row.values);
+    row_mod.decodeRowChecked(schema, data_to_decode, &row.values) catch
+        return error.Corruption;
     result.appendRow(row);
 }
 
@@ -220,7 +222,8 @@ pub fn indexFind(
     var row = ResultRow.init();
     row.row_id = row_id;
     row.column_count = schema.column_count;
-    row_mod.decodeRow(schema, data_to_decode, &row.values);
+    row_mod.decodeRowChecked(schema, data_to_decode, &row.values) catch
+        return error.Corruption;
     return row;
 }
 
@@ -270,7 +273,8 @@ pub fn indexRange(
         var row = ResultRow.init();
         row.row_id = row_id;
         row.column_count = schema.column_count;
-        row_mod.decodeRow(schema, data_to_decode, &row.values);
+        row_mod.decodeRowChecked(schema, data_to_decode, &row.values) catch
+            return error.Corruption;
         result.appendRow(row);
     }
 

@@ -43,6 +43,7 @@ pub const MutationError = error{
     // Storage errors
     AllFramesPinned,
     ChecksumMismatch,
+    Corruption,
     StorageRead,
     StorageWrite,
     StorageFsync,
@@ -493,6 +494,7 @@ fn mapScanError(err: scan_mod.ScanError) MutationError {
     return switch (err) {
         error.AllFramesPinned => error.AllFramesPinned,
         error.ChecksumMismatch => error.ChecksumMismatch,
+        error.Corruption => error.Corruption,
         error.StorageRead => error.StorageRead,
         error.StorageWrite => error.StorageWrite,
         error.StorageFsync => error.StorageFsync,

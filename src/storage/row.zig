@@ -166,6 +166,10 @@ pub const EncodeError = error{
     NullNotAllowed,
 };
 
+pub const DecodeError = error{
+    Corruption,
+};
+
 /// Encode a row of values into a byte buffer.
 ///
 /// Layout:
@@ -302,15 +306,16 @@ pub fn encodeRow(
 }
 
 /// Decode a single column value from encoded row data.
-pub fn decodeColumn(
+pub fn decodeColumnChecked(
     schema: *const RowSchema,
     row_data: []const u8,
     col_index: u16,
-) Value {
-    std.debug.assert(col_index < schema.column_count);
+) DecodeError!Value {
+    if (col_index >= schema.column_count) return error.Corruption;
 
     // Check null bitmap.
     const byte_idx = col_index / 8;
+    try requireRange(row_data, byte_idx, 1);
     const bit_idx: u3 = @intCast(col_index % 8);
     if (row_data[byte_idx] & (@as(u8, 1) << bit_idx) != 0) {
         return .{ .null_value = {} };
@@ -320,66 +325,105 @@ pub fn decodeColumn(
     var offset: usize = schema.null_bitmap_bytes;
     for (0..col_index) |i| {
         const col = schema.columns[i];
-        if (col.column_type == .string) {
-            offset += 2;
-        } else {
-            offset += fixedSize(col.column_type);
-        }
+        const slot_size: usize = if (col.column_type == .string)
+            2
+        else
+            fixedSize(col.column_type);
+        offset = std.math.add(usize, offset, slot_size) catch
+            return error.Corruption;
     }
 
     const col = schema.columns[col_index];
     return switch (col.column_type) {
-        .bigint => .{
-            .bigint = std.mem.littleToNative(
-                i64,
-                std.mem.bytesAsValue(i64, row_data[offset..][0..8]).*,
-            ),
+        .bigint => blk: {
+            try requireRange(row_data, offset, 8);
+            break :blk .{
+                .bigint = std.mem.littleToNative(
+                    i64,
+                    std.mem.bytesAsValue(i64, row_data[offset..][0..8]).*,
+                ),
+            };
         },
-        .int => .{
-            .int = std.mem.littleToNative(
-                i32,
-                std.mem.bytesAsValue(i32, row_data[offset..][0..4]).*,
-            ),
+        .int => blk: {
+            try requireRange(row_data, offset, 4);
+            break :blk .{
+                .int = std.mem.littleToNative(
+                    i32,
+                    std.mem.bytesAsValue(i32, row_data[offset..][0..4]).*,
+                ),
+            };
         },
-        .float => .{
-            .float = @bitCast(std.mem.littleToNative(
-                u64,
-                std.mem.bytesAsValue(u64, row_data[offset..][0..8]).*,
-            )),
+        .float => blk: {
+            try requireRange(row_data, offset, 8);
+            break :blk .{
+                .float = @bitCast(std.mem.littleToNative(
+                    u64,
+                    std.mem.bytesAsValue(u64, row_data[offset..][0..8]).*,
+                )),
+            };
         },
-        .boolean => .{ .boolean = row_data[offset] != 0 },
+        .boolean => blk: {
+            try requireRange(row_data, offset, 1);
+            break :blk .{ .boolean = row_data[offset] != 0 };
+        },
         .string => blk: {
+            try requireRange(row_data, offset, 2);
             const str_offset = std.mem.littleToNative(
                 u16,
                 std.mem.bytesAsValue(u16, row_data[offset..][0..2]).*,
             );
+            const str_offset_usize: usize = str_offset;
+            try requireRange(row_data, str_offset_usize, 2);
             const str_len = std.mem.littleToNative(
                 u16,
-                std.mem.bytesAsValue(u16, row_data[str_offset..][0..2]).*,
+                std.mem.bytesAsValue(u16, row_data[str_offset_usize..][0..2]).*,
             );
+            const str_data_start = std.math.add(usize, str_offset_usize, 2) catch
+                return error.Corruption;
+            try requireRange(row_data, str_data_start, str_len);
             break :blk .{
-                .string = row_data[str_offset + 2 ..][0..str_len],
+                .string = row_data[str_data_start..][0..str_len],
             };
         },
-        .timestamp => .{
-            .timestamp = std.mem.littleToNative(
-                i64,
-                std.mem.bytesAsValue(i64, row_data[offset..][0..8]).*,
-            ),
+        .timestamp => blk: {
+            try requireRange(row_data, offset, 8);
+            break :blk .{
+                .timestamp = std.mem.littleToNative(
+                    i64,
+                    std.mem.bytesAsValue(i64, row_data[offset..][0..8]).*,
+                ),
+            };
         },
     };
 }
 
 /// Decode all columns from encoded row data into a caller-provided array.
-pub fn decodeRow(
+pub fn decodeRowChecked(
     schema: *const RowSchema,
     row_data: []const u8,
     out: []Value,
-) void {
+) DecodeError!void {
     std.debug.assert(out.len >= schema.column_count);
     for (0..schema.column_count) |i| {
-        out[i] = decodeColumn(schema, row_data, @intCast(i));
+        out[i] = try decodeColumnChecked(schema, row_data, @intCast(i));
     }
+}
+
+/// Backwards-compatible wrapper for callers that expect infallible decode.
+pub fn decodeColumn(schema: *const RowSchema, row_data: []const u8, col_index: u16) Value {
+    return decodeColumnChecked(schema, row_data, col_index) catch
+        @panic("row decode corruption");
+}
+
+/// Backwards-compatible wrapper for callers that expect infallible decode.
+pub fn decodeRow(schema: *const RowSchema, row_data: []const u8, out: []Value) void {
+    decodeRowChecked(schema, row_data, out) catch
+        @panic("row decode corruption");
+}
+
+fn requireRange(row_data: []const u8, start: usize, len: usize) DecodeError!void {
+    const end = std.math.add(usize, start, len) catch return error.Corruption;
+    if (end > row_data.len) return error.Corruption;
 }
 
 // --- Tests ---

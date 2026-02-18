@@ -37,6 +37,10 @@ pub const simulator = struct {
     pub const clock = @import("simulator/clock.zig");
 };
 
+pub const tiger = struct {
+    pub const error_taxonomy = @import("tiger/error_taxonomy.zig");
+};
+
 comptime {
     // Force test discovery in all imported modules.
     _ = storage.io;
@@ -60,4 +64,5 @@ comptime {
     _ = executor.mutation;
     _ = simulator.disk;
     _ = simulator.clock;
+    _ = tiger.error_taxonomy;
 }
