@@ -82,8 +82,8 @@ This tracker exists to keep continuity across sessions:
 7. Deterministic fault injection matrix incomplete.
    Status: `partial`
    Refs: `src/simulator/disk.zig`, simulation tests
-   Notes: Added deterministic one-shot fault injection controls for Nth read/write/fsync plus partial-write and bitflip-on-write corruption in `SimulatedDisk` with regression tests for each path; added buffer-pool propagation tests validating deterministic `StorageRead`/`StorageWrite`/`StorageFsync` error surfacing; added WAL end-to-end torn-write recovery regression (`recover` + `readFrom`) and a seeded fault-matrix module covering multi-step replay-deterministic scenarios (partial WAL write + crash + recover, data-page bitflip + checksum detection, WAL fsync failure + WAL-gated page flush). Seeded WAL recovery matrix now exercises bounded decode buffers via `readFromInto`, and includes a longer multi-fault interleaving schedule (torn write + failed commit fsync + retry flush + crash/recover replay).
-   Remaining: add more long schedules that combine buffer-pool page corruption paths with WAL failure/recovery phases in a single seeded run.
+   Notes: Added deterministic one-shot fault injection controls for Nth read/write/fsync plus partial-write and bitflip-on-write corruption in `SimulatedDisk` with regression tests for each path; added buffer-pool propagation tests validating deterministic `StorageRead`/`StorageWrite`/`StorageFsync` error surfacing; added WAL end-to-end torn-write recovery regression (`recover` + `readFrom`) and a seeded fault-matrix module covering multi-step replay-deterministic scenarios (partial WAL write + crash + recover, data-page bitflip + checksum detection, WAL fsync failure + WAL-gated page flush). Seeded WAL recovery matrix now exercises bounded decode buffers via `readFromInto`, includes a longer multi-fault interleaving schedule (torn write + failed commit fsync + retry flush + crash/recover replay), and now includes a combined cross-subsystem schedule (WAL fsync failure/retry + WAL-gated page flush + page-write bitflip corruption + checksum enforcement + WAL recover/replay).
+   Remaining: broaden seeded matrix breadth with additional long schedules and expanded seed sets to cover more interleaving shapes.
 
 ## Current Build State
 
@@ -106,6 +106,7 @@ This tracker exists to keep continuity across sessions:
   - Added seeded replay-deterministic multi-fault WAL interleaving scenario (torn write + fsync failure on commit + retry flush + crash/recover) in `src/simulator/fault_matrix.zig`.
   - Added bounded `tableScanInto` with explicit caller capacity contracts and regression coverage (`src/executor/scan.zig`), and switched read query execution to use the bounded scan path directly (`src/executor/executor.zig`).
   - Replaced allocator-backed mutation scan materialization with in-place visible-row iteration in `executeUpdate`/`executeDelete` (`src/executor/mutation.zig`), removing another executor runtime allocation path.
+  - Added seeded combined cross-subsystem fault schedule in `src/simulator/fault_matrix.zig` covering WAL fsync failure/retry + WAL-gated page flush + data-page bitflip corruption + checksum detection + WAL recover/replay.
   - Updated WAL error mappings in taxonomy/boundary adapters (`src/tiger/error_taxonomy.zig`, `src/executor/mutation.zig`, `src/storage/btree.zig`).
 - In progress:
   - Allocator-sealing migration is still partial at the system level; executor scan/mutation runtime paths are now bounded, while future operator intermediates (sort/aggregate/join) and other buffering paths still need explicit capacity contracts.
@@ -114,6 +115,6 @@ This tracker exists to keep continuity across sessions:
 - Tests run:
   - `zig build test`
 - Next recommended step:
-  1. Expand seeded fault-matrix schedules to combined buffer-pool corruption + WAL failure/recovery interleavings in one run (single deterministic scenario with multiple phases/fault classes).
-  2. Continue migrating runtime WAL recovery/read callers to bounded decode APIs as new runtime call sites are added.
-  3. Define capacity contracts up front for upcoming executor operator intermediates (sort/aggregate/join) to avoid reintroducing unbounded allocator growth.
+  1. Continue migrating runtime WAL recovery/read callers to bounded decode APIs as new runtime call sites are added.
+  2. Define capacity contracts up front for upcoming executor operator intermediates (sort/aggregate/join) to avoid reintroducing unbounded allocator growth.
+  3. Broaden seeded matrix coverage with additional seeds/interleavings (including repeated crash/recover cycles and mixed fault ordering).

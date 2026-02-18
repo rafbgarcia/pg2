@@ -198,6 +198,76 @@ fn runWalMultiFaultInterleaving(seed: u64) !ScenarioOutcome {
     return .{ .signature = h.final() };
 }
 
+fn runCombinedWalAndPageCorruption(seed: u64) !ScenarioOutcome {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rand = prng.random();
+
+    var disk = SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 2);
+    defer pool.deinit();
+    pool.wal = &wal;
+
+    const page_id = 80 + rand.uintLessThan(u64, 16);
+    var payload: [48]u8 = undefined;
+    rand.bytes(&payload);
+    _ = try wal.append(1, .insert, page_id, &payload);
+
+    const page = try pool.pin(page_id);
+    page.header.page_type = .heap;
+    page.header.lsn = 1;
+    @memset(&page.content, 0x7C);
+    pool.unpin(page_id, true);
+
+    disk.failFsyncAt(disk.fsyncs + 1);
+    try std.testing.expectError(error.WalFsyncError, wal.flush());
+    try std.testing.expectEqual(@as(u64, 0), wal.flushed_lsn);
+    try std.testing.expectError(error.WalNotFlushed, pool.flush(page_id));
+
+    try wal.flush();
+    try std.testing.expect(wal.flushed_lsn >= 1);
+
+    const bitflip_offset = rand.uintLessThan(usize, 64);
+    const bitflip_mask: u8 = @as(u8, 1) << @as(u3, @intCast(rand.uintLessThan(u8, 7)));
+    disk.bitflipWriteAt(disk.writes + 1, bitflip_offset, bitflip_mask);
+    try pool.flush(page_id);
+    try disk.storage().fsync();
+
+    var pool2 = try BufferPool.init(std.testing.allocator, disk.storage(), 2);
+    defer pool2.deinit();
+    try std.testing.expectError(error.ChecksumMismatch, pool2.pin(page_id));
+
+    disk.crash();
+
+    var recovered = Wal.init(std.testing.allocator, disk.storage());
+    defer recovered.deinit();
+    try recovered.recover();
+
+    var records_buf: [8]wal_mod.Record = undefined;
+    var payload_buf: [256]u8 = undefined;
+    const decoded = try recovered.readFromInto(1, &records_buf, &payload_buf);
+    const records = records_buf[0..decoded.records_len];
+    try std.testing.expect(records.len <= records_buf.len);
+
+    var h = std.hash.Wyhash.init(seed ^ 0xA11CE005);
+    h.update(std.mem.asBytes(&page_id));
+    h.update(std.mem.asBytes(&wal.flushed_lsn));
+    const records_len_u64: u64 = @intCast(records.len);
+    h.update(std.mem.asBytes(&records_len_u64));
+    const offset_u64: u64 = @intCast(bitflip_offset);
+    h.update(std.mem.asBytes(&offset_u64));
+    h.update(&[_]u8{bitflip_mask});
+    for (records) |rec| {
+        h.update(std.mem.asBytes(&rec.lsn));
+        h.update(&[_]u8{@intFromEnum(rec.record_type)});
+    }
+    return .{ .signature = h.final() };
+}
+
 test "seeded schedule: WAL partial write recovery is replay-deterministic" {
     const seed: u64 = 0xC0FFEE01;
     const first = try runWalPartialWriteRecovery(seed);
@@ -223,5 +293,12 @@ test "seeded schedule: multi-fault WAL interleaving is replay-deterministic" {
     const seed: u64 = 0xC0FFEE04;
     const first = try runWalMultiFaultInterleaving(seed);
     const second = try runWalMultiFaultInterleaving(seed);
+    try std.testing.expectEqual(first.signature, second.signature);
+}
+
+test "seeded schedule: combined WAL and page corruption path is replay-deterministic" {
+    const seed: u64 = 0xC0FFEE05;
+    const first = try runCombinedWalAndPageCorruption(seed);
+    const second = try runCombinedWalAndPageCorruption(seed);
     try std.testing.expectEqual(first.signature, second.signature);
 }
