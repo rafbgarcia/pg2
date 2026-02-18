@@ -2,7 +2,10 @@
 
 A database built from scratch in Zig, focused on developer experience and transparency.
 
-pg2's mission is to make the database the complete data system: applications declare business intent, and pg2 owns schema, queries, integrity, and data access so application code does not need ORMs or database glue layers.
+pg2's mission is to make the database the complete data system:
+
+- applications declare business intent, and pg2 owns schema, queries, integrity, and data access so application code does not need ORMs or database glue layers.
+- applications declare the state they want the data and pg2 handles it. e.g. data migrations, partitions, sharding, etc. always online. Changes are derived automatically via some command like `pg2 apply` (called e.g. during an application deployment) and applied as needed.
 
 ## Project Philosophy
 
@@ -30,6 +33,8 @@ docs/
   QUERY_LANGUAGE.md
   SIMULATION_TESTING.md
   REPLICATION.md
+  CONNECTION_POOL.md
+  REALTIME_SUBSCRIPTIONS.md
   TIGER_STYLE.md
 ```
 
@@ -43,8 +48,8 @@ zig build sim          # Run deterministic simulation tests (takes a seed argume
 
 ## Conventions
 
-- **Zig version**: Use latest stable Zig (0.13.x+ at time of writing).
-- **No libc dependency** unless absolutely necessary. Prefer Zig's std library.
+- **Zig version**: Use latest stable Zig (0.15.2).
+- **No libc dependency** unless absolutely necessary. Prefer Zig's std library (use `context7 - query-docs (MCP)(libraryId: "/websites/ziglang_0_15_2", query: "<YOUR QUERY>")` for reference).
 - **No system clock access in core code.** Time is injected explicitly. Core logic uses a `Clock` interface — real clock in production, deterministic clock in simulation.
 - **No threads in core code.** Concurrency is managed through an event loop abstraction — real async I/O in production, deterministic scheduler in simulation.
 - **All I/O through interfaces.** Disk I/O goes through a `Storage` interface. Network I/O goes through a `Network` interface. Simulation provides fake implementations.
@@ -95,14 +100,9 @@ For any PR touching core DB code, complete the mandatory checklist in `docs/TIGE
   - [ ] Replica read path
   - [ ] Promotion / failover
 
-## Context7
-
-- For Zig 0.15.2 queries, always use `context7 - query-docs (MCP)(libraryId: "/websites/ziglang_0_15_2", query: "<YOUR QUERY>")`
-
 # Future ideas
 
 - Columnar storage: user defines which columns
 - Built-in online migrations
 - Use in browser (builtin online migrations could be useful)
-- **Built-in connection pool**: Query connections are pooled. Clients borrow a connection per query/transaction, not per session. Subscription handles are separate from query connections and don't count toward the pool limit.
-- **Real-time subscriptions (data mutation notifications)**: Subscriptions are not database connections — they are lightweight registrations (filter predicate + socket fd) managed by a separate notification subsystem. Subscribers register to topic-based channels (e.g., `table:users`, `table:users:row:42`) for O(1) routing. The WAL/mutation executor publishes change events to a notification bus; channel lookup is a hash map, fan-out is O(subscribers per channel). Uses io_uring on Linux to batch notification writes. Reuses WAL streaming infrastructure from replication (Phase 5). Target: tens of thousands of subscriptions per server without a fan-out tier. Slow subscribers get backpressure (configurable: drop, buffer, disconnect).
+- **Built-in connection pool**: Two-layer architecture separating client connections from pool connections. Client connections (TCP sockets) are long-lived and cheap — just a socket fd + auth context. Pool connections are internal execution contexts (txn state, scratch buffers) with a fixed pool size. Clients borrow a pool connection per query; pool connection is returned after the query completes. During multi-statement transactions, the pool connection is pinned to the client until COMMIT/ROLLBACK. Subscription handles are separate from query connections and don't count toward the pool limit.
