@@ -2,6 +2,8 @@
 
 A database built from scratch in Zig, focused on developer experience and transparency.
 
+pg2's mission is to make the database the complete data system: applications declare business intent, and pg2 owns schema, queries, integrity, and data access so application code does not need ORMs or database glue layers.
+
 ## Project Philosophy
 
 - **One obvious way for common tasks.** Prefer a single clear default path for schema design, querying, and operations; advanced controls are explicit opt-ins.
@@ -101,5 +103,6 @@ For any PR touching core DB code, complete the mandatory checklist in `docs/TIGE
 
 - Columnar storage: user defines which columns
 - Built-in online migrations
-- Redis-like features: cache specific queries, subscribe to data mutations (real-time use cases)
 - Use in browser (builtin online migrations could be useful)
+- **Built-in connection pool**: Query connections are pooled. Clients borrow a connection per query/transaction, not per session. Subscription handles are separate from query connections and don't count toward the pool limit.
+- **Real-time subscriptions (data mutation notifications)**: Subscriptions are not database connections — they are lightweight registrations (filter predicate + socket fd) managed by a separate notification subsystem. Subscribers register to topic-based channels (e.g., `table:users`, `table:users:row:42`) for O(1) routing. The WAL/mutation executor publishes change events to a notification bus; channel lookup is a hash map, fan-out is O(subscribers per channel). Uses io_uring on Linux to batch notification writes. Reuses WAL streaming infrastructure from replication (Phase 5). Target: tens of thousands of subscriptions per server without a fan-out tier. Slow subscribers get backpressure (configurable: drop, buffer, disconnect).
