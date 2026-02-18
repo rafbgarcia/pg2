@@ -16,6 +16,8 @@ pub const mvcc = struct {
 pub const parser = struct {
     pub const tokenizer = @import("parser/tokenizer.zig");
     pub const ast = @import("parser/ast.zig");
+    pub const expression = @import("parser/expression.zig");
+    pub const parse = @import("parser/parser.zig");
 };
 
 pub const simulator = struct {
@@ -36,6 +38,8 @@ comptime {
     _ = mvcc.undo;
     _ = parser.tokenizer;
     _ = parser.ast;
+    _ = parser.expression;
+    _ = parser.parse;
     _ = simulator.disk;
     _ = simulator.clock;
 }
