@@ -24,6 +24,9 @@ const BufferPool = buffer_pool_mod.BufferPool;
 const Wal = wal_mod.Wal;
 const Catalog = catalog_mod.Catalog;
 const ModelId = catalog_mod.ModelId;
+const AssociationInfo = catalog_mod.AssociationInfo;
+const AssociationKind = catalog_mod.AssociationKind;
+const null_model = catalog_mod.null_model;
 const TxId = tx_mod.TxId;
 const Snapshot = tx_mod.Snapshot;
 const TxManager = tx_mod.TxManager;
@@ -219,7 +222,14 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
     }
 
     // Read path: scan → apply operators → project.
-    executeReadPipeline(ctx, &result, model_id, &ops, op_count);
+    executeReadPipeline(
+        ctx,
+        &result,
+        pipeline_idx,
+        model_id,
+        &ops,
+        op_count,
+    );
 
     std.debug.assert(result.row_count <= scan_mod.max_result_rows);
     return result;
@@ -229,12 +239,12 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
 fn executeReadPipeline(
     ctx: *const ExecContext,
     result: *QueryResult,
+    pipeline_node: NodeIndex,
     model_id: ModelId,
     ops: *const [max_operators]OpDescriptor,
     op_count: u16,
 ) void {
     const caps = capacity_mod.OperatorCapacities.defaults();
-    var group_runtime = GroupRuntime{};
 
     const scan_result = scan_mod.tableScanInto(
         ctx.catalog,
@@ -252,7 +262,39 @@ fn executeReadPipeline(
     result.stats.rows_scanned = scan_result.row_count;
     result.row_count = scan_result.row_count;
 
-    // Apply each operator.
+    if (!applyReadOperators(
+        ctx,
+        result,
+        model_id,
+        ops,
+        op_count,
+        &caps,
+    )) {
+        return;
+    }
+    if (!applyNestedSelectionJoin(
+        ctx,
+        result,
+        pipeline_node,
+        model_id,
+        &caps,
+    )) {
+        return;
+    }
+
+    result.stats.rows_matched = result.row_count;
+    result.stats.rows_returned = result.row_count;
+}
+
+fn applyReadOperators(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    model_id: ModelId,
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+    caps: *const capacity_mod.OperatorCapacities,
+) bool {
+    var group_runtime = GroupRuntime{};
     const schema = &ctx.catalog.models[model_id].row_schema;
     var i: u16 = 0;
     while (i < op_count) : (i += 1) {
@@ -274,9 +316,9 @@ fn executeReadPipeline(
                     ops,
                     op_count,
                     i,
-                    &caps,
+                    caps,
                     &group_runtime,
-                )) return;
+                )) return false;
             },
             .limit_op => applyLimit(ctx, result, op.node),
             .offset_op => applyOffset(ctx, result, op.node, &group_runtime),
@@ -286,17 +328,251 @@ fn executeReadPipeline(
                     result,
                     op.node,
                     schema,
-                    &caps,
+                    caps,
                     &group_runtime,
-                )) return;
+                )) return false;
             },
             .inspect_op => {},
             .insert_op, .update_op, .delete_op => {},
         }
     }
+    return true;
+}
 
-    result.stats.rows_matched = result.row_count;
-    result.stats.rows_returned = result.row_count;
+fn applyNestedSelectionJoin(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    pipeline_node: NodeIndex,
+    source_model_id: ModelId,
+    caps: *const capacity_mod.OperatorCapacities,
+) bool {
+    const selection = getPipelineSelection(ctx.ast, pipeline_node) orelse
+        return true;
+    const nested = findSingleNestedSelection(ctx.ast, selection, result) orelse
+        return !result.has_error;
+
+    const relation_name = ctx.tokens.getText(
+        ctx.ast.getNode(nested).extra,
+        ctx.source,
+    );
+    const assoc_id = ctx.catalog.findAssociation(
+        source_model_id,
+        relation_name,
+    ) orelse {
+        setError(result, "nested relation association not found");
+        return false;
+    };
+    const assoc = &ctx.catalog.models[source_model_id].associations[assoc_id];
+    if (assoc.target_model_id == null_model) {
+        setError(result, "nested relation target unresolved");
+        return false;
+    }
+    const target_model_id = assoc.target_model_id;
+
+    var right_result = QueryResult.init(ctx.allocator) catch {
+        setError(result, "nested relation setup failed");
+        return false;
+    };
+    defer right_result.deinit();
+
+    const right_scan = scan_mod.tableScanInto(
+        ctx.catalog,
+        ctx.pool,
+        ctx.undo_log,
+        ctx.snapshot,
+        ctx.tx_manager,
+        target_model_id,
+        right_result.rows,
+    ) catch {
+        setError(result, "nested relation scan failed");
+        return false;
+    };
+    right_result.row_count = right_scan.row_count;
+    right_result.stats.pages_read = right_scan.pages_read;
+
+    var nested_ops: [max_operators]OpDescriptor = undefined;
+    var nested_op_count: u16 = 0;
+    if (ctx.ast.getNode(nested).data.unary != null_node) {
+        const nested_pipeline = ctx.ast.getNode(ctx.ast.getNode(nested).data.unary);
+        if (nested_pipeline.tag != .pipeline) {
+            setError(result, "invalid nested relation pipeline");
+            return false;
+        }
+        buildOperatorList(
+            ctx.ast,
+            nested_pipeline.data.binary.rhs,
+            &nested_ops,
+            &nested_op_count,
+        );
+    }
+    if (!applyReadOperators(
+        ctx,
+        &right_result,
+        target_model_id,
+        &nested_ops,
+        nested_op_count,
+        caps,
+    )) {
+        if (right_result.getError()) |msg| setError(result, msg);
+        return false;
+    }
+
+    const left_copy = ctx.allocator.alloc(ResultRow, result.row_count) catch {
+        setError(result, "nested relation setup failed");
+        return false;
+    };
+    defer ctx.allocator.free(left_copy);
+    @memcpy(left_copy, result.rows[0..result.row_count]);
+
+    const join = inferAssociationJoinDescriptor(
+        ctx.catalog,
+        source_model_id,
+        assoc,
+        result,
+    ) orelse return false;
+    if (!executeInnerJoinBounded(
+        result,
+        left_copy,
+        right_result.rows[0..right_result.row_count],
+        join,
+        caps,
+    )) {
+        return false;
+    }
+    result.stats.pages_read += right_result.stats.pages_read;
+    return true;
+}
+
+fn getPipelineSelection(
+    tree: *const Ast,
+    pipeline_node: NodeIndex,
+) ?NodeIndex {
+    const pipeline = tree.getNode(pipeline_node);
+    if (pipeline.tag != .pipeline) return null;
+    const idx: NodeIndex = pipeline.extra;
+    if (idx >= tree.node_count) return null;
+    const node = tree.getNode(idx);
+    if (node.tag != .selection_set) return null;
+    return idx;
+}
+
+fn findSingleNestedSelection(
+    tree: *const Ast,
+    selection_node: NodeIndex,
+    result: *QueryResult,
+) ?NodeIndex {
+    const selection = tree.getNode(selection_node);
+    if (selection.tag != .selection_set) return null;
+
+    var nested: NodeIndex = null_node;
+    var field = selection.data.unary;
+    while (field != null_node) {
+        const node = tree.getNode(field);
+        if (node.tag == .select_nested) {
+            if (nested != null_node) {
+                setError(result, "multiple nested relations not yet supported");
+                return null;
+            }
+            nested = field;
+        }
+        field = node.next;
+    }
+    return if (nested == null_node) null else nested;
+}
+
+fn inferAssociationJoinDescriptor(
+    catalog: *const Catalog,
+    source_model_id: ModelId,
+    assoc: *const AssociationInfo,
+    result: *QueryResult,
+) ?JoinDescriptor {
+    switch (assoc.kind) {
+        .has_many, .has_one => {
+            const left_key = findPrimaryKeyOrId(catalog, source_model_id) orelse {
+                setError(result, "association local key not found");
+                return null;
+            };
+            const right_key = findModelForeignKey(
+                catalog,
+                assoc.target_model_id,
+                catalog.getModelName(source_model_id),
+            ) orelse {
+                setError(result, "association foreign key not found");
+                return null;
+            };
+            return .{
+                .left_key_index = left_key,
+                .right_key_index = right_key,
+            };
+        },
+        .belongs_to => {
+            const left_key = findModelForeignKey(
+                catalog,
+                source_model_id,
+                catalog.getModelName(assoc.target_model_id),
+            ) orelse {
+                setError(result, "association foreign key not found");
+                return null;
+            };
+            const right_key = findPrimaryKeyOrId(catalog, assoc.target_model_id) orelse {
+                setError(result, "association target key not found");
+                return null;
+            };
+            return .{
+                .left_key_index = left_key,
+                .right_key_index = right_key,
+            };
+        },
+    }
+}
+
+fn findPrimaryKeyOrId(
+    catalog: *const Catalog,
+    model_id: ModelId,
+) ?u16 {
+    const model = &catalog.models[model_id];
+    var i: u16 = 0;
+    while (i < model.column_count) : (i += 1) {
+        if (model.columns[i].is_primary_key) return i;
+    }
+    return catalog.findColumn(model_id, "id");
+}
+
+fn findModelForeignKey(
+    catalog: *const Catalog,
+    model_id: ModelId,
+    base_model_name: []const u8,
+) ?u16 {
+    var buf: [96]u8 = undefined;
+    const key_name = modelForeignKeyName(base_model_name, &buf) orelse
+        return null;
+    return catalog.findColumn(model_id, key_name);
+}
+
+fn modelForeignKeyName(
+    model_name: []const u8,
+    out: []u8,
+) ?[]const u8 {
+    var write_idx: usize = 0;
+    var prev_was_lower = false;
+    for (model_name, 0..) |ch, i| {
+        const is_upper = std.ascii.isUpper(ch);
+        if (is_upper and i > 0 and prev_was_lower) {
+            if (write_idx >= out.len) return null;
+            out[write_idx] = '_';
+            write_idx += 1;
+        }
+        if (write_idx >= out.len) return null;
+        out[write_idx] = std.ascii.toLower(ch);
+        write_idx += 1;
+        prev_was_lower = std.ascii.isLower(ch) or std.ascii.isDigit(ch);
+    }
+    if (write_idx + 3 > out.len) return null;
+    out[write_idx] = '_';
+    out[write_idx + 1] = 'i';
+    out[write_idx + 2] = 'd';
+    write_idx += 3;
+    return out[0..write_idx];
 }
 
 /// Filter rows in-place using a where predicate.
@@ -1798,6 +2074,90 @@ test "execute with unknown model returns error" {
 
     try testing.expect(result.has_error);
     try testing.expect(result.getError() != null);
+}
+
+test "execute nested relation join through selection set" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const post_model = try env.catalog.addModel("Post");
+    _ = try env.catalog.addColumn(post_model, "id", .bigint, false);
+    _ = try env.catalog.addColumn(post_model, "user_id", .bigint, false);
+    env.catalog.models[post_model].heap_first_page_id = 120;
+    env.catalog.models[post_model].total_pages = 1;
+    _ = try env.catalog.addAssociation(
+        env.model_id,
+        "posts",
+        AssociationKind.has_many,
+        "Post",
+    );
+    try env.catalog.resolveAssociations();
+
+    const post_page = try env.pool.pin(120);
+    heap_mod.HeapPage.init(post_page);
+    env.pool.unpin(120, true);
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const inserts = [_][]const u8{
+        "User |> insert(id = 1, name = \"Alice\", active = true)",
+        "User |> insert(id = 2, name = \"Bob\", active = true)",
+        "Post |> insert(id = 20, user_id = 1)",
+        "Post |> insert(id = 10, user_id = 1)",
+        "Post |> insert(id = 15, user_id = 2)",
+    };
+    for (inserts) |src| {
+        const tok = tokenizer_mod.tokenize(src);
+        const p = parser_mod.parse(&tok, src);
+        try testing.expect(!p.has_error);
+        var r = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+        defer r.deinit();
+        try testing.expect(!r.has_error);
+    }
+
+    const src =
+        "User |> sort(id asc) { id posts |> sort(id asc) { id } }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(@as(u16, 3), result.row_count);
+    try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].bigint);
+    try testing.expectEqual(@as(i64, 10), result.rows[0].values[3].bigint);
+    try testing.expectEqual(@as(i64, 1), result.rows[1].values[0].bigint);
+    try testing.expectEqual(@as(i64, 20), result.rows[1].values[3].bigint);
+    try testing.expectEqual(@as(i64, 2), result.rows[2].values[0].bigint);
+    try testing.expectEqual(@as(i64, 15), result.rows[2].values[3].bigint);
+}
+
+test "execute nested relation fails closed when association is missing" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const src = "User { missing { id } }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+
+    try testing.expect(result.has_error);
+    const msg = result.getError().?;
+    try testing.expect(std.mem.indexOf(
+        u8,
+        msg,
+        "nested relation association not found",
+    ) != null);
 }
 
 test "execute delete via pipeline" {
