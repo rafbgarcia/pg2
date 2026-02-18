@@ -39,9 +39,10 @@ pub const BTreeError = error{
 ///
 /// ```
 /// ┌───────────────────────────────────────────────────┐
-/// │ LeafHeader (14 bytes)                             │
+/// │ LeafHeader (18 bytes)                             │
 /// │   cell_count: u16, free_start: u16, free_end: u16 │
 /// │   right_sibling: u64                              │
+/// │   format_magic: u16, format_version: u8           │
 /// ├───────────────────────────────────────────────────┤
 /// │ Cell Pointer Array → (2 bytes each, grows right)  │
 /// ├───────────── free space ──────────────────────────┤
@@ -50,8 +51,10 @@ pub const BTreeError = error{
 /// └───────────────────────────────────────────────────┘
 /// ```
 pub const LeafNode = struct {
-    const header_size: u16 = 14;
+    const header_size: u16 = 18;
     const cell_ptr_size: u16 = 2;
+    const format_magic: u16 = 0x4C32; // "L2"
+    const format_version: u8 = 1;
     /// No sibling. Uses maxInt to avoid collision with valid page IDs.
     pub const no_sibling: u64 = std.math.maxInt(u64);
 
@@ -63,6 +66,9 @@ pub const LeafNode = struct {
         writeU16(&page.content, 2, header_size); // free_start
         writeU16(&page.content, 4, content_size); // free_end
         writeU64(&page.content, 6, no_sibling); // right_sibling
+        writeU16(&page.content, 14, format_magic);
+        page.content[16] = format_version;
+        page.content[17] = 0;
     }
 
     pub fn cellCount(content: *const [content_size]u8) u16 {
@@ -209,9 +215,10 @@ pub const LeafNode = struct {
 ///
 /// ```
 /// ┌───────────────────────────────────────────────────┐
-/// │ InternalHeader (16 bytes)                         │
+/// │ InternalHeader (20 bytes)                         │
 /// │   cell_count: u16, free_start: u16, free_end: u16 │
-/// │   left_child: u64, _reserved: u16                 │
+/// │   left_child: u64                                  │
+/// │   format_magic: u16, format_version: u8           │
 /// ├───────────────────────────────────────────────────┤
 /// │ Cell Pointer Array → (2 bytes each, grows right)  │
 /// ├───────────── free space ──────────────────────────┤
@@ -220,8 +227,10 @@ pub const LeafNode = struct {
 /// └───────────────────────────────────────────────────┘
 /// ```
 pub const InternalNode = struct {
-    const header_size: u16 = 16;
+    const header_size: u16 = 20;
     const cell_ptr_size: u16 = 2;
+    const format_magic: u16 = 0x4932; // "I2"
+    const format_version: u8 = 1;
 
     /// Initialize a page as an empty internal node.
     pub fn init(page: *Page) void {
@@ -231,7 +240,10 @@ pub const InternalNode = struct {
         writeU16(&page.content, 2, header_size); // free_start
         writeU16(&page.content, 4, content_size); // free_end
         writeU64(&page.content, 6, 0); // left_child
-        writeU16(&page.content, 14, 0); // _reserved
+        writeU16(&page.content, 14, format_magic);
+        page.content[16] = format_version;
+        page.content[17] = 0;
+        writeU16(&page.content, 18, 0);
     }
 
     pub fn cellCount(content: *const [content_size]u8) u16 {
@@ -374,6 +386,9 @@ const max_btree_depth = 16;
 /// Max sibling-page hops while advancing a range scan iterator.
 /// This guards against malformed cyclic sibling chains.
 const max_leaf_sibling_hops = 1024;
+/// Fixed split scratch capacities derived from page-size bounds.
+const max_leaf_split_entries = (content_size - LeafNode.header_size) / 14 + 1;
+const max_internal_split_entries = (content_size - InternalNode.header_size) / 12 + 1;
 
 /// A path entry tracks the page_id and the child index followed at each level.
 const PathEntry = struct {
@@ -662,10 +677,10 @@ pub const BTree = struct {
         total_key_bytes += key.len;
 
         // Allocate entries array and key data buffer.
-        const entries = self.allocator.alloc(TempLeafEntry, total) catch return error.OutOfMemory;
-        defer self.allocator.free(entries);
-        const key_buf = self.allocator.alloc(u8, total_key_bytes) catch return error.OutOfMemory;
-        defer self.allocator.free(key_buf);
+        if (total > max_leaf_split_entries) return error.Corruption;
+        if (total_key_bytes > content_size) return error.Corruption;
+        var entries: [max_leaf_split_entries]TempLeafEntry = undefined;
+        var key_buf: [content_size]u8 = undefined;
 
         // Second pass: copy keys into owned buffer and build entries array.
         var buf_offset: usize = 0;
@@ -792,6 +807,7 @@ pub const BTree = struct {
         const old_left_child = InternalNode.leftChild(&node_page.content);
 
         const total: usize = @as(usize, old_count) + 1;
+        if (total > max_internal_split_entries) return error.Corruption;
 
         // Compute total key bytes for owned copy.
         var total_key_bytes: usize = 0;
@@ -799,11 +815,10 @@ pub const BTree = struct {
             total_key_bytes += InternalNode.getKey(&node_page.content, @intCast(idx_usize)).len;
         }
         total_key_bytes += new_key.len;
+        if (total_key_bytes > content_size) return error.Corruption;
 
-        const entries = self.allocator.alloc(TempInternalEntry, total) catch return error.OutOfMemory;
-        defer self.allocator.free(entries);
-        const key_buf = self.allocator.alloc(u8, total_key_bytes) catch return error.OutOfMemory;
-        defer self.allocator.free(key_buf);
+        var entries: [max_internal_split_entries]TempInternalEntry = undefined;
+        var key_buf: [content_size]u8 = undefined;
 
         var buf_offset: usize = 0;
         var inserted = false;
@@ -1031,6 +1046,8 @@ fn writeU64(content: *[content_size]u8, offset: anytype, value: u64) void {
 }
 
 fn validateLeafStructure(content: *const [content_size]u8) bool {
+    if (readU16(content, 14) != LeafNode.format_magic) return false;
+    if (content[16] != LeafNode.format_version) return false;
     const count = LeafNode.cellCount(content);
     const free_start = readU16(content, 2);
     const free_end = readU16(content, 4);
@@ -1063,6 +1080,8 @@ fn validateLeafStructure(content: *const [content_size]u8) bool {
 }
 
 fn validateInternalStructure(content: *const [content_size]u8) bool {
+    if (readU16(content, 14) != InternalNode.format_magic) return false;
+    if (content[16] != InternalNode.format_version) return false;
     const count = InternalNode.cellCount(content);
     const free_start = readU16(content, 2);
     const free_end = readU16(content, 4);
@@ -1381,6 +1400,22 @@ test "btree: corrupted leaf structure returns Corruption" {
     try testing.expectError(error.Corruption, result);
 }
 
+test "btree: invalid leaf format version returns Corruption" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
+    defer pool.deinit();
+
+    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    const root = try pool.pin(tree.root_page_id);
+    root.content[16] = LeafNode.format_version + 1;
+    pool.unpin(tree.root_page_id, true);
+
+    try testing.expectError(error.Corruption, tree.find("anything"));
+}
+
 test "btree: corrupted leaf cell pointer returns Corruption" {
     const disk_mod = @import("../simulator/disk.zig");
     var disk = disk_mod.SimulatedDisk.init(testing.allocator);
@@ -1422,6 +1457,29 @@ test "btree: corrupted internal key length returns Corruption" {
     pool.unpin(1, true);
 
     try testing.expectError(error.Corruption, tree.find("z"));
+}
+
+test "btree: invalid internal format magic returns Corruption" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
+    defer pool.deinit();
+
+    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    const root = try pool.pin(tree.root_page_id);
+    InternalNode.init(root);
+    InternalNode.setLeftChild(&root.content, 1);
+    root.content[14] = 0;
+    root.content[15] = 0;
+    pool.unpin(tree.root_page_id, true);
+
+    const child = try pool.pin(1);
+    LeafNode.init(child);
+    pool.unpin(1, true);
+
+    try testing.expectError(error.Corruption, tree.find("anything"));
 }
 
 test "btree: traversal depth guard returns Corruption" {

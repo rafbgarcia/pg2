@@ -68,14 +68,15 @@ Refs: `src/executor/filter.zig`
 Notes: Replaced unchecked integer arithmetic with checked ops and explicit `error.NumericOverflow` handling (binary arithmetic, unary negate, `abs`), with regression tests for overflow edges.
 
 5. Persistent format versioning still incomplete outside WAL envelope.
-Status: `partial`
+Status: `done`
 Refs: `src/storage/page.zig` and broader on-disk structs
-Notes: Added page-header on-disk format metadata (`format_version` + `format_magic`) with explicit deserialize validation and incompatibility tests; added row payload format header (`magic` + `version`) with checked decode validation tests.
-Remaining: extend explicit format-version metadata/validation to remaining on-disk structures (e.g., heap/btree payload-level metadata where needed).
+Notes: Added page-header on-disk format metadata (`format_version` + `format_magic`) with explicit deserialize validation and incompatibility tests; added row payload format header (`magic` + `version`) with checked decode validation tests; added heap slotted-header format metadata and B-tree leaf/internal payload format metadata with corruption-path validation tests.
 
 6. Static allocation/allocator sealing policy not yet enforced.
-Status: `pending`
+Status: `partial`
 Refs: runtime alloc paths across executor/storage/mvcc
+Notes: Removed hot-path dynamic allocator usage from B-tree split logic by using fixed-capacity split scratch buffers derived from page-size bounds (`src/storage/btree.zig`).
+Remaining: apply similar allocator-sealing strategy across executor result buffering, WAL decode ownership, and other core runtime allocation paths.
 
 7. Deterministic fault injection matrix incomplete.
 Status: `pending`

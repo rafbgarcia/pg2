@@ -13,36 +13,50 @@ pub const RowId = struct {
 /// Slotted page header at the start of the content area.
 ///
 /// Layout within content area:
+///   format_magic: u16  (2 bytes)
+///   format_version: u8 (1 byte)
+///   _reserved: u8      (1 byte)
 ///   slot_count: u16    (2 bytes)
 ///   free_start: u16    (2 bytes) — offset where row data can grow up from
 ///   free_end:   u16    (2 bytes) — offset where slot array grows down to
 ///
 /// Then:
-///   Slot array grows downward from offset 6 (each slot = 4 bytes)
+///   Slot array grows downward from offset 10 (each slot = 4 bytes)
 ///   Row data grows upward from the end of the content area
 ///
 /// Header then slot array, then free space, then row data.
 const SlottedHeader = struct {
+    format_magic: u16,
+    format_version: u8,
+    reserved: u8,
     slot_count: u16,
     free_start: u16, // end of slot array (next free byte for slots)
     free_end: u16, // start of row data region (rows grow from end toward start)
 
-    const size = 6;
+    const size = 10;
+    const format_magic_value: u16 = 0x4832; // "H2"
+    const format_version_value: u8 = 1;
 
     fn read(content: *const [content_size]u8) SlottedHeader {
         std.debug.assert(content_size >= SlottedHeader.size);
         const header = SlottedHeader{
-            .slot_count = std.mem.littleToNative(
+            .format_magic = std.mem.littleToNative(
                 u16,
                 std.mem.bytesAsValue(u16, content[0..2]).*,
             ),
+            .format_version = content[2],
+            .reserved = content[3],
+            .slot_count = std.mem.littleToNative(
+                u16,
+                std.mem.bytesAsValue(u16, content[4..6]).*,
+            ),
             .free_start = std.mem.littleToNative(
                 u16,
-                std.mem.bytesAsValue(u16, content[2..4]).*,
+                std.mem.bytesAsValue(u16, content[6..8]).*,
             ),
             .free_end = std.mem.littleToNative(
                 u16,
-                std.mem.bytesAsValue(u16, content[4..6]).*,
+                std.mem.bytesAsValue(u16, content[8..10]).*,
             ),
         };
         assert_header_valid(header);
@@ -54,13 +68,19 @@ const SlottedHeader = struct {
         std.debug.assert(content_size >= SlottedHeader.size);
         @memcpy(
             content[0..2],
+            std.mem.asBytes(&std.mem.nativeToLittle(u16, self.format_magic)),
+        );
+        content[2] = self.format_version;
+        content[3] = self.reserved;
+        @memcpy(
+            content[4..6],
             std.mem.asBytes(&std.mem.nativeToLittle(u16, self.slot_count)),
         );
         @memcpy(
-            content[2..4],
+            content[6..8],
             std.mem.asBytes(&std.mem.nativeToLittle(u16, self.free_start)),
         );
-        @memcpy(content[4..6], std.mem.asBytes(&std.mem.nativeToLittle(u16, self.free_end)));
+        @memcpy(content[8..10], std.mem.asBytes(&std.mem.nativeToLittle(u16, self.free_end)));
     }
 };
 
@@ -126,6 +146,9 @@ pub const HeapPage = struct {
         page.header.page_type = .heap;
         @memset(&page.content, 0);
         const header = SlottedHeader{
+            .format_magic = SlottedHeader.format_magic_value,
+            .format_version = SlottedHeader.format_version_value,
+            .reserved = 0,
             .slot_count = 0,
             .free_start = SlottedHeader.size,
             .free_end = content_size,
@@ -273,6 +296,8 @@ pub const HeapPage = struct {
 };
 
 fn assert_header_valid(header: SlottedHeader) void {
+    std.debug.assert(header.format_magic == SlottedHeader.format_magic_value);
+    std.debug.assert(header.format_version == SlottedHeader.format_version_value);
     std.debug.assert(header.free_start >= SlottedHeader.size);
     std.debug.assert(header.free_start <= content_size);
     std.debug.assert(header.free_end <= content_size);
@@ -302,6 +327,20 @@ test "init creates empty heap page" {
     // Free space should be content_size minus the slotted header.
     const expected = @as(u16, content_size - SlottedHeader.size);
     try std.testing.expectEqual(expected, HeapPage.free_space(&page));
+}
+
+test "heap header format metadata is initialized" {
+    var page = Page.init(0, .free);
+    HeapPage.init(&page);
+    const header = SlottedHeader.read(&page.content);
+    try std.testing.expectEqual(
+        SlottedHeader.format_magic_value,
+        header.format_magic,
+    );
+    try std.testing.expectEqual(
+        SlottedHeader.format_version_value,
+        header.format_version,
+    );
 }
 
 test "insert and read single row" {
