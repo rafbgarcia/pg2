@@ -12,6 +12,8 @@ const TokenizeResult = tokenizer_mod.TokenizeResult;
 
 /// Maximum nesting depth for selection sets.
 const max_nesting_depth = 16;
+const sort_key_desc_mask: u16 = 0x0001;
+const sort_key_expr_mask: u16 = 0x8000;
 
 pub const ParseError = error{
     AstFull,
@@ -158,8 +160,13 @@ fn parseModelStatement(
 
 fn isSchemaKeyword(tok_type: TokenType) bool {
     return switch (tok_type) {
-        .kw_field, .kw_has_many, .kw_has_one, .kw_belongs_to,
-        .kw_index, .kw_unique_index, .kw_scope,
+        .kw_field,
+        .kw_has_many,
+        .kw_has_one,
+        .kw_belongs_to,
+        .kw_index,
+        .kw_unique_index,
+        .kw_scope,
         => true,
         else => false,
     };
@@ -187,7 +194,7 @@ fn parsePipeline(
         pos += 1;
         if (pos < tokens.count and
             (tokens.tokens[pos].token_type == .identifier or
-            tokens.tokens[pos].token_type == .model_name))
+                tokens.tokens[pos].token_type == .model_name))
         {
             ast.getNodeMut(source_node).extra = pos;
             pos += 1;
@@ -334,7 +341,7 @@ fn parseSortOp(
             const key_node = try ast.addNodeFull(
                 .sort_key,
                 .{ .unary = expr.node },
-                direction,
+                direction | sort_key_expr_mask,
                 null_node,
             );
             if (first_key == null_node) {
@@ -362,7 +369,7 @@ fn parseSortOp(
         const key_node = try ast.addNodeFull(
             .sort_key,
             .{ .token = field_tok },
-            direction,
+            direction & sort_key_desc_mask,
             null_node,
         );
         if (first_key == null_node) {
@@ -565,7 +572,7 @@ fn parseSelectionField(
         const next_pos = pos + 1;
         if (next_pos < tokens.count and
             (tokens.tokens[next_pos].token_type == .pipe_arrow or
-            tokens.tokens[next_pos].token_type == .left_brace))
+                tokens.tokens[next_pos].token_type == .left_brace))
         {
             return parseNestedRelation(ast, tokens, pos, depth);
         }
@@ -808,9 +815,20 @@ fn parseSchemaIndex(
 
 fn isAggOrFn(tok_type: TokenType) bool {
     return switch (tok_type) {
-        .agg_count, .agg_sum, .agg_avg, .agg_min, .agg_max,
-        .fn_now, .fn_lower, .fn_upper, .fn_trim, .fn_length,
-        .fn_abs, .fn_sqrt, .fn_round, .fn_coalesce,
+        .agg_count,
+        .agg_sum,
+        .agg_avg,
+        .agg_min,
+        .agg_max,
+        .fn_now,
+        .fn_lower,
+        .fn_upper,
+        .fn_trim,
+        .fn_length,
+        .fn_abs,
+        .fn_sqrt,
+        .fn_round,
+        .fn_coalesce,
         => true,
         else => false,
     };

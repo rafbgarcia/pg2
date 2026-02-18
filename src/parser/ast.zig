@@ -52,7 +52,9 @@ pub const NodeTag = enum(u8) {
     select_nested, // nested relation; data.token = relation name, data.unary = pipeline/selection
 
     // Sort key
-    sort_key, // data.token = field, extra encodes asc(0)/desc(1)
+    // data.token = field token (column key), or data.unary = expression node.
+    // extra bit 0 encodes direction asc(0)/desc(1), bit 15 marks expression key.
+    sort_key,
 
     // Assignment (for insert/update)
     assignment, // data.token = field name, data.unary = expression
@@ -100,7 +102,7 @@ pub const AstNode = struct {
     /// Link to next sibling (for lists: operators, fields, args).
     next: NodeIndex = null_node,
     /// Extra data: operator token index for binary/unary expr,
-    /// asc/desc flag for sort_key, type token for schema_field, etc.
+    /// sort-key direction/encoding bits, type token for schema_field, etc.
     extra: u16 = 0,
 };
 

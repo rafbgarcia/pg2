@@ -29,6 +29,10 @@ const Snapshot = tx_mod.Snapshot;
 const TxManager = tx_mod.TxManager;
 const UndoLog = undo_mod.UndoLog;
 const ResultRow = scan_mod.ResultRow;
+const compareValues = row_mod.compareValues;
+const max_sort_keys = capacity_mod.max_sort_keys;
+const sort_key_desc_mask: u16 = 0x0001;
+const sort_key_expr_mask: u16 = 0x8000;
 
 /// Maximum pipeline operators in a single query.
 pub const max_operators = capacity_mod.max_pipeline_operators;
@@ -58,7 +62,8 @@ pub const QueryResult = struct {
 
     pub fn init(allocator: Allocator) error{OutOfMemory}!QueryResult {
         const rows = try allocator.alloc(
-            ResultRow, scan_mod.max_result_rows,
+            ResultRow,
+            scan_mod.max_result_rows,
         );
         const result = QueryResult{
             .rows = rows,
@@ -77,7 +82,9 @@ pub const QueryResult = struct {
     pub fn getError(self: *const QueryResult) ?[]const u8 {
         if (!self.has_error) return null;
         const len = std.mem.indexOfScalar(
-            u8, &self.error_message, 0,
+            u8,
+            &self.error_message,
+            0,
         ) orelse self.error_message.len;
         return self.error_message[0..len];
     }
@@ -145,7 +152,8 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
         return result;
     }
     const model_name = ctx.tokens.getText(
-        source_node.data.token, ctx.source,
+        source_node.data.token,
+        ctx.source,
     );
     const model_id = ctx.catalog.findModel(model_name) orelse {
         setError(&result, "model not found");
@@ -156,7 +164,10 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
     var ops: [max_operators]OpDescriptor = undefined;
     var op_count: u16 = 0;
     buildOperatorList(
-        ctx.ast, pipeline.data.binary.rhs, &ops, &op_count,
+        ctx.ast,
+        pipeline.data.binary.rhs,
+        &ops,
+        &op_count,
     );
 
     // Check for mutations.
@@ -183,8 +194,13 @@ fn executeReadPipeline(
     const caps = capacity_mod.OperatorCapacities.defaults();
 
     const scan_result = scan_mod.tableScanInto(
-        ctx.catalog, ctx.pool, ctx.undo_log,
-        ctx.snapshot, ctx.tx_manager, model_id, result.rows,
+        ctx.catalog,
+        ctx.pool,
+        ctx.undo_log,
+        ctx.snapshot,
+        ctx.tx_manager,
+        model_id,
+        result.rows,
     ) catch {
         setError(result, "table scan failed");
         return;
@@ -206,7 +222,7 @@ fn executeReadPipeline(
             .limit_op => applyLimit(ctx, result, op.node),
             .offset_op => applyOffset(ctx, result, op.node),
             .sort_op => {
-                if (!applySortStub(ctx, result, op.node, &caps)) return;
+                if (!applySort(ctx, result, op.node, schema, &caps)) return;
             },
             .inspect_op => {},
             .insert_op, .update_op, .delete_op => {},
@@ -234,8 +250,12 @@ fn applyWhereFilter(
     while (read_idx < result.row_count) : (read_idx += 1) {
         const row = &result.rows[read_idx];
         const matches = filter_mod.evaluatePredicate(
-            ctx.ast, ctx.tokens, ctx.source, predicate,
-            row.values[0..row.column_count], schema,
+            ctx.ast,
+            ctx.tokens,
+            ctx.source,
+            predicate,
+            row.values[0..row.column_count],
+            schema,
         ) catch false;
 
         if (matches) {
@@ -260,7 +280,12 @@ fn applyLimit(
     if (expr == null_node) return;
 
     const val = filter_mod.evaluateExpression(
-        ctx.ast, ctx.tokens, ctx.source, expr, &.{}, &RowSchema{},
+        ctx.ast,
+        ctx.tokens,
+        ctx.source,
+        expr,
+        &.{},
+        &RowSchema{},
     ) catch return;
 
     const limit: u16 = switch (val) {
@@ -292,7 +317,12 @@ fn applyOffset(
     if (expr == null_node) return;
 
     const val = filter_mod.evaluateExpression(
-        ctx.ast, ctx.tokens, ctx.source, expr, &.{}, &RowSchema{},
+        ctx.ast,
+        ctx.tokens,
+        ctx.source,
+        expr,
+        &.{},
+        &RowSchema{},
     ) catch return;
 
     const offset: u16 = switch (val) {
@@ -321,10 +351,23 @@ fn applyOffset(
     std.debug.assert(result.row_count == remaining);
 }
 
-fn applySortStub(
+const SortKeyKind = enum {
+    column,
+    expression,
+};
+
+const SortKeyDescriptor = struct {
+    kind: SortKeyKind,
+    descending: bool,
+    column_index: u16 = 0,
+    expr_node: NodeIndex = null_node,
+};
+
+fn applySort(
     ctx: *const ExecContext,
     result: *QueryResult,
     sort_node: NodeIndex,
+    schema: *const RowSchema,
     caps: *const capacity_mod.OperatorCapacities,
 ) bool {
     const node = ctx.ast.getNode(sort_node);
@@ -341,8 +384,24 @@ fn applySortStub(
         setError(result, "sort row capacity exceeded");
         return false;
     }
-    setError(result, "sort not implemented yet");
-    return false;
+
+    var sort_keys: [max_sort_keys]SortKeyDescriptor = undefined;
+    if (!buildSortKeyDescriptors(
+        ctx,
+        result,
+        node.data.unary,
+        schema,
+        sort_keys[0..],
+        key_count,
+    )) {
+        return false;
+    }
+
+    sortRowsInPlace(ctx, result, schema, sort_keys[0..key_count]) catch {
+        setError(result, "sort key evaluation failed");
+        return false;
+    };
+    return true;
 }
 
 fn applyAggregateStub(
@@ -369,6 +428,146 @@ fn applyAggregateStub(
     return false;
 }
 
+fn buildSortKeyDescriptors(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    first_key: NodeIndex,
+    schema: *const RowSchema,
+    out_keys: []SortKeyDescriptor,
+    key_count: u16,
+) bool {
+    std.debug.assert(@as(usize, key_count) <= out_keys.len);
+
+    var current = first_key;
+    var index: u16 = 0;
+    while (current != null_node and index < key_count) : (index += 1) {
+        const key_node = ctx.ast.getNode(current);
+        if (key_node.tag != .sort_key) {
+            setError(result, "invalid sort key node");
+            return false;
+        }
+
+        const descending = (key_node.extra & sort_key_desc_mask) != 0;
+        const is_expr = (key_node.extra & sort_key_expr_mask) != 0;
+        if (is_expr) {
+            const expr_node = key_node.data.unary;
+            if (expr_node == null_node) {
+                setError(result, "invalid sort expression key");
+                return false;
+            }
+            out_keys[index] = .{
+                .kind = .expression,
+                .descending = descending,
+                .expr_node = expr_node,
+            };
+        } else {
+            const col_name = ctx.tokens.getText(key_node.data.token, ctx.source);
+            const col_index = schema.findColumn(col_name) orelse {
+                setError(result, "sort column not found");
+                return false;
+            };
+            out_keys[index] = .{
+                .kind = .column,
+                .descending = descending,
+                .column_index = col_index,
+            };
+        }
+
+        current = key_node.next;
+    }
+
+    if (index != key_count) {
+        setError(result, "sort key list malformed");
+        return false;
+    }
+    return true;
+}
+
+const SortEvalError = error{
+    EvalFailed,
+};
+
+fn sortRowsInPlace(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    schema: *const RowSchema,
+    sort_keys: []const SortKeyDescriptor,
+) SortEvalError!void {
+    if (result.row_count <= 1) return;
+
+    var i: u16 = 1;
+    while (i < result.row_count) : (i += 1) {
+        var j: u16 = i;
+        while (j > 0) {
+            const prev_idx = j - 1;
+            const order = compareRowsBySortKeys(
+                ctx,
+                schema,
+                &result.rows[prev_idx],
+                &result.rows[j],
+                sort_keys,
+            ) catch return error.EvalFailed;
+            if (order != .gt) break;
+            const temp = result.rows[prev_idx];
+            result.rows[prev_idx] = result.rows[j];
+            result.rows[j] = temp;
+            j -= 1;
+        }
+    }
+}
+
+fn compareRowsBySortKeys(
+    ctx: *const ExecContext,
+    schema: *const RowSchema,
+    lhs_row: *const ResultRow,
+    rhs_row: *const ResultRow,
+    sort_keys: []const SortKeyDescriptor,
+) SortEvalError!std.math.Order {
+    for (sort_keys) |key| {
+        const lhs_value = evaluateSortKeyValue(
+            ctx,
+            schema,
+            lhs_row,
+            key,
+        ) catch return error.EvalFailed;
+        const rhs_value = evaluateSortKeyValue(
+            ctx,
+            schema,
+            rhs_row,
+            key,
+        ) catch return error.EvalFailed;
+        var order = compareValues(lhs_value, rhs_value);
+        if (key.descending) {
+            order = switch (order) {
+                .lt => .gt,
+                .gt => .lt,
+                .eq => .eq,
+            };
+        }
+        if (order != .eq) return order;
+    }
+    return .eq;
+}
+
+fn evaluateSortKeyValue(
+    ctx: *const ExecContext,
+    schema: *const RowSchema,
+    row: *const ResultRow,
+    key: SortKeyDescriptor,
+) filter_mod.EvalError!Value {
+    return switch (key.kind) {
+        .column => row.values[key.column_index],
+        .expression => filter_mod.evaluateExpression(
+            ctx.ast,
+            ctx.tokens,
+            ctx.source,
+            key.expr_node,
+            row.values[0..row.column_count],
+            schema,
+        ),
+    };
+}
+
 /// Execute a mutation pipeline (insert, update, or delete).
 fn executeMutation(
     ctx: *const ExecContext,
@@ -384,8 +583,15 @@ fn executeMutation(
         .insert_op => {
             const node = ctx.ast.getNode(mut_op.node);
             const row_id = mutation_mod.executeInsert(
-                ctx.catalog, ctx.pool, ctx.wal, ctx.tx_id, model_id,
-                ctx.ast, ctx.tokens, ctx.source, node.data.unary,
+                ctx.catalog,
+                ctx.pool,
+                ctx.wal,
+                ctx.tx_id,
+                model_id,
+                ctx.ast,
+                ctx.tokens,
+                ctx.source,
+                node.data.unary,
             ) catch {
                 setError(result, "insert failed");
                 return;
@@ -397,10 +603,20 @@ fn executeMutation(
             const predicate = findPredicate(ctx.ast, ops, op_count);
             const node = ctx.ast.getNode(mut_op.node);
             const count = mutation_mod.executeUpdate(
-                ctx.catalog, ctx.pool, ctx.wal, ctx.undo_log,
-                ctx.tx_id, ctx.snapshot, ctx.tx_manager, model_id,
-                ctx.ast, ctx.tokens, ctx.source,
-                predicate, node.data.unary, ctx.allocator,
+                ctx.catalog,
+                ctx.pool,
+                ctx.wal,
+                ctx.undo_log,
+                ctx.tx_id,
+                ctx.snapshot,
+                ctx.tx_manager,
+                model_id,
+                ctx.ast,
+                ctx.tokens,
+                ctx.source,
+                predicate,
+                node.data.unary,
+                ctx.allocator,
             ) catch {
                 setError(result, "update failed");
                 return;
@@ -410,10 +626,19 @@ fn executeMutation(
         .delete_op => {
             const predicate = findPredicate(ctx.ast, ops, op_count);
             const count = mutation_mod.executeDelete(
-                ctx.catalog, ctx.pool, ctx.wal, ctx.undo_log,
-                ctx.tx_id, ctx.snapshot, ctx.tx_manager, model_id,
-                ctx.ast, ctx.tokens, ctx.source,
-                predicate, ctx.allocator,
+                ctx.catalog,
+                ctx.pool,
+                ctx.wal,
+                ctx.undo_log,
+                ctx.tx_id,
+                ctx.snapshot,
+                ctx.tx_manager,
+                model_id,
+                ctx.ast,
+                ctx.tokens,
+                ctx.source,
+                predicate,
+                ctx.allocator,
             ) catch {
                 setError(result, "delete failed");
                 return;
@@ -525,7 +750,9 @@ const ExecTestEnv = struct {
     fn init(self: *ExecTestEnv) !void {
         self.disk = disk_mod.SimulatedDisk.init(testing.allocator);
         self.pool = try BufferPool.init(
-            testing.allocator, self.disk.storage(), 16,
+            testing.allocator,
+            self.disk.storage(),
+            16,
         );
         self.wal = Wal.init(testing.allocator, self.disk.storage());
         self.tm = TxManager.init(testing.allocator);
@@ -534,13 +761,22 @@ const ExecTestEnv = struct {
         self.catalog = Catalog{};
         self.model_id = try self.catalog.addModel("User");
         _ = try self.catalog.addColumn(
-            self.model_id, "id", .bigint, false,
+            self.model_id,
+            "id",
+            .bigint,
+            false,
         );
         _ = try self.catalog.addColumn(
-            self.model_id, "name", .string, true,
+            self.model_id,
+            "name",
+            .string,
+            true,
         );
         _ = try self.catalog.addColumn(
-            self.model_id, "active", .boolean, true,
+            self.model_id,
+            "active",
+            .boolean,
+            true,
         );
         self.catalog.models[self.model_id].heap_first_page_id = 100;
 
@@ -634,7 +870,8 @@ test "execute scan query returns rows" {
     try testing.expect(!result.has_error);
     try testing.expectEqual(@as(u16, 1), result.row_count);
     try testing.expectEqual(
-        @as(i64, 1), result.rows[0].values[0].bigint,
+        @as(i64, 1),
+        result.rows[0].values[0].bigint,
     );
 }
 
@@ -676,7 +913,8 @@ test "execute where filter" {
     try testing.expect(!result.has_error);
     try testing.expectEqual(@as(u16, 1), result.row_count);
     try testing.expectEqual(
-        @as(i64, 1), result.rows[0].values[0].bigint,
+        @as(i64, 1),
+        result.rows[0].values[0].bigint,
     );
 }
 
@@ -749,7 +987,8 @@ test "execute offset" {
     try testing.expect(!result.has_error);
     try testing.expectEqual(@as(u16, 1), result.row_count);
     try testing.expectEqual(
-        @as(i64, 2), result.rows[0].values[0].bigint,
+        @as(i64, 2),
+        result.rows[0].values[0].bigint,
     );
 }
 
@@ -804,7 +1043,7 @@ test "execute delete via pipeline" {
     try testing.expectEqual(@as(u32, 1), result.stats.rows_deleted);
 }
 
-test "execute sort returns explicit not-implemented error" {
+test "execute sort orders rows by key and direction" {
     var env: ExecTestEnv = undefined;
     try env.init();
     defer env.deinit();
@@ -813,21 +1052,74 @@ test "execute sort returns explicit not-implemented error" {
     var snap = try env.tm.snapshot(tx);
     defer snap.deinit();
 
-    const src1 = "User |> insert(id = 1, name = \"Alice\", active = true)";
-    const tok1 = tokenizer_mod.tokenize(src1);
-    const p1 = parser_mod.parse(&tok1, src1);
-    var r1 = try execute(&env.makeCtx(tx, &snap, &p1.ast, &tok1, src1));
-    defer r1.deinit();
+    const inserts = [_][]const u8{
+        "User |> insert(id = 1, name = \"Bob\", active = true)",
+        "User |> insert(id = 2, name = \"Alice\", active = true)",
+        "User |> insert(id = 3, name = \"Carol\", active = false)",
+    };
+    for (inserts) |src| {
+        const tok = tokenizer_mod.tokenize(src);
+        const p = parser_mod.parse(&tok, src);
+        var r = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+        defer r.deinit();
+    }
 
-    const src2 = "User |> sort(name asc)";
-    const tok2 = tokenizer_mod.tokenize(src2);
-    const p2 = parser_mod.parse(&tok2, src2);
-    var result = try execute(&env.makeCtx(tx, &snap, &p2.ast, &tok2, src2));
+    const asc_src = "User |> sort(name asc)";
+    const asc_tok = tokenizer_mod.tokenize(asc_src);
+    const asc_parsed = parser_mod.parse(&asc_tok, asc_src);
+    var asc_result = try execute(
+        &env.makeCtx(tx, &snap, &asc_parsed.ast, &asc_tok, asc_src),
+    );
+    defer asc_result.deinit();
+    try testing.expect(!asc_result.has_error);
+    try testing.expectEqual(@as(i64, 2), asc_result.rows[0].values[0].bigint);
+    try testing.expectEqual(@as(i64, 1), asc_result.rows[1].values[0].bigint);
+    try testing.expectEqual(@as(i64, 3), asc_result.rows[2].values[0].bigint);
+
+    const desc_src = "User |> sort(name desc)";
+    const desc_tok = tokenizer_mod.tokenize(desc_src);
+    const desc_parsed = parser_mod.parse(&desc_tok, desc_src);
+    var desc_result = try execute(
+        &env.makeCtx(tx, &snap, &desc_parsed.ast, &desc_tok, desc_src),
+    );
+    defer desc_result.deinit();
+    try testing.expect(!desc_result.has_error);
+    try testing.expectEqual(@as(i64, 3), desc_result.rows[0].values[0].bigint);
+    try testing.expectEqual(@as(i64, 1), desc_result.rows[1].values[0].bigint);
+    try testing.expectEqual(@as(i64, 2), desc_result.rows[2].values[0].bigint);
+}
+
+test "execute sort supports expression keys" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const inserts = [_][]const u8{
+        "User |> insert(id = 1, name = \"xx\", active = true)",
+        "User |> insert(id = 2, name = \"a\", active = true)",
+        "User |> insert(id = 3, name = \"bbbb\", active = true)",
+    };
+    for (inserts) |src| {
+        const tok = tokenizer_mod.tokenize(src);
+        const p = parser_mod.parse(&tok, src);
+        var r = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+        defer r.deinit();
+    }
+
+    const src = "User |> sort(length(name) desc)";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
     defer result.deinit();
 
-    try testing.expect(result.has_error);
-    const msg = result.getError().?;
-    try testing.expect(std.mem.indexOf(u8, msg, "sort not implemented yet") != null);
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(@as(i64, 3), result.rows[0].values[0].bigint);
+    try testing.expectEqual(@as(i64, 1), result.rows[1].values[0].bigint);
+    try testing.expectEqual(@as(i64, 2), result.rows[2].values[0].bigint);
 }
 
 test "execute sort enforces key capacity contract" {
