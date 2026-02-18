@@ -27,6 +27,7 @@ pub const catalog = struct {
 
 pub const executor = struct {
     pub const exec = @import("executor/executor.zig");
+    pub const capacity = @import("executor/capacity.zig");
     pub const scan = @import("executor/scan.zig");
     pub const filter = @import("executor/filter.zig");
     pub const mutation = @import("executor/mutation.zig");
@@ -60,6 +61,7 @@ comptime {
     _ = catalog.meta;
     _ = catalog.schema_loader;
     _ = executor.exec;
+    _ = executor.capacity;
     _ = executor.scan;
     _ = executor.filter;
     _ = executor.mutation;

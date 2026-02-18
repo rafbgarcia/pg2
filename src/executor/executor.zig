@@ -10,6 +10,7 @@ const undo_mod = @import("../mvcc/undo.zig");
 const filter_mod = @import("filter.zig");
 const scan_mod = @import("scan.zig");
 const mutation_mod = @import("mutation.zig");
+const capacity_mod = @import("capacity.zig");
 
 const Allocator = std.mem.Allocator;
 const Ast = ast_mod.Ast;
@@ -30,7 +31,7 @@ const UndoLog = undo_mod.UndoLog;
 const ResultRow = scan_mod.ResultRow;
 
 /// Maximum pipeline operators in a single query.
-pub const max_operators = 32;
+pub const max_operators = capacity_mod.max_pipeline_operators;
 
 /// Execution statistics for a query.
 pub const ExecStats = struct {
