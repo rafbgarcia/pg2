@@ -319,7 +319,7 @@ test "empty scan returns zero rows" {
     defer pool.deinit();
     var tm = TxManager.init(testing.allocator);
     defer tm.deinit();
-    var undo_log = UndoLog.init(testing.allocator);
+    var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
     defer undo_log.deinit();
 
     var catalog = Catalog{};
@@ -346,7 +346,7 @@ test "scan with rows inserted via HeapPage" {
     defer pool.deinit();
     var tm = TxManager.init(testing.allocator);
     defer tm.deinit();
-    var undo_log = UndoLog.init(testing.allocator);
+    var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
     defer undo_log.deinit();
 
     var catalog = Catalog{};
@@ -399,7 +399,7 @@ test "scan skips deleted slots" {
     defer pool.deinit();
     var tm = TxManager.init(testing.allocator);
     defer tm.deinit();
-    var undo_log = UndoLog.init(testing.allocator);
+    var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
     defer undo_log.deinit();
 
     var catalog = Catalog{};
@@ -445,7 +445,7 @@ test "scan pages_read tracks correctly" {
     defer pool.deinit();
     var tm = TxManager.init(testing.allocator);
     defer tm.deinit();
-    var undo_log = UndoLog.init(testing.allocator);
+    var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
     defer undo_log.deinit();
 
     var catalog = Catalog{};

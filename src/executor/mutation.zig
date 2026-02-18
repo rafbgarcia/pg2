@@ -538,7 +538,7 @@ const TestEnv = struct {
         );
         self.wal = Wal.init(testing.allocator, self.disk.storage());
         self.tm = TxManager.init(testing.allocator);
-        self.undo_log = UndoLog.init(testing.allocator);
+        self.undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
 
         self.catalog = Catalog{};
         self.model_id = try self.catalog.addModel("User");
