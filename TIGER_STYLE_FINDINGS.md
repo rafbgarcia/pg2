@@ -82,8 +82,8 @@ This tracker exists to keep continuity across sessions:
 7. Deterministic fault injection matrix incomplete.
    Status: `partial`
    Refs: `src/simulator/disk.zig`, simulation tests
-   Notes: Added deterministic one-shot fault injection controls for Nth read/write/fsync plus partial-write and bitflip-on-write corruption in `SimulatedDisk` with regression tests for each path; added buffer-pool propagation tests validating deterministic `StorageRead`/`StorageWrite`/`StorageFsync` error surfacing; added WAL end-to-end torn-write recovery regression (`recover` + `readFrom`) and a new seeded fault-matrix module covering multi-step replay-deterministic scenarios (partial WAL write + crash + recover, data-page bitflip + checksum detection, WAL fsync failure + WAL-gated page flush). Seeded WAL recovery matrix now exercises bounded decode buffers via `readFromInto`.
-   Remaining: broaden seeded matrix coverage to more interleavings and longer schedules.
+   Notes: Added deterministic one-shot fault injection controls for Nth read/write/fsync plus partial-write and bitflip-on-write corruption in `SimulatedDisk` with regression tests for each path; added buffer-pool propagation tests validating deterministic `StorageRead`/`StorageWrite`/`StorageFsync` error surfacing; added WAL end-to-end torn-write recovery regression (`recover` + `readFrom`) and a seeded fault-matrix module covering multi-step replay-deterministic scenarios (partial WAL write + crash + recover, data-page bitflip + checksum detection, WAL fsync failure + WAL-gated page flush). Seeded WAL recovery matrix now exercises bounded decode buffers via `readFromInto`, and includes a longer multi-fault interleaving schedule (torn write + failed commit fsync + retry flush + crash/recover replay).
+   Remaining: add more long schedules that combine buffer-pool page corruption paths with WAL failure/recovery phases in a single seeded run.
 
 ## Current Build State
 
@@ -103,6 +103,7 @@ This tracker exists to keep continuity across sessions:
   - Added WAL torn-write recovery regression (`src/storage/wal.zig`).
   - Added bounded no-allocation WAL decode API `readFromInto` with explicit `RecordBufferTooSmall` / `PayloadBufferTooSmall` errors and tests (`src/storage/wal.zig`).
   - Migrated seeded WAL partial-write recovery matrix scenario to bounded caller-owned WAL decode buffers via `readFromInto` (`src/simulator/fault_matrix.zig`).
+  - Added seeded replay-deterministic multi-fault WAL interleaving scenario (torn write + fsync failure on commit + retry flush + crash/recover) in `src/simulator/fault_matrix.zig`.
   - Updated WAL error mappings in taxonomy/boundary adapters (`src/tiger/error_taxonomy.zig`, `src/executor/mutation.zig`, `src/storage/btree.zig`).
 - In progress:
   - Allocator-sealing migration is still partial at the system level; bounded WAL decode is now exercised in seeded simulation, but broader runtime call-site adoption is still incomplete.
@@ -111,6 +112,6 @@ This tracker exists to keep continuity across sessions:
 - Tests run:
   - `zig build test`
 - Next recommended step:
-  1. Continue migrating runtime WAL recovery/read callers to `readFromInto` with explicit bounded buffers and capacity contracts.
-  2. Apply same sealing strategy to executor result buffering paths (replace dynamic growth with fixed arena/limits where possible).
-  3. Expand seeded fault-matrix scenarios to longer interleavings with multiple injected faults per schedule.
+  1. Apply allocator-sealing strategy to executor result buffering paths (replace dynamic growth with fixed arena/limits where possible).
+  2. Continue migrating runtime WAL recovery/read callers to bounded decode APIs as new runtime call sites are added.
+  3. Expand seeded fault-matrix schedules to combined buffer-pool corruption + WAL failure/recovery interleavings in one run.

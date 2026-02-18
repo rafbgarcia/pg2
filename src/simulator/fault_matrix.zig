@@ -129,6 +129,75 @@ fn runWalFsyncThenPageFlushGate(seed: u64) !ScenarioOutcome {
     return .{ .signature = h.final() };
 }
 
+fn runWalMultiFaultInterleaving(seed: u64) !ScenarioOutcome {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rand = prng.random();
+
+    var disk = SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+
+    var payload1: [96]u8 = undefined;
+    const payload1_len = 16 + rand.uintLessThan(usize, 48);
+    rand.bytes(payload1[0..payload1_len]);
+    const partial_prefix = 1 + rand.uintLessThan(usize, wal_mod.Record.header_size);
+    disk.partialWriteAt(disk.writes + 1, partial_prefix);
+    _ = try wal.beginTx(1);
+    _ = try wal.append(1, .insert, 100 + rand.uintLessThan(u64, 32), payload1[0..payload1_len]);
+    _ = try wal.commitTx(1);
+
+    disk.crash();
+
+    var recovered = Wal.init(std.testing.allocator, disk.storage());
+    defer recovered.deinit();
+    try recovered.recover();
+
+    var first_records_buf: [8]wal_mod.Record = undefined;
+    var first_payload_buf: [256]u8 = undefined;
+    const first_decoded = try recovered.readFromInto(1, &first_records_buf, &first_payload_buf);
+    const first_records = first_records_buf[0..first_decoded.records_len];
+    try std.testing.expect(first_records.len <= 3);
+
+    var payload2: [96]u8 = undefined;
+    const payload2_len = 16 + rand.uintLessThan(usize, 48);
+    rand.bytes(payload2[0..payload2_len]);
+    _ = try recovered.beginTx(2);
+    _ = try recovered.append(2, .insert, 200 + rand.uintLessThan(u64, 32), payload2[0..payload2_len]);
+    const before_failed_flush = recovered.flushed_lsn;
+    disk.failFsyncAt(disk.fsyncs + 1);
+    try std.testing.expectError(error.WalFsyncError, recovered.commitTx(2));
+    try std.testing.expectEqual(before_failed_flush, recovered.flushed_lsn);
+    try recovered.flush();
+    try std.testing.expect(recovered.flushed_lsn > before_failed_flush);
+
+    disk.crash();
+
+    var final_wal = Wal.init(std.testing.allocator, disk.storage());
+    defer final_wal.deinit();
+    try final_wal.recover();
+
+    var final_records_buf: [16]wal_mod.Record = undefined;
+    var final_payload_buf: [512]u8 = undefined;
+    const final_decoded = try final_wal.readFromInto(1, &final_records_buf, &final_payload_buf);
+    const final_records = final_records_buf[0..final_decoded.records_len];
+    try std.testing.expect(final_records.len <= final_records_buf.len);
+
+    var h = std.hash.Wyhash.init(seed ^ 0xA11CE004);
+    const first_len_u64: u64 = @intCast(first_records.len);
+    const final_len_u64: u64 = @intCast(final_records.len);
+    h.update(std.mem.asBytes(&first_len_u64));
+    h.update(std.mem.asBytes(&final_len_u64));
+    h.update(std.mem.asBytes(&recovered.flushed_lsn));
+    for (final_records) |rec| {
+        h.update(std.mem.asBytes(&rec.lsn));
+        h.update(std.mem.asBytes(&rec.tx_id));
+        h.update(&[_]u8{@intFromEnum(rec.record_type)});
+    }
+    return .{ .signature = h.final() };
+}
+
 test "seeded schedule: WAL partial write recovery is replay-deterministic" {
     const seed: u64 = 0xC0FFEE01;
     const first = try runWalPartialWriteRecovery(seed);
@@ -147,5 +216,12 @@ test "seeded schedule: WAL fsync failure gates page flush deterministically" {
     const seed: u64 = 0xC0FFEE03;
     const first = try runWalFsyncThenPageFlushGate(seed);
     const second = try runWalFsyncThenPageFlushGate(seed);
+    try std.testing.expectEqual(first.signature, second.signature);
+}
+
+test "seeded schedule: multi-fault WAL interleaving is replay-deterministic" {
+    const seed: u64 = 0xC0FFEE04;
+    const first = try runWalMultiFaultInterleaving(seed);
+    const second = try runWalMultiFaultInterleaving(seed);
     try std.testing.expectEqual(first.signature, second.signature);
 }
