@@ -17,7 +17,6 @@ const Ast = ast_mod.Ast;
 const NodeIndex = ast_mod.NodeIndex;
 const NodeTag = ast_mod.NodeTag;
 const null_node = ast_mod.null_node;
-const TokenType = tokenizer_mod.TokenType;
 const TokenizeResult = tokenizer_mod.TokenizeResult;
 const Value = row_mod.Value;
 const RowSchema = row_mod.RowSchema;
@@ -32,8 +31,35 @@ const UndoLog = undo_mod.UndoLog;
 const ResultRow = scan_mod.ResultRow;
 const compareValues = row_mod.compareValues;
 const max_sort_keys = capacity_mod.max_sort_keys;
+const max_group_aggregate_exprs = capacity_mod.max_group_aggregate_exprs;
 const sort_key_desc_mask: u16 = 0x0001;
 const sort_key_expr_mask: u16 = 0x8000;
+const invalid_aggregate_slot: u8 = std.math.maxInt(u8);
+
+const AggregateKind = enum {
+    count_star,
+    sum,
+    avg,
+    min,
+    max,
+};
+
+const AggregateDescriptor = struct {
+    node_index: NodeIndex,
+    kind: AggregateKind,
+    arg_node: NodeIndex,
+};
+
+const AggregateState = struct {
+    value_count: u32 = 0,
+    sum_bigint: i64 = 0,
+    sum_float: f64 = 0.0,
+    has_min: bool = false,
+    has_max: bool = false,
+    min_value: Value = .{ .null_value = {} },
+    max_value: Value = .{ .null_value = {} },
+    value_type: ?row_mod.ColumnType = null,
+};
 
 const GroupRuntime = struct {
     active: bool = false,
@@ -41,6 +67,13 @@ const GroupRuntime = struct {
     group_key_indices: [capacity_mod.max_group_keys]u16 = undefined,
     group_counts: [scan_mod.max_result_rows]u32 =
         [_]u32{0} ** scan_mod.max_result_rows,
+    aggregate_count: u16 = 0,
+    aggregate_descriptors: [max_group_aggregate_exprs]AggregateDescriptor =
+        undefined,
+    aggregate_slot_by_node: [ast_mod.max_ast_nodes]u8 =
+        [_]u8{invalid_aggregate_slot} ** ast_mod.max_ast_nodes,
+    aggregate_states: [max_group_aggregate_exprs][scan_mod.max_result_rows]AggregateState =
+        undefined,
 };
 
 /// Maximum pipeline operators in a single query.
@@ -238,6 +271,9 @@ fn executeReadPipeline(
                     result,
                     op.node,
                     schema,
+                    ops,
+                    op_count,
+                    i,
                     &caps,
                     &group_runtime,
                 )) return;
@@ -466,6 +502,9 @@ fn applyGroup(
     result: *QueryResult,
     group_node: NodeIndex,
     schema: *const RowSchema,
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+    group_op_index: u16,
     caps: *const capacity_mod.OperatorCapacities,
     group_runtime: *GroupRuntime,
 ) bool {
@@ -498,6 +537,17 @@ fn applyGroup(
         group_key_indices[0..group_key_count],
     );
     @memset(group_runtime.group_counts[0..], 0);
+    if (!collectPostGroupAggregates(
+        ctx,
+        result,
+        ops,
+        op_count,
+        group_op_index,
+        caps,
+        group_runtime,
+    )) {
+        return false;
+    }
 
     var write_idx: u16 = 0;
     var read_idx: u16 = 0;
@@ -509,18 +559,381 @@ fn applyGroup(
             group_key_indices[0..group_key_count],
         )) |group_index| {
             group_runtime.group_counts[group_index] += 1;
+            if (!accumulateGroupAggregates(
+                ctx,
+                result,
+                schema,
+                group_runtime,
+                group_index,
+                candidate.values[0..candidate.column_count],
+            )) {
+                return false;
+            }
         } else {
             if (@as(usize, write_idx) >= caps.aggregate_groups) {
                 setError(result, "aggregate group capacity exceeded");
                 return false;
             }
             result.rows[write_idx] = candidate.*;
+            resetAggregateStatesForGroup(group_runtime, write_idx);
             group_runtime.group_counts[write_idx] = 1;
+            if (!accumulateGroupAggregates(
+                ctx,
+                result,
+                schema,
+                group_runtime,
+                write_idx,
+                candidate.values[0..candidate.column_count],
+            )) {
+                return false;
+            }
             write_idx += 1;
         }
     }
     result.row_count = write_idx;
     return true;
+}
+
+fn collectPostGroupAggregates(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+    group_op_index: u16,
+    caps: *const capacity_mod.OperatorCapacities,
+    group_runtime: *GroupRuntime,
+) bool {
+    group_runtime.aggregate_count = 0;
+    @memset(
+        group_runtime.aggregate_slot_by_node[0..],
+        invalid_aggregate_slot,
+    );
+
+    var op_idx = group_op_index + 1;
+    while (op_idx < op_count) : (op_idx += 1) {
+        const op = ops[op_idx];
+        switch (op.kind) {
+            .where_filter => {
+                const where_node = ctx.ast.getNode(op.node);
+                if (!registerAggregateExprTree(
+                    ctx,
+                    result,
+                    where_node.data.unary,
+                    caps,
+                    group_runtime,
+                )) return false;
+            },
+            .sort_op => {
+                const sort_node = ctx.ast.getNode(op.node);
+                var key = sort_node.data.unary;
+                while (key != null_node) {
+                    const key_node = ctx.ast.getNode(key);
+                    const is_expr = (key_node.extra & sort_key_expr_mask) != 0;
+                    if (is_expr and !registerAggregateExprTree(
+                        ctx,
+                        result,
+                        key_node.data.unary,
+                        caps,
+                        group_runtime,
+                    )) {
+                        return false;
+                    }
+                    key = key_node.next;
+                }
+            },
+            .limit_op, .offset_op => {
+                const n = ctx.ast.getNode(op.node);
+                if (!registerAggregateExprTree(
+                    ctx,
+                    result,
+                    n.data.unary,
+                    caps,
+                    group_runtime,
+                )) return false;
+            },
+            .group_op, .insert_op, .update_op, .delete_op, .inspect_op => {},
+        }
+    }
+
+    return true;
+}
+
+fn resetAggregateStatesForGroup(
+    group_runtime: *GroupRuntime,
+    group_index: u16,
+) void {
+    var slot: u16 = 0;
+    while (slot < group_runtime.aggregate_count) : (slot += 1) {
+        group_runtime.aggregate_states[slot][group_index] = .{};
+    }
+}
+
+fn registerAggregateExprTree(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    expr_root: NodeIndex,
+    caps: *const capacity_mod.OperatorCapacities,
+    group_runtime: *GroupRuntime,
+) bool {
+    if (expr_root == null_node) return true;
+
+    var stack: [ast_mod.max_ast_nodes]NodeIndex = undefined;
+    var stack_len: usize = 0;
+    stack[0] = expr_root;
+    stack_len = 1;
+
+    while (stack_len > 0) {
+        stack_len -= 1;
+        const node_idx = stack[stack_len];
+        if (node_idx == null_node) continue;
+        const node = ctx.ast.getNode(node_idx);
+
+        if (node.tag == .expr_aggregate) {
+            if (!registerAggregateDescriptor(
+                ctx,
+                result,
+                node_idx,
+                caps,
+                group_runtime,
+            )) {
+                return false;
+            }
+        }
+
+        switch (node.tag) {
+            .expr_binary, .expr_in, .expr_not_in => {
+                if (stack_len + 2 > stack.len) {
+                    setError(result, "aggregate expression too complex");
+                    return false;
+                }
+                stack[stack_len] = node.data.binary.lhs;
+                stack[stack_len + 1] = node.data.binary.rhs;
+                stack_len += 2;
+            },
+            .expr_unary, .expr_function_call, .expr_list, .expr_aggregate => {
+                var child = node.data.unary;
+                while (child != null_node) {
+                    if (stack_len >= stack.len) {
+                        setError(result, "aggregate expression too complex");
+                        return false;
+                    }
+                    stack[stack_len] = child;
+                    stack_len += 1;
+                    child = ctx.ast.getNode(child).next;
+                }
+            },
+            else => {},
+        }
+    }
+
+    return true;
+}
+
+fn registerAggregateDescriptor(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    aggregate_node: NodeIndex,
+    caps: *const capacity_mod.OperatorCapacities,
+    group_runtime: *GroupRuntime,
+) bool {
+    std.debug.assert(aggregate_node < ast_mod.max_ast_nodes);
+    if (group_runtime.aggregate_slot_by_node[aggregate_node] !=
+        invalid_aggregate_slot)
+    {
+        return true;
+    }
+
+    const node = ctx.ast.getNode(aggregate_node);
+    const token_type = ctx.tokens.tokens[node.extra].token_type;
+    const descriptor = switch (token_type) {
+        .agg_count => blk: {
+            if (node.data.unary != null_node) {
+                setError(result, "count aggregate shape unsupported");
+                return false;
+            }
+            break :blk null;
+        },
+        .agg_sum => blk: {
+            if (node.data.unary == null_node) {
+                setError(result, "sum aggregate requires an argument");
+                return false;
+            }
+            break :blk AggregateDescriptor{
+                .node_index = aggregate_node,
+                .kind = .sum,
+                .arg_node = node.data.unary,
+            };
+        },
+        .agg_avg => blk: {
+            if (node.data.unary == null_node) {
+                setError(result, "avg aggregate requires an argument");
+                return false;
+            }
+            break :blk AggregateDescriptor{
+                .node_index = aggregate_node,
+                .kind = .avg,
+                .arg_node = node.data.unary,
+            };
+        },
+        .agg_min => blk: {
+            if (node.data.unary == null_node) {
+                setError(result, "min aggregate requires an argument");
+                return false;
+            }
+            break :blk AggregateDescriptor{
+                .node_index = aggregate_node,
+                .kind = .min,
+                .arg_node = node.data.unary,
+            };
+        },
+        .agg_max => blk: {
+            if (node.data.unary == null_node) {
+                setError(result, "max aggregate requires an argument");
+                return false;
+            }
+            break :blk AggregateDescriptor{
+                .node_index = aggregate_node,
+                .kind = .max,
+                .arg_node = node.data.unary,
+            };
+        },
+        else => {
+            setError(result, "unsupported aggregate function");
+            return false;
+        },
+    };
+
+    if (descriptor) |desc| {
+        if (group_runtime.aggregate_count >= max_group_aggregate_exprs) {
+            setError(result, "aggregate expression capacity exceeded");
+            return false;
+        }
+        const groups_upper_bound = @min(
+            @as(usize, result.row_count),
+            caps.aggregate_groups,
+        );
+        const used_slots = @as(usize, group_runtime.aggregate_count) + 1;
+        const total_state_bytes = used_slots *
+            groups_upper_bound *
+            @sizeOf(AggregateState);
+        if (total_state_bytes > caps.aggregate_state_bytes) {
+            setError(result, "aggregate state capacity exceeded");
+            return false;
+        }
+
+        const slot = group_runtime.aggregate_count;
+        group_runtime.aggregate_descriptors[slot] = desc;
+        group_runtime.aggregate_slot_by_node[aggregate_node] = @intCast(slot);
+        group_runtime.aggregate_count += 1;
+    }
+    return true;
+}
+
+fn accumulateGroupAggregates(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    schema: *const RowSchema,
+    group_runtime: *GroupRuntime,
+    group_index: u16,
+    row_values: []const Value,
+) bool {
+    var slot: u16 = 0;
+    while (slot < group_runtime.aggregate_count) : (slot += 1) {
+        const descriptor = group_runtime.aggregate_descriptors[slot];
+        if (descriptor.kind == .count_star) continue;
+
+        const arg_value = filter_mod.evaluateExpression(
+            ctx.ast,
+            ctx.tokens,
+            ctx.source,
+            descriptor.arg_node,
+            row_values,
+            schema,
+        ) catch {
+            setError(result, "aggregate evaluation failed");
+            return false;
+        };
+
+        const state = &group_runtime.aggregate_states[slot][group_index];
+        updateAggregateState(state, descriptor.kind, arg_value) catch {
+            setError(result, "aggregate evaluation failed");
+            return false;
+        };
+    }
+    return true;
+}
+
+fn updateAggregateState(
+    state: *AggregateState,
+    kind: AggregateKind,
+    value: Value,
+) filter_mod.EvalError!void {
+    if (value == .null_value) return;
+    const value_type = value.columnType() orelse return error.TypeMismatch;
+
+    switch (kind) {
+        .sum => {
+            switch (value) {
+                .bigint => |v| {
+                    if (state.value_type == null) state.value_type = .bigint;
+                    if (state.value_type.? != .bigint) return error.TypeMismatch;
+                    state.sum_bigint = std.math.add(i64, state.sum_bigint, v) catch
+                        return error.NumericOverflow;
+                },
+                .int => |v| {
+                    if (state.value_type == null) state.value_type = .int;
+                    if (state.value_type.? != .int) return error.TypeMismatch;
+                    state.sum_bigint = std.math.add(i64, state.sum_bigint, v) catch
+                        return error.NumericOverflow;
+                },
+                .float => |v| {
+                    if (state.value_type == null) state.value_type = .float;
+                    if (state.value_type.? != .float) return error.TypeMismatch;
+                    state.sum_float += v;
+                },
+                else => return error.TypeMismatch,
+            }
+            state.value_count += 1;
+        },
+        .avg => {
+            const numeric = switch (value) {
+                .bigint => |v| @as(f64, @floatFromInt(v)),
+                .int => |v| @as(f64, @floatFromInt(v)),
+                .float => |v| v,
+                else => return error.TypeMismatch,
+            };
+            if (state.value_type == null) {
+                state.value_type = value_type;
+            } else if (state.value_type.? != value_type) {
+                return error.TypeMismatch;
+            }
+            state.sum_float += numeric;
+            state.value_count += 1;
+        },
+        .min => {
+            if (state.value_type == null) {
+                state.value_type = value_type;
+            } else if (state.value_type.? != value_type) {
+                return error.TypeMismatch;
+            }
+            if (!state.has_min or compareValues(value, state.min_value) == .lt) {
+                state.min_value = value;
+                state.has_min = true;
+            }
+        },
+        .max => {
+            if (state.value_type == null) {
+                state.value_type = value_type;
+            } else if (state.value_type.? != value_type) {
+                return error.TypeMismatch;
+            }
+            if (!state.has_max or compareValues(value, state.max_value) == .gt) {
+                state.max_value = value;
+                state.has_max = true;
+            }
+        },
+        .count_star => {},
+    }
 }
 
 fn buildGroupKeyIndices(
@@ -825,17 +1238,36 @@ fn resolveGroupedAggregate(
 
     const node = agg_ctx.ctx.ast.getNode(node_index);
     if (node.tag != .expr_aggregate) return error.UnknownFunction;
-
-    const agg_token_type: TokenType =
-        agg_ctx.ctx.tokens.tokens[node.extra].token_type;
-    switch (agg_token_type) {
-        .agg_count => {
-            if (node.data.unary != null_node) return error.UnknownFunction;
-            const count = agg_ctx.group_runtime.group_counts[agg_ctx.row_index];
-            return .{ .bigint = @intCast(count) };
-        },
-        else => return error.UnknownFunction,
+    const token_type = agg_ctx.ctx.tokens.tokens[node.extra].token_type;
+    if (token_type == .agg_count) {
+        if (node.data.unary != null_node) return error.UnknownFunction;
+        const count = agg_ctx.group_runtime.group_counts[agg_ctx.row_index];
+        return .{ .bigint = @intCast(count) };
     }
+
+    if (node_index >= agg_ctx.group_runtime.aggregate_slot_by_node.len) {
+        return error.UnknownFunction;
+    }
+    const slot = agg_ctx.group_runtime.aggregate_slot_by_node[node_index];
+    if (slot == invalid_aggregate_slot) return error.UnknownFunction;
+
+    const descriptor = agg_ctx.group_runtime.aggregate_descriptors[slot];
+    const state = agg_ctx.group_runtime.aggregate_states[slot][agg_ctx.row_index];
+    return switch (descriptor.kind) {
+        .count_star => return error.UnknownFunction,
+        .sum => if (state.value_type) |ty| switch (ty) {
+            .bigint, .int => .{ .bigint = state.sum_bigint },
+            .float => .{ .float = state.sum_float },
+            else => return error.TypeMismatch,
+        } else .{ .null_value = {} },
+        .avg => blk: {
+            if (state.value_count == 0) break :blk .{ .null_value = {} };
+            const divisor = @as(f64, @floatFromInt(state.value_count));
+            break :blk .{ .float = state.sum_float / divisor };
+        },
+        .min => if (state.has_min) state.min_value else .{ .null_value = {} },
+        .max => if (state.has_max) state.max_value else .{ .null_value = {} },
+    };
 }
 
 /// Execute a mutation pipeline (insert, update, or delete).
@@ -1528,4 +1960,90 @@ test "execute group supports where on count star" {
     try testing.expect(!result.has_error);
     try testing.expectEqual(@as(u16, 1), result.row_count);
     try testing.expectEqual(true, result.rows[0].values[2].boolean);
+}
+
+test "execute group supports sum avg min max aggregates" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const inserts = [_][]const u8{
+        "User |> insert(id = 1, name = \"A\", active = true)",
+        "User |> insert(id = 2, name = \"B\", active = true)",
+        "User |> insert(id = 10, name = \"C\", active = false)",
+    };
+    for (inserts) |src| {
+        const tok = tokenizer_mod.tokenize(src);
+        const p = parser_mod.parse(&tok, src);
+        var r = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+        defer r.deinit();
+    }
+
+    const src =
+        "User |> group(active) |> where(max(id) > 1 and min(id) >= 1) |> sort(sum(id) asc, avg(id) asc)";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(@as(u16, 2), result.row_count);
+    try testing.expectEqual(true, result.rows[0].values[2].boolean);
+    try testing.expectEqual(false, result.rows[1].values[2].boolean);
+}
+
+test "execute group sum enforces numeric input types" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const inserts = [_][]const u8{
+        "User |> insert(id = 1, name = \"A\", active = true)",
+        "User |> insert(id = 2, name = \"B\", active = false)",
+    };
+    for (inserts) |src| {
+        const tok = tokenizer_mod.tokenize(src);
+        const p = parser_mod.parse(&tok, src);
+        var r = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+        defer r.deinit();
+    }
+
+    const src = "User |> group(active) |> where(sum(name) > 0)";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+
+    try testing.expect(result.has_error);
+    const msg = result.getError().?;
+    try testing.expect(std.mem.indexOf(u8, msg, "aggregate evaluation failed") != null);
+}
+
+test "execute group enforces aggregate expression capacity contract" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const src =
+        "User |> group(active) |> where(sum(id) > 0 and avg(id) > 0 and min(id) > 0 and max(id) > 0 and sum(id + 1) > 0)";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+
+    try testing.expect(result.has_error);
+    const msg = result.getError().?;
+    try testing.expect(std.mem.indexOf(u8, msg, "aggregate expression capacity exceeded") != null);
 }
