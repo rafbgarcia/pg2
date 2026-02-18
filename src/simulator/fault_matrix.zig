@@ -38,8 +38,10 @@ fn runWalPartialWriteRecovery(seed: u64) !ScenarioOutcome {
     defer recovered.deinit();
     try recovered.recover();
 
-    const records = try recovered.readFrom(1, std.testing.allocator);
-    defer Wal.freeRecords(records, std.testing.allocator);
+    var records_buf: [8]wal_mod.Record = undefined;
+    var payload_buf: [256]u8 = undefined;
+    const decoded = try recovered.readFromInto(1, &records_buf, &payload_buf);
+    const records = records_buf[0..decoded.records_len];
     try std.testing.expect(records.len <= 3);
 
     var h = std.hash.Wyhash.init(seed ^ 0xA11CE001);
