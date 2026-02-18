@@ -11,6 +11,42 @@ const ScenarioOutcome = struct {
     signature: u64,
 };
 
+fn splitMix64(state: *u64) u64 {
+    state.* +%= 0x9E3779B97F4A7C15;
+    var z = state.*;
+    z = (z ^ (z >> 30)) *% 0xBF58476D1CE4E5B9;
+    z = (z ^ (z >> 27)) *% 0x94D049BB133111EB;
+    return z ^ (z >> 31);
+}
+
+fn buildSeedSet(comptime count: usize, seed: u64) [count]u64 {
+    var out: [count]u64 = undefined;
+    var state = seed;
+    var i: usize = 0;
+    while (i < count) : (i += 1) {
+        out[i] = splitMix64(&state);
+    }
+    return out;
+}
+
+fn expectReplayDeterministicAcrossSeeds(
+    scenario_name: []const u8,
+    seeds: []const u64,
+    comptime run_scenario: fn (u64) anyerror!ScenarioOutcome,
+) !void {
+    for (seeds, 0..) |seed, seed_index| {
+        const first = try run_scenario(seed);
+        const second = try run_scenario(seed);
+        if (first.signature != second.signature) {
+            std.debug.print(
+                "determinism mismatch scenario={s} seed_index={} seed=0x{x} first=0x{x} second=0x{x}\n",
+                .{ scenario_name, seed_index, seed, first.signature, second.signature },
+            );
+        }
+        try std.testing.expectEqual(first.signature, second.signature);
+    }
+}
+
 fn runWalPartialWriteRecovery(seed: u64) !ScenarioOutcome {
     var prng = std.Random.DefaultPrng.init(seed);
     const rand = prng.random();
@@ -470,6 +506,11 @@ const seed_set = [_]u64{
     0x51515151,
 };
 
+const ci_short_seed_budget: usize = 24;
+const ci_long_seed_budget: usize = 12;
+const ci_short_seed_set = buildSeedSet(ci_short_seed_budget, 0xC1F00D55);
+const ci_long_seed_set = buildSeedSet(ci_long_seed_budget, 0xC1F00D66);
+
 test "seeded schedule: WAL partial write recovery is replay-deterministic across seed set" {
     for (seed_set) |seed| {
         const first = try runWalPartialWriteRecovery(seed);
@@ -524,4 +565,47 @@ test "seeded schedule: long WAL and page interleaving remains replay-determinist
         const second = try runLongWalPageInterleaving(seed);
         try std.testing.expectEqual(first.signature, second.signature);
     }
+}
+
+test "ci seed sweep: extended deterministic replay coverage for short schedules" {
+    std.debug.assert(ci_short_seed_set.len == ci_short_seed_budget);
+    try expectReplayDeterministicAcrossSeeds(
+        "wal_partial_write_recovery",
+        ci_short_seed_set[0..],
+        runWalPartialWriteRecovery,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "page_bitflip_checksum",
+        ci_short_seed_set[0..],
+        runPageBitflipChecksum,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "wal_fsync_then_page_flush_gate",
+        ci_short_seed_set[0..],
+        runWalFsyncThenPageFlushGate,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "wal_multi_fault_interleaving",
+        ci_short_seed_set[0..],
+        runWalMultiFaultInterleaving,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "combined_wal_and_page_corruption",
+        ci_short_seed_set[0..],
+        runCombinedWalAndPageCorruption,
+    );
+}
+
+test "ci seed sweep: bounded deterministic replay coverage for long schedules" {
+    std.debug.assert(ci_long_seed_set.len == ci_long_seed_budget);
+    try expectReplayDeterministicAcrossSeeds(
+        "wal_repeated_crash_recovery_cycles",
+        ci_long_seed_set[0..],
+        runWalRepeatedCrashRecoveryCycles,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "long_wal_page_interleaving",
+        ci_long_seed_set[0..],
+        runLongWalPageInterleaving,
+    );
 }

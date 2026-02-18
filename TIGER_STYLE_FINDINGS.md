@@ -82,7 +82,7 @@ This tracker exists to keep continuity across sessions:
 7. Deterministic fault injection matrix incomplete.
    Status: `partial`
    Refs: `src/simulator/disk.zig`, simulation tests
-   Notes: Added deterministic one-shot fault injection controls for Nth read/write/fsync plus partial-write and bitflip-on-write corruption in `SimulatedDisk` with regression tests for each path; added buffer-pool propagation tests validating deterministic `StorageRead`/`StorageWrite`/`StorageFsync` error surfacing; added WAL end-to-end torn-write recovery regression (`recover` + `readFrom`) and a seeded fault-matrix module covering multi-step replay-deterministic scenarios (partial WAL write + crash + recover, data-page bitflip + checksum detection, WAL fsync failure + WAL-gated page flush). Seeded WAL recovery matrix now exercises bounded decode buffers via `readFromInto`, includes a longer multi-fault interleaving schedule (torn write + failed commit fsync + retry flush + crash/recover replay), includes a combined cross-subsystem schedule (WAL fsync failure/retry + WAL-gated page flush + page-write bitflip corruption + checksum enforcement + WAL recover/replay), validates each seeded schedule across an expanded seed set, and now includes a longer cross-subsystem schedule with mixed WAL fsync failure gating, page-write bitflip corruption, partial-write corruption, repeated crash/recover cycles, and deterministic replay checks (`src/simulator/fault_matrix.zig`).
+   Notes: Added deterministic one-shot fault injection controls for Nth read/write/fsync plus partial-write and bitflip-on-write corruption in `SimulatedDisk` with regression tests for each path; added buffer-pool propagation tests validating deterministic `StorageRead`/`StorageWrite`/`StorageFsync` error surfacing; added WAL end-to-end torn-write recovery regression (`recover` + `readFrom`) and a seeded fault-matrix module covering multi-step replay-deterministic scenarios (partial WAL write + crash + recover, data-page bitflip + checksum detection, WAL fsync failure + WAL-gated page flush). Seeded WAL recovery matrix now exercises bounded decode buffers via `readFromInto`, includes a longer multi-fault interleaving schedule (torn write + failed commit fsync + retry flush + crash/recover replay), includes a combined cross-subsystem schedule (WAL fsync failure/retry + WAL-gated page flush + page-write bitflip corruption + checksum enforcement + WAL recover/replay), validates each seeded schedule across an expanded seed set, and now includes a longer cross-subsystem schedule with mixed WAL fsync failure gating, page-write bitflip corruption, partial-write corruption, repeated crash/recover cycles, and deterministic replay checks (`src/simulator/fault_matrix.zig`). Added CI-oriented deterministic sweep helpers and generated seed corpora with explicit bounded budgets (`ci_short_seed_budget`, `ci_long_seed_budget`), plus dedicated extended-seed replay tests for short and long schedules with seed-index diagnostics on mismatch (`src/simulator/fault_matrix.zig`).
    Remaining: keep growing seed/interleaving breadth in CI (larger seed corpus + longer schedules) as new storage/recovery paths land.
 
 ## Current Build State
@@ -129,3 +129,26 @@ This tracker exists to keep continuity across sessions:
   1. Implement bounded join operator execution (state/scratch/output contracts, fail-closed capacity errors, deterministic regressions).
   2. Add CI-oriented seed sweeps for fault-matrix scenarios (larger deterministic seed corpus with bounded runtime budget and failure-shrinking output).
   3. Continue retiring allocator-backed WAL `readFrom` usage outside explicit compatibility tests as new recovery/read call sites are added.
+
+### Session Handoff - 2026-02-18 (continued)
+
+- Goal this session:
+  - Continue Tiger-style hardening by adding CI-oriented deterministic replay sweeps with explicit runtime bounds and better failure diagnostics.
+- Completed:
+  - Added deterministic seed-set generator utilities (`splitMix64`, `buildSeedSet`) in `src/simulator/fault_matrix.zig` so seed corpora are reproducible and easy to scale.
+  - Added reusable replay-determinism assertion helper (`expectReplayDeterministicAcrossSeeds`) with explicit mismatch diagnostics that include scenario name, seed index, and seed value.
+  - Added bounded CI-oriented seed sweeps:
+    - `ci_short_seed_budget = 24` for shorter schedules.
+    - `ci_long_seed_budget = 12` for longer schedules.
+  - Added two dedicated sweep tests to keep runtime bounded while increasing seed breadth:
+    - extended deterministic replay coverage for short schedules.
+    - bounded deterministic replay coverage for long schedules.
+- In progress:
+  - Deterministic fault matrix remains `partial`; the matrix now has broader CI seed coverage, but additional interleavings should continue to be added as new persistence/recovery paths land.
+- Blockers / decisions needed:
+  - None for this increment.
+- Tests run:
+  - `zig build test`
+- Next recommended step:
+  1. Implement bounded join operator execution (state/scratch/output contracts, fail-closed capacity errors, deterministic regressions).
+  2. Continue retiring allocator-backed WAL `readFrom` usage outside explicit compatibility tests as new recovery/read call sites are introduced.
