@@ -20,6 +20,11 @@ pub const parser = struct {
     pub const parse = @import("parser/parser.zig");
 };
 
+pub const catalog = struct {
+    pub const meta = @import("catalog/catalog.zig");
+    pub const schema_loader = @import("catalog/schema_loader.zig");
+};
+
 pub const simulator = struct {
     pub const disk = @import("simulator/disk.zig");
     pub const clock = @import("simulator/clock.zig");
@@ -40,6 +45,8 @@ comptime {
     _ = parser.ast;
     _ = parser.expression;
     _ = parser.parse;
+    _ = catalog.meta;
+    _ = catalog.schema_loader;
     _ = simulator.disk;
     _ = simulator.clock;
 }
