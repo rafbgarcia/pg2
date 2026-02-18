@@ -217,7 +217,7 @@ fn executeReadPipeline(
         switch (op.kind) {
             .where_filter => applyWhereFilter(ctx, result, op.node, schema),
             .group_op => {
-                if (!applyAggregateStub(ctx, result, op.node, &caps)) return;
+                if (!applyGroup(ctx, result, op.node, schema, &caps)) return;
             },
             .limit_op => applyLimit(ctx, result, op.node),
             .offset_op => applyOffset(ctx, result, op.node),
@@ -404,10 +404,11 @@ fn applySort(
     return true;
 }
 
-fn applyAggregateStub(
+fn applyGroup(
     ctx: *const ExecContext,
     result: *QueryResult,
     group_node: NodeIndex,
+    schema: *const RowSchema,
     caps: *const capacity_mod.OperatorCapacities,
 ) bool {
     const node = ctx.ast.getNode(group_node);
@@ -420,12 +421,92 @@ fn applyAggregateStub(
         setError(result, "group key capacity exceeded");
         return false;
     }
-    if (@as(usize, result.row_count) > caps.aggregate_groups) {
-        setError(result, "aggregate group capacity exceeded");
+    var group_key_indices: [capacity_mod.max_group_keys]u16 = undefined;
+    if (!buildGroupKeyIndices(
+        ctx,
+        result,
+        schema,
+        node.data.unary,
+        group_key_count,
+        group_key_indices[0..],
+    )) {
         return false;
     }
-    setError(result, "group/aggregate not implemented yet");
+
+    var write_idx: u16 = 0;
+    var read_idx: u16 = 0;
+    while (read_idx < result.row_count) : (read_idx += 1) {
+        const candidate = &result.rows[read_idx];
+        if (!groupAlreadyExists(
+            result.rows[0..write_idx],
+            candidate,
+            group_key_indices[0..group_key_count],
+        )) {
+            if (@as(usize, write_idx) >= caps.aggregate_groups) {
+                setError(result, "aggregate group capacity exceeded");
+                return false;
+            }
+            result.rows[write_idx] = candidate.*;
+            write_idx += 1;
+        }
+    }
+    result.row_count = write_idx;
+    return true;
+}
+
+fn buildGroupKeyIndices(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    schema: *const RowSchema,
+    first_group_key: NodeIndex,
+    group_key_count: u16,
+    out_indices: []u16,
+) bool {
+    std.debug.assert(@as(usize, group_key_count) <= out_indices.len);
+
+    var key_idx: u16 = 0;
+    var current = first_group_key;
+    while (current != null_node and key_idx < group_key_count) : (key_idx += 1) {
+        const key_node = ctx.ast.getNode(current);
+        if (key_node.tag != .expr_column_ref) {
+            setError(result, "group key must be a column");
+            return false;
+        }
+        const col_name = ctx.tokens.getText(key_node.data.token, ctx.source);
+        const col_index = schema.findColumn(col_name) orelse {
+            setError(result, "group column not found");
+            return false;
+        };
+        out_indices[key_idx] = col_index;
+        current = key_node.next;
+    }
+    return key_idx == group_key_count;
+}
+
+fn groupAlreadyExists(
+    grouped_rows: []const ResultRow,
+    candidate: *const ResultRow,
+    key_indices: []const u16,
+) bool {
+    for (grouped_rows) |grouped| {
+        if (rowsEqualOnGroupKeys(&grouped, candidate, key_indices)) {
+            return true;
+        }
+    }
     return false;
+}
+
+fn rowsEqualOnGroupKeys(
+    lhs: *const ResultRow,
+    rhs: *const ResultRow,
+    key_indices: []const u16,
+) bool {
+    for (key_indices) |col_index| {
+        if (compareValues(lhs.values[col_index], rhs.values[col_index]) != .eq) {
+            return false;
+        }
+    }
+    return true;
 }
 
 fn buildSortKeyDescriptors(
@@ -1142,7 +1223,7 @@ test "execute sort enforces key capacity contract" {
     try testing.expect(std.mem.indexOf(u8, msg, "sort capacity exceeded") != null);
 }
 
-test "execute group returns explicit not-implemented error" {
+test "execute group collapses rows by key" {
     var env: ExecTestEnv = undefined;
     try env.init();
     defer env.deinit();
@@ -1151,7 +1232,40 @@ test "execute group returns explicit not-implemented error" {
     var snap = try env.tm.snapshot(tx);
     defer snap.deinit();
 
-    const src = "User |> group(active)";
+    const inserts = [_][]const u8{
+        "User |> insert(id = 1, name = \"A\", active = true)",
+        "User |> insert(id = 2, name = \"B\", active = false)",
+        "User |> insert(id = 3, name = \"C\", active = true)",
+    };
+    for (inserts) |src| {
+        const tok = tokenizer_mod.tokenize(src);
+        const p = parser_mod.parse(&tok, src);
+        var r = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+        defer r.deinit();
+    }
+
+    const src = "User |> group(active) |> sort(active asc)";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(@as(u16, 2), result.row_count);
+    try testing.expectEqual(false, result.rows[0].values[2].boolean);
+    try testing.expectEqual(true, result.rows[1].values[2].boolean);
+}
+
+test "execute group enforces key capacity contract" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const src = "User |> group(id, name, active, id, name, active, id, name, active)";
     const tok = tokenizer_mod.tokenize(src);
     const p = parser_mod.parse(&tok, src);
     var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
@@ -1159,5 +1273,5 @@ test "execute group returns explicit not-implemented error" {
 
     try testing.expect(result.has_error);
     const msg = result.getError().?;
-    try testing.expect(std.mem.indexOf(u8, msg, "group/aggregate not implemented yet") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "group key capacity exceeded") != null);
 }
