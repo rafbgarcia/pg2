@@ -25,6 +25,13 @@ pub const catalog = struct {
     pub const schema_loader = @import("catalog/schema_loader.zig");
 };
 
+pub const executor = struct {
+    pub const exec = @import("executor/executor.zig");
+    pub const scan = @import("executor/scan.zig");
+    pub const filter = @import("executor/filter.zig");
+    pub const mutation = @import("executor/mutation.zig");
+};
+
 pub const simulator = struct {
     pub const disk = @import("simulator/disk.zig");
     pub const clock = @import("simulator/clock.zig");
@@ -47,6 +54,10 @@ comptime {
     _ = parser.parse;
     _ = catalog.meta;
     _ = catalog.schema_loader;
+    _ = executor.exec;
+    _ = executor.scan;
+    _ = executor.filter;
+    _ = executor.mutation;
     _ = simulator.disk;
     _ = simulator.clock;
 }
