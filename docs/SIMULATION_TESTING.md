@@ -44,6 +44,16 @@ Databases fail in production due to edge cases that are nearly impossible to hit
 
 Everything runs in one OS thread. The scheduler uses a seeded PRNG to decide which actor (client, primary, replica) gets to execute next. This makes the execution fully deterministic.
 
+## Allocation Rules for Simulation Code
+
+The Tiger Style static allocation rules apply to **production code** — the database engine itself. Simulation code (the harness, simulated disk, simulated network) is exempt because:
+
+1. The simulation binary is a test tool, not deployed in production.
+2. Simulated components need to model arbitrary states (e.g., a hash map of pages to simulate a disk) which don't map to fixed-capacity structures.
+3. The simulation's purpose is to test production code behavior, not its own.
+
+Simulation code uses `std.testing.allocator` (which detects leaks) and standard library data structures. The production code under test uses the `StaticAllocator` and is subject to all Tiger Style constraints.
+
 ## Simulated Components
 
 ### Simulated Disk
@@ -169,17 +179,6 @@ zig build sim -- --seed 12345 --crash-probability 0.01 --partial-write-probabili
 ```
 
 When a simulation fails, it prints the seed. Re-running with that seed reproduces the exact failure.
-
-## Build Steps
-
-1. **Implement SimulatedDisk** — in-memory page store with pending writes and fsync semantics. No fault injection yet, just correct simulation of write-then-fsync durability.
-2. **Implement SimulatedClock** — trivial, just a counter.
-3. **Implement Scheduler** — single-threaded loop that picks actors and steps them.
-4. **Wire the storage engine to use the Storage interface** — verify that the buffer pool + WAL work correctly under simulation with no faults.
-5. **Add crash-recovery testing** — simulate crash (discard pending writes), restart, run recovery, verify consistency.
-6. **Add fault injection to SimulatedDisk** — partial writes, read errors, bit flips, fsync failures.
-7. **Implement SimulatedNetwork** — needed once replication is added.
-8. **Add replication invariant checks** — once replication exists.
 
 ## Reference
 

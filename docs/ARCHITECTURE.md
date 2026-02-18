@@ -1,32 +1,5 @@
 # Architecture Overview
 
-## Progress
-
-- [x] **Phase 1: Foundation**
-  - [x] I/O abstraction interfaces (`Storage`, `Clock`, `Network`) — `src/storage/io.zig`
-  - [x] Deterministic simulation harness (`SimulatedDisk`, `SimulatedClock`) — `src/simulator/`
-  - [x] Page struct with CRC-32C checksums — `src/storage/page.zig`
-  - [x] Buffer pool with clock-sweep eviction — `src/storage/buffer_pool.zig`
-  - [x] Build system (`zig build`, `zig build test`, `zig build sim`)
-- [x] **Phase 2: Storage Engine**
-  - [x] Write-ahead log (WAL) — `src/storage/wal.zig`
-  - [x] B-tree indexes — `src/storage/btree.zig`
-  - [x] Heap storage (slotted pages, in-place update) — `src/storage/heap.zig`
-  - [x] Undo-log MVCC + transaction manager — `src/mvcc/`
-  - [x] Buffer pool enforces WAL protocol (page LSN must be flushed before page flush)
-- [ ] **Phase 3: Query Layer**
-  - [ ] pg2 query language parser
-  - [ ] Executor (runtime-adaptive)
-  - [ ] Catalog stats
-  - [ ] Schema / catalog management
-- [ ] **Phase 4: Server**
-  - [ ] Connection handling (custom wire protocol)
-  - [ ] Runtime statistics + introspection
-- [ ] **Phase 5: Replication**
-  - [ ] WAL streaming to replicas
-  - [ ] Replica read path
-  - [ ] Promotion / failover
-
 ## Build Order
 
 The project is built bottom-up. Each layer depends only on the layers below it. The simulation harness is built alongside the storage engine, not after.
@@ -141,9 +114,53 @@ This is analogous to a CPU pipelining your instructions — the semantic behavio
 
 ## Concurrency Model
 
-Single-writer, multiple-reader. One thread handles all writes (mutations are serialized through the WAL). Read-only queries can run concurrently using MVCC snapshots. This simplifies the storage engine dramatically and is sufficient for the learning goals of this project.
+Single-writer, multiple-reader. One thread handles all writes; read-only queries run concurrently using MVCC snapshots.
 
-If the single-writer becomes a bottleneck later, the design can evolve toward partitioned writers, but start simple.
+This is a deliberate architectural choice, not a simplification:
+
+- **Correctness.** Serialized writes eliminate write-write conflicts, lock ordering deadlocks, and phantom reads during DDL. The WAL is a natural serialization point — there is no concurrency benefit to having multiple writers contend on it.
+- **Performance.** A single writer serializing through the WAL can sustain 100K+ TPS on modern hardware. The bottleneck in OLTP is disk I/O (fsync latency), not CPU serialization. Multiple writers would add lock contention without improving throughput.
+- **Simplicity.** The buffer pool, WAL, and undo-log MVCC are dramatically simpler without concurrent writers. Less code means fewer bugs, and fewer bugs matter more in a database than in any other kind of software.
+- **Deterministic simulation.** Single-writer execution is inherently more deterministic, which strengthens the simulation testing model.
+
+This model is used successfully in production by SQLite (WAL mode), LMDB, and TigerBeetle. Read scalability comes from async replicas, not from concurrent writers on the primary.
+
+## Memory Model
+
+All memory is statically allocated at startup. See CLAUDE.md "Tiger Style — Static memory allocation" for the full specification.
+
+Summary: on startup, pg2 `mmap`s a single contiguous region sized by the `--memory` flag (default: 512 MiB). All subsystem pools, buffers, and arenas are bump-allocated from this region. After initialization, the allocator is sealed — any allocation attempt is a panic.
+
+The total budget is subdivided by fixed compile-time ratios:
+
+| Component | Share | Purpose |
+|-----------|-------|---------|
+| Buffer pool | ~70% | Page cache |
+| WAL buffers | ~5% | Write-ahead log |
+| Connection arenas | ~10% | Per-query execution memory |
+| Undo log pool | ~10% | MVCC version storage |
+| Catalog/metadata | ~5% | Schema, indexes metadata |
+
+Per-query memory uses arena allocators carved from the connection pool at startup. Arenas are reset (not freed) after each query.
+
+## Limits
+
+Every resource has a fixed upper bound, configured at startup:
+
+| Resource | Default | Configurable |
+|----------|---------|-------------|
+| Total memory | 512 MiB | `--memory` |
+| Buffer pool frames | derived from memory budget | no (fixed ratio) |
+| Max connections | 64 | `--max-connections` |
+| Max tables | 1024 | compile-time |
+| Max columns per table | 256 | compile-time |
+| Max indexes per table | 32 | compile-time |
+| Max query result rows | bounded by connection arena | no |
+| WAL segment size | 64 MiB | compile-time |
+| WAL retention segments | 16 | `--wal-retention` |
+| Undo log entries | bounded by undo log pool | no |
+
+Exceeding any limit produces an explicit error or panic (for invariant violations), never silent degradation.
 
 ## Catalog Stats
 
@@ -159,4 +176,4 @@ The DB maintains exact, O(1) statistics for every table and index. These are not
 
 These stats serve two purposes:
 1. **Developer visibility** — queryable via `stats(table)` and `stats(index)` in the query language.
-2. **Automatic dataflow decisions** — for unfiltered inputs, the executor uses `row_count * avg_row_size` vs `buffer_pool_size` as a baseline for dataflow and join strategy decisions. When inputs have been transformed by filters or other operators, the executor uses **runtime observation** of actual row counts instead. All decisions are deterministic and reported in stats output.
+2. **Automatic dataflow decisions** — for unfiltered inputs, the executor uses `row_count * avg_row_size` vs the query memory budget as a baseline for dataflow and join strategy decisions. When inputs have been transformed by filters or other operators, the executor uses **runtime observation** of actual row counts instead. All decisions are deterministic and reported in stats output.

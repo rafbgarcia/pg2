@@ -4,7 +4,7 @@
 
 Single primary, multiple async read replicas. All writes go to the primary. Replicas stream the WAL and apply it locally to serve read queries.
 
-This is the simplest replication model that is still useful. It avoids the complexity of multi-writer, consensus protocols, and conflict resolution.
+This model pairs naturally with the single-writer architecture: the primary serializes all writes through one WAL, and replicas replay that WAL in order. No conflict resolution, no consensus protocol, no multi-writer coordination.
 
 ```
          Writes
@@ -26,7 +26,7 @@ The primary maintains the WAL as described in the storage engine doc. Replicas c
 ### Protocol
 
 1. **Replica → Primary**: `REPLICATE(start_lsn)` — "send me all WAL records from this LSN onward."
-2. **Primary → Replica**: streams WAL records as they are written. The primary keeps a configurable amount of WAL history for replicas that fall behind.
+2. **Primary → Replica**: streams WAL records as they are written. The primary retains WAL segments up to the `--wal-retention` limit (default: 16 segments, ~1 GiB).
 3. **Replica applies records**: redo-only (no undo needed since the primary already decided commit/abort). The replica replays committed transactions into its local pages.
 
 ### Replica Lag
@@ -41,6 +41,16 @@ lag                    → 8 records
 
 The query response from a replica includes the replica's LSN, so the application can make informed decisions about staleness.
 
+### Replica Falls Behind
+
+If a replica disconnects or falls behind beyond the WAL retention window, it cannot resume streaming. The primary no longer has the WAL segments the replica needs.
+
+Recovery options:
+1. **Base backup + replay.** Take a snapshot of the primary's data directory, ship it to the replica, and restart streaming from the snapshot's LSN.
+2. **Manual re-initialization.** Drop the replica and provision a new one from a fresh base backup.
+
+The primary rejects `REPLICATE(start_lsn)` requests where `start_lsn` is older than the oldest retained WAL segment, returning an explicit error with the oldest available LSN.
+
 ## Read-Your-Writes
 
 A client that writes to the primary and then reads from a replica might not see its own write (because the replica hasn't caught up). Two approaches:
@@ -48,7 +58,7 @@ A client that writes to the primary and then reads from a replica might not see 
 1. **Client-side**: after a write, the client receives the commit LSN. When reading from a replica, the client passes `min_lsn` — the replica blocks until it has applied at least that LSN, or returns an error if it takes too long.
 2. **Route to primary**: for reads that must see the latest writes, route to the primary.
 
-Implement option 1 — it keeps the replica useful and teaches the consistency tradeoffs.
+pg2 implements option 1 — it keeps the replica useful and makes the consistency tradeoff explicit to the application.
 
 ## Promotion
 
@@ -59,18 +69,9 @@ If the primary dies, a replica can be promoted. The promoted replica:
 3. Starts accepting writes.
 4. Other replicas re-connect to the new primary.
 
-Automatic failover detection (heartbeats, leader election) is out of scope for the initial implementation. Promotion is a manual operation. This avoids needing a consensus protocol.
+Initial implementation: promotion is a manual operator action. Automatic failover (heartbeats, leader election) is a separate concern that requires a consensus protocol and is deferred to a later phase.
 
-## Build Steps
-
-1. **Implement WAL streaming on the primary** — a simple TCP server that sends WAL records to connected replicas.
-2. **Implement WAL receiver on the replica** — connects to the primary, receives records, applies them (redo-only).
-3. **Implement LSN tracking on replicas** — expose applied LSN to clients.
-4. **Implement `min_lsn` on replica reads** — block or error if replica is behind.
-5. **Implement manual promotion** — stop replication, run undo recovery, start accepting writes.
-6. **Test under simulation**: network partitions between primary and replica, primary crash + promotion, replica lag under write load, split-brain prevention (two nodes both think they're primary).
-
-## Future (Out of Scope Initially)
+## Future Work
 
 - Synchronous replication (primary waits for replica acknowledgment before committing)
 - Automatic failover with leader election
