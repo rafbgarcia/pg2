@@ -26,6 +26,7 @@ docs/
   QUERY_LANGUAGE.md
   SIMULATION_TESTING.md
   REPLICATION.md
+  TIGER_STYLE.md
 ```
 
 ## Build & Test
@@ -50,68 +51,18 @@ zig build sim          # Run deterministic simulation tests (takes a seed argume
 
 ## Tiger Style
 
-Adapted from [TigerBeetle's Tiger Style](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md). These principles are mandatory for all pg2 code.
+All Tiger Style and database-specific robustness rules live only in `docs/TIGER_STYLE.md`.
 
-### Static memory allocation
+### PR Gate (Summary)
 
-All memory is statically allocated at startup. No heap allocation after initialization.
+For any PR touching core DB code, complete the mandatory checklist in `docs/TIGER_STYLE.md`:
 
-- On startup, pg2 `mmap`s a single contiguous region sized by the `--memory` flag (default: 512 MiB). All subsystem pools, buffers, and arenas are bump-allocated from this region.
-- After init, the allocator is **sealed** — any allocation attempt after seal is a panic. This is enforced by a `StaticAllocator` that tracks `.init` vs `.static` state.
-- The total budget is subdivided by fixed compile-time ratios:
-  - ~70% buffer pool (page cache)
-  - ~5% WAL buffers
-  - ~10% connection arenas (per-query execution memory)
-  - ~10% undo log pool (MVCC version storage)
-  - ~5% catalog/metadata
-- Per-query memory uses arena allocators carved from the connection pool at startup. Arenas are **reset** (not freed) after each query — no OS allocator calls during query execution.
-- The `--memory` value is always a fixed number set by the operator, never derived from machine hardware. This preserves deterministic simulation: test configs use a small fixed budget (e.g. 8 MiB), production uses whatever the operator specifies.
-
-### Put a limit on everything
-
-Every queue, buffer, loop, and batch has an explicit upper bound. No unbounded data structures.
-
-- All loops have a maximum iteration count. Exceeding it is a panic — it means the bound was wrong, not that the loop should keep going.
-- All queues and ring buffers have fixed capacities allocated at startup.
-- All batches have a maximum size. If a batch fills up, it is flushed — it does not grow.
-- Client connections are capped at `max_connections` (configured at startup).
-- Result sets are bounded. Queries that would exceed the per-query arena fail with an explicit error rather than silently allocating more memory.
-
-### Assertions
-
-Use assertions aggressively. They are the first line of defense and primary debugging tool.
-
-- **Minimum two assertions per function** for any function with non-trivial logic. Assert preconditions at entry. Assert postconditions or invariants before return.
-- Assert across boundaries — when data crosses a module boundary (e.g. page read from disk, message received from network), assert its structural validity immediately.
-- Use `std.debug.assert` for invariants that must hold in all builds. Use `if (!condition) @panic("message")` when you need a descriptive message.
-- Never use `unreachable` for conditions that can actually occur. If a switch case "shouldn't happen," use `@panic` with a message explaining why.
-- Pair assertions: if you assert `x < limit` on insert, assert `x > 0` on remove. Assertions should cover both the positive and negative space.
-
-### Naming
-
-- Use `snake_case` for all identifiers.
-- Include units in names: `timeout_ms`, `size_bytes`, `offset_pages`. Never leave units ambiguous.
-- Suffixes for bounds: `_max`, `_min`, `_limit`, `_count`.
-- Name for the reader, not the writer. If a name requires a comment to explain, the name is wrong.
-- No abbreviations unless universally understood (`wal`, `mvcc`, `lsn` are fine; `buf_mgr`, `txn_ctx` are not — write `buffer_manager`, `transaction_context`).
-
-### No recursion
-
-Do not use recursion. Use explicit fixed-capacity stacks allocated at startup. Recursion hides resource usage in the call stack, which cannot be bounded or asserted on. An explicit stack has a visible capacity, can be asserted against, and fails predictably when the bound is wrong.
-
-### Function and code structure
-
-- **70-line hard limit per function.** If a function exceeds this, it must be split. No exceptions.
-- Declare variables in the smallest possible scope. No declarations at function top "for later."
-- One statement per line. No chained operations that obscure control flow.
-- Centralize control flow — avoid distributing related branching logic across multiple functions when it can live in one place.
-
-### Performance thinking
-
-- Optimize the slowest resource first: **network > disk > memory > CPU.** Do not optimize CPU at the expense of extra disk I/O.
-- **Batch aggressively.** Amortize syscalls, disk writes, and network round-trips. One write of N items beats N writes of one item.
-- Think about performance at design time, not after. If a data structure choice forces O(n) scans, fix the data structure — don't add caching later.
-- Do back-of-the-envelope resource sketches before implementing any new subsystem: how many pages, how many bytes on the wire, how many disk seeks.
+- Invariant changes.
+- Crash-consistency contract.
+- Error class changes.
+- Persistent format/protocol impact.
+- Deterministic crash/fault tests.
+- Performance baseline/threshold impact.
 
 ## Progress
 
@@ -143,3 +94,10 @@ Do not use recursion. Use explicit fixed-capacity stacks allocated at startup. R
 ## Context7
 
 - For Zig 0.15.2 queries, always use `context7 - query-docs (MCP)(libraryId: "/websites/ziglang_0_15_2", query: "<YOUR QUERY>")`
+
+# Future ideas
+
+- Columnar storage: user defines which columns
+- Built-in online migrations
+- Redis-like features: cache specific queries, subscribe to data mutations (real-time use cases)
+- Use in browser (builtin online migrations could be useful)
