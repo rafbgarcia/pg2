@@ -82,8 +82,8 @@ This tracker exists to keep continuity across sessions:
 7. Deterministic fault injection matrix incomplete.
    Status: `partial`
    Refs: `src/simulator/disk.zig`, simulation tests
-   Notes: Added deterministic one-shot fault injection controls for Nth read/write/fsync plus partial-write and bitflip-on-write corruption in `SimulatedDisk` with regression tests for each path; added buffer-pool propagation tests validating deterministic `StorageRead`/`StorageWrite`/`StorageFsync` error surfacing; added WAL end-to-end torn-write recovery regression (`recover` + `readFrom`) and a seeded fault-matrix module covering multi-step replay-deterministic scenarios (partial WAL write + crash + recover, data-page bitflip + checksum detection, WAL fsync failure + WAL-gated page flush). Seeded WAL recovery matrix now exercises bounded decode buffers via `readFromInto`, includes a longer multi-fault interleaving schedule (torn write + failed commit fsync + retry flush + crash/recover replay), and now includes a combined cross-subsystem schedule (WAL fsync failure/retry + WAL-gated page flush + page-write bitflip corruption + checksum enforcement + WAL recover/replay).
-   Remaining: broaden seeded matrix breadth with additional long schedules and expanded seed sets to cover more interleaving shapes.
+   Notes: Added deterministic one-shot fault injection controls for Nth read/write/fsync plus partial-write and bitflip-on-write corruption in `SimulatedDisk` with regression tests for each path; added buffer-pool propagation tests validating deterministic `StorageRead`/`StorageWrite`/`StorageFsync` error surfacing; added WAL end-to-end torn-write recovery regression (`recover` + `readFrom`) and a seeded fault-matrix module covering multi-step replay-deterministic scenarios (partial WAL write + crash + recover, data-page bitflip + checksum detection, WAL fsync failure + WAL-gated page flush). Seeded WAL recovery matrix now exercises bounded decode buffers via `readFromInto`, includes a longer multi-fault interleaving schedule (torn write + failed commit fsync + retry flush + crash/recover replay), includes a combined cross-subsystem schedule (WAL fsync failure/retry + WAL-gated page flush + page-write bitflip corruption + checksum enforcement + WAL recover/replay), and now validates each seeded schedule across an expanded seed set plus a new repeated crash/recover WAL schedule with mixed fsync failure and torn-write interleavings (`src/simulator/fault_matrix.zig`).
+   Remaining: continue increasing interleaving diversity (longer mixed WAL+data schedules and larger seed corpus) as new storage/recovery paths land.
 
 ## Current Build State
 
@@ -116,6 +116,8 @@ This tracker exists to keep continuity across sessions:
   - Added grouped aggregate `count(*)` runtime state and aggregate-aware expression evaluation hooks so post-group `sort`/`where` can evaluate `count(*)` deterministically without heap allocation (`src/executor/executor.zig`, `src/executor/filter.zig`).
   - Extended grouped aggregate runtime to support `sum` / `avg` / `min` / `max` with bounded per-query aggregate-state contracts (`group_aggregate_exprs` + `aggregate_state_bytes`) and fail-closed evaluation/update paths (type mismatch and numeric overflow surface as query errors), with regressions covering grouped aggregate behavior, type safety, and aggregate-expression capacity enforcement (`src/executor/executor.zig`, `src/executor/capacity.zig`).
   - Updated WAL error mappings in taxonomy/boundary adapters (`src/tiger/error_taxonomy.zig`, `src/executor/mutation.zig`, `src/storage/btree.zig`).
+  - Broadened fault-matrix replay checks to run all seeded schedules across an expanded multi-seed set (`src/simulator/fault_matrix.zig`).
+  - Added a repeated crash/recover WAL schedule with mixed fsync-failure retry and torn-write interleaving, validated replay-deterministically across the seed set (`src/simulator/fault_matrix.zig`).
 - In progress:
   - Allocator-sealing migration is still partial at the system level; scan/sort/group/aggregate runtime paths now use bounded in-memory contracts, while join operators and remaining buffering paths still need explicit non-allocating contracts.
 - Blockers / decisions needed:
@@ -124,5 +126,5 @@ This tracker exists to keep continuity across sessions:
   - `zig build test`
 - Next recommended step:
   1. Implement bounded join operator execution (state/scratch/output contracts, fail-closed capacity errors, deterministic regressions).
-  2. Broaden seeded fault-matrix coverage with additional seeds/interleavings (including repeated crash/recover cycles and mixed fault ordering).
+  2. Expand seeded fault-matrix coverage further with longer cross-subsystem WAL+page interleavings and a larger seed corpus.
   3. Continue retiring allocator-backed WAL `readFrom` usage outside explicit compatibility tests as new recovery/read call sites are added.

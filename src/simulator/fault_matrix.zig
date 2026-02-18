@@ -268,37 +268,142 @@ fn runCombinedWalAndPageCorruption(seed: u64) !ScenarioOutcome {
     return .{ .signature = h.final() };
 }
 
-test "seeded schedule: WAL partial write recovery is replay-deterministic" {
-    const seed: u64 = 0xC0FFEE01;
-    const first = try runWalPartialWriteRecovery(seed);
-    const second = try runWalPartialWriteRecovery(seed);
-    try std.testing.expectEqual(first.signature, second.signature);
+fn runWalRepeatedCrashRecoveryCycles(seed: u64) !ScenarioOutcome {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rand = prng.random();
+
+    var disk = SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    {
+        var wal = Wal.init(std.testing.allocator, disk.storage());
+        defer wal.deinit();
+
+        var payload1: [80]u8 = undefined;
+        const payload1_len = 20 + rand.uintLessThan(usize, 32);
+        rand.bytes(payload1[0..payload1_len]);
+
+        _ = try wal.beginTx(1);
+        _ = try wal.append(1, .insert, 300 + rand.uintLessThan(u64, 32), payload1[0..payload1_len]);
+        disk.failFsyncAt(disk.fsyncs + 1);
+        try std.testing.expectError(error.WalFsyncError, wal.commitTx(1));
+        const failed_flush_lsn = wal.flushed_lsn;
+        try wal.flush();
+        try std.testing.expect(wal.flushed_lsn > failed_flush_lsn);
+    }
+
+    disk.crash();
+
+    {
+        var wal = Wal.init(std.testing.allocator, disk.storage());
+        defer wal.deinit();
+        try wal.recover();
+
+        var payload2: [80]u8 = undefined;
+        const payload2_len = 20 + rand.uintLessThan(usize, 32);
+        rand.bytes(payload2[0..payload2_len]);
+
+        const partial_prefix = 1 + rand.uintLessThan(usize, wal_mod.Record.header_size);
+        disk.partialWriteAt(disk.writes + 1, partial_prefix);
+
+        _ = try wal.beginTx(2);
+        _ = try wal.append(2, .insert, 400 + rand.uintLessThan(u64, 32), payload2[0..payload2_len]);
+        _ = try wal.commitTx(2);
+    }
+
+    disk.crash();
+
+    {
+        var wal = Wal.init(std.testing.allocator, disk.storage());
+        defer wal.deinit();
+        try wal.recover();
+
+        var payload3: [80]u8 = undefined;
+        const payload3_len = 20 + rand.uintLessThan(usize, 32);
+        rand.bytes(payload3[0..payload3_len]);
+
+        _ = try wal.beginTx(3);
+        _ = try wal.append(3, .insert, 500 + rand.uintLessThan(u64, 32), payload3[0..payload3_len]);
+        _ = try wal.commitTx(3);
+    }
+
+    disk.crash();
+
+    var recovered = Wal.init(std.testing.allocator, disk.storage());
+    defer recovered.deinit();
+    try recovered.recover();
+
+    var records_buf: [24]wal_mod.Record = undefined;
+    var payload_buf: [1024]u8 = undefined;
+    const decoded = try recovered.readFromInto(1, &records_buf, &payload_buf);
+    const records = records_buf[0..decoded.records_len];
+    try std.testing.expect(records.len <= records_buf.len);
+    try std.testing.expect(recovered.flushed_lsn > 0);
+
+    var h = std.hash.Wyhash.init(seed ^ 0xA11CE006);
+    const records_len_u64: u64 = @intCast(records.len);
+    h.update(std.mem.asBytes(&records_len_u64));
+    h.update(std.mem.asBytes(&decoded.payload_bytes_used));
+    h.update(std.mem.asBytes(&recovered.flushed_lsn));
+    for (records) |rec| {
+        h.update(std.mem.asBytes(&rec.lsn));
+        h.update(std.mem.asBytes(&rec.tx_id));
+        h.update(&[_]u8{@intFromEnum(rec.record_type)});
+    }
+    return .{ .signature = h.final() };
 }
 
-test "seeded schedule: page bitflip checksum path is replay-deterministic" {
-    const seed: u64 = 0xC0FFEE02;
-    const first = try runPageBitflipChecksum(seed);
-    const second = try runPageBitflipChecksum(seed);
-    try std.testing.expectEqual(first.signature, second.signature);
+const seed_set = [_]u64{
+    0xC0FFEE01,
+    0xC0FFEEA5,
+    0xD15EA5E1,
+    0xFEED1234,
+};
+
+test "seeded schedule: WAL partial write recovery is replay-deterministic across seed set" {
+    for (seed_set) |seed| {
+        const first = try runWalPartialWriteRecovery(seed);
+        const second = try runWalPartialWriteRecovery(seed);
+        try std.testing.expectEqual(first.signature, second.signature);
+    }
 }
 
-test "seeded schedule: WAL fsync failure gates page flush deterministically" {
-    const seed: u64 = 0xC0FFEE03;
-    const first = try runWalFsyncThenPageFlushGate(seed);
-    const second = try runWalFsyncThenPageFlushGate(seed);
-    try std.testing.expectEqual(first.signature, second.signature);
+test "seeded schedule: page bitflip checksum path is replay-deterministic across seed set" {
+    for (seed_set) |seed| {
+        const first = try runPageBitflipChecksum(seed);
+        const second = try runPageBitflipChecksum(seed);
+        try std.testing.expectEqual(first.signature, second.signature);
+    }
 }
 
-test "seeded schedule: multi-fault WAL interleaving is replay-deterministic" {
-    const seed: u64 = 0xC0FFEE04;
-    const first = try runWalMultiFaultInterleaving(seed);
-    const second = try runWalMultiFaultInterleaving(seed);
-    try std.testing.expectEqual(first.signature, second.signature);
+test "seeded schedule: WAL fsync failure gates page flush deterministically across seed set" {
+    for (seed_set) |seed| {
+        const first = try runWalFsyncThenPageFlushGate(seed);
+        const second = try runWalFsyncThenPageFlushGate(seed);
+        try std.testing.expectEqual(first.signature, second.signature);
+    }
 }
 
-test "seeded schedule: combined WAL and page corruption path is replay-deterministic" {
-    const seed: u64 = 0xC0FFEE05;
-    const first = try runCombinedWalAndPageCorruption(seed);
-    const second = try runCombinedWalAndPageCorruption(seed);
-    try std.testing.expectEqual(first.signature, second.signature);
+test "seeded schedule: multi-fault WAL interleaving is replay-deterministic across seed set" {
+    for (seed_set) |seed| {
+        const first = try runWalMultiFaultInterleaving(seed);
+        const second = try runWalMultiFaultInterleaving(seed);
+        try std.testing.expectEqual(first.signature, second.signature);
+    }
+}
+
+test "seeded schedule: combined WAL and page corruption path is replay-deterministic across seed set" {
+    for (seed_set) |seed| {
+        const first = try runCombinedWalAndPageCorruption(seed);
+        const second = try runCombinedWalAndPageCorruption(seed);
+        try std.testing.expectEqual(first.signature, second.signature);
+    }
+}
+
+test "seeded schedule: repeated crash and recover cycles remain replay-deterministic" {
+    for (seed_set) |seed| {
+        const first = try runWalRepeatedCrashRecoveryCycles(seed);
+        const second = try runWalRepeatedCrashRecoveryCycles(seed);
+        try std.testing.expectEqual(first.signature, second.signature);
+    }
 }
