@@ -94,34 +94,24 @@ pub const ExecStats = struct {
     pages_written: u32 = 0,
 };
 
-/// Result of executing a query. Row buffer is heap-allocated from the
-/// allocator in ExecContext (per-query arena in production,
-/// testing.allocator in tests). Caller must call deinit() when done.
+/// Result of executing a query. Row storage is fixed-capacity and embedded to
+/// avoid runtime allocation in the hot execution path.
 pub const QueryResult = struct {
     rows: []ResultRow,
     row_count: u16 = 0,
     stats: ExecStats = .{},
     has_error: bool = false,
     error_message: [128]u8 = std.mem.zeroes([128]u8),
-    allocator: Allocator,
 
-    pub fn init(allocator: Allocator) error{OutOfMemory}!QueryResult {
-        const rows = try allocator.alloc(
-            ResultRow,
-            scan_mod.max_result_rows,
-        );
-        const result = QueryResult{
+    pub fn init(rows: []ResultRow) QueryResult {
+        std.debug.assert(rows.len >= scan_mod.max_result_rows);
+        return .{
             .rows = rows,
-            .allocator = allocator,
         };
-        std.debug.assert(result.row_count == 0);
-        std.debug.assert(result.rows.len == scan_mod.max_result_rows);
-        return result;
     }
 
     pub fn deinit(self: *QueryResult) void {
-        self.allocator.free(self.rows);
-        self.* = undefined;
+        _ = self;
     }
 
     pub fn getError(self: *const QueryResult) ?[]const u8 {
@@ -148,6 +138,9 @@ pub const ExecContext = struct {
     tokens: *const TokenizeResult,
     source: []const u8,
     allocator: Allocator,
+    result_rows: []ResultRow,
+    scratch_rows_a: []ResultRow,
+    scratch_rows_b: []ResultRow,
 };
 
 /// Operator kind extracted from the AST.
@@ -176,7 +169,7 @@ const OpDescriptor = struct {
 /// Query-level errors are stored in result.error_message. Only
 /// OutOfMemory escapes as a Zig error (system-level, not query-level).
 pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
-    var result = try QueryResult.init(ctx.allocator);
+    var result = QueryResult.init(ctx.result_rows);
     errdefer result.deinit();
 
     // Find pipeline from AST root.
@@ -253,7 +246,7 @@ fn executeReadPipeline(
         ctx.snapshot,
         ctx.tx_manager,
         model_id,
-        result.rows,
+        result.rows[0..scan_mod.max_result_rows],
     ) catch {
         setError(result, "table scan failed");
         return;
@@ -403,10 +396,7 @@ fn applySingleNestedSelectionJoin(
     }
     const target_model_id = assoc.target_model_id;
 
-    var right_result = QueryResult.init(ctx.allocator) catch {
-        setError(result, "nested relation setup failed");
-        return false;
-    };
+    var right_result = QueryResult.init(ctx.scratch_rows_a);
     defer right_result.deinit();
 
     const right_scan = scan_mod.tableScanInto(
@@ -416,7 +406,7 @@ fn applySingleNestedSelectionJoin(
         ctx.snapshot,
         ctx.tx_manager,
         target_model_id,
-        right_result.rows,
+        right_result.rows[0..scan_mod.max_result_rows],
     ) catch {
         setError(result, "nested relation scan failed");
         return false;
@@ -451,12 +441,9 @@ fn applySingleNestedSelectionJoin(
         return false;
     }
 
-    const left_copy = ctx.allocator.alloc(ResultRow, result.row_count) catch {
-        setError(result, "nested relation setup failed");
-        return false;
-    };
-    defer ctx.allocator.free(left_copy);
-    @memcpy(left_copy, result.rows[0..result.row_count]);
+    std.debug.assert(ctx.scratch_rows_b.len >= scan_mod.max_result_rows);
+    const left_copy = ctx.scratch_rows_b;
+    @memcpy(left_copy[0..result.row_count], result.rows[0..result.row_count]);
 
     const join = inferAssociationJoinDescriptor(
         ctx.catalog,
@@ -466,7 +453,7 @@ fn applySingleNestedSelectionJoin(
     ) orelse return false;
     if (!executeInnerJoinBounded(
         result,
-        left_copy,
+        left_copy[0..result.row_count],
         right_result.rows[0..right_result.row_count],
         join,
         caps,
@@ -1716,6 +1703,9 @@ const ExecTestEnv = struct {
     undo_log: UndoLog,
     catalog: Catalog,
     model_id: ModelId,
+    result_rows: []ResultRow,
+    scratch_rows_a: []ResultRow,
+    scratch_rows_b: []ResultRow,
 
     /// Initialize in-place so that disk.storage() captures a stable pointer.
     fn init(self: *ExecTestEnv) !void {
@@ -1728,6 +1718,21 @@ const ExecTestEnv = struct {
         self.wal = Wal.init(testing.allocator, self.disk.storage());
         self.tm = TxManager.init(testing.allocator);
         self.undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
+        self.result_rows = try testing.allocator.alloc(
+            ResultRow,
+            scan_mod.max_result_rows,
+        );
+        errdefer testing.allocator.free(self.result_rows);
+        self.scratch_rows_a = try testing.allocator.alloc(
+            ResultRow,
+            scan_mod.max_result_rows,
+        );
+        errdefer testing.allocator.free(self.scratch_rows_a);
+        self.scratch_rows_b = try testing.allocator.alloc(
+            ResultRow,
+            scan_mod.max_result_rows,
+        );
+        errdefer testing.allocator.free(self.scratch_rows_b);
 
         self.catalog = Catalog{};
         self.model_id = try self.catalog.addModel("User");
@@ -1763,6 +1768,9 @@ const ExecTestEnv = struct {
         self.wal.deinit();
         self.pool.deinit();
         self.disk.deinit();
+        testing.allocator.free(self.scratch_rows_b);
+        testing.allocator.free(self.scratch_rows_a);
+        testing.allocator.free(self.result_rows);
     }
 
     fn makeCtx(
@@ -1785,6 +1793,9 @@ const ExecTestEnv = struct {
             .tokens = tokens,
             .source = source,
             .allocator = testing.allocator,
+            .result_rows = self.result_rows,
+            .scratch_rows_a = self.scratch_rows_a,
+            .scratch_rows_b = self.scratch_rows_b,
         };
     }
 };
@@ -2575,7 +2586,8 @@ test "bounded inner join preserves deterministic left-major ordering" {
         makeJoinRightRow(2, true),
     };
 
-    var result = try QueryResult.init(testing.allocator);
+    var result_rows: [scan_mod.max_result_rows]ResultRow = undefined;
+    var result = QueryResult.init(result_rows[0..]);
     defer result.deinit();
     const caps = capacity_mod.OperatorCapacities.defaults();
     const ok = executeInnerJoinBounded(
@@ -2615,7 +2627,8 @@ test "bounded inner join enforces build row capacity contract" {
         makeJoinRightRow(1, true),
     };
 
-    var result = try QueryResult.init(testing.allocator);
+    var result_rows: [scan_mod.max_result_rows]ResultRow = undefined;
+    var result = QueryResult.init(result_rows[0..]);
     defer result.deinit();
     var caps = capacity_mod.OperatorCapacities.defaults();
     caps.join_build_rows = 1;
@@ -2643,7 +2656,8 @@ test "bounded inner join enforces output row capacity contract" {
         makeJoinRightRow(1, false),
     };
 
-    var result = try QueryResult.init(testing.allocator);
+    var result_rows: [scan_mod.max_result_rows]ResultRow = undefined;
+    var result = QueryResult.init(result_rows[0..]);
     defer result.deinit();
     var caps = capacity_mod.OperatorCapacities.defaults();
     caps.join_output_rows = 3;
@@ -2670,7 +2684,8 @@ test "bounded inner join enforces state byte capacity contract" {
         makeJoinRightRow(1, true),
     };
 
-    var result = try QueryResult.init(testing.allocator);
+    var result_rows: [scan_mod.max_result_rows]ResultRow = undefined;
+    var result = QueryResult.init(result_rows[0..]);
     defer result.deinit();
     var caps = capacity_mod.OperatorCapacities.defaults();
     caps.join_state_bytes = @sizeOf(Value);
