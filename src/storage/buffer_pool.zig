@@ -424,3 +424,48 @@ test "WAL protocol: page with LSN 0 flushes without WAL" {
     try pool.flush(0);
     try std.testing.expect(disk.hasPending(0));
 }
+
+test "pin returns StorageRead on deterministic disk read failure" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    disk.failReadAt(1);
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 2);
+    defer pool.deinit();
+
+    try std.testing.expectError(error.StorageRead, pool.pin(0));
+}
+
+test "flush returns StorageWrite on deterministic disk write failure" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 2);
+    defer pool.deinit();
+
+    const page = try pool.pin(0);
+    page.header.page_type = .heap;
+    pool.unpin(0, true);
+
+    disk.failWriteAt(1);
+    try std.testing.expectError(error.StorageWrite, pool.flush(0));
+}
+
+test "flushAll returns StorageFsync on deterministic disk fsync failure" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 2);
+    defer pool.deinit();
+
+    const page = try pool.pin(0);
+    page.header.page_type = .heap;
+    pool.unpin(0, true);
+
+    disk.failFsyncAt(1);
+    try std.testing.expectError(error.StorageFsync, pool.flushAll());
+}
