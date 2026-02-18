@@ -101,6 +101,7 @@ pub const ExecContext = struct {
 /// Operator kind extracted from the AST.
 const OpKind = enum {
     where_filter,
+    group_op,
     limit_op,
     offset_op,
     insert_op,
@@ -179,6 +180,8 @@ fn executeReadPipeline(
     ops: *const [max_operators]OpDescriptor,
     op_count: u16,
 ) void {
+    const caps = capacity_mod.OperatorCapacities.defaults();
+
     const scan_result = scan_mod.tableScanInto(
         ctx.catalog, ctx.pool, ctx.undo_log,
         ctx.snapshot, ctx.tx_manager, model_id, result.rows,
@@ -197,9 +200,15 @@ fn executeReadPipeline(
         const op = ops[i];
         switch (op.kind) {
             .where_filter => applyWhereFilter(ctx, result, op.node, schema),
+            .group_op => {
+                if (!applyAggregateStub(ctx, result, op.node, &caps)) return;
+            },
             .limit_op => applyLimit(ctx, result, op.node),
             .offset_op => applyOffset(ctx, result, op.node),
-            .sort_op, .inspect_op => {},
+            .sort_op => {
+                if (!applySortStub(ctx, result, op.node, &caps)) return;
+            },
+            .inspect_op => {},
             .insert_op, .update_op, .delete_op => {},
         }
     }
@@ -312,6 +321,54 @@ fn applyOffset(
     std.debug.assert(result.row_count == remaining);
 }
 
+fn applySortStub(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    sort_node: NodeIndex,
+    caps: *const capacity_mod.OperatorCapacities,
+) bool {
+    const node = ctx.ast.getNode(sort_node);
+    const key_count = ctx.ast.listLen(node.data.unary);
+    if (key_count == 0) {
+        setError(result, "sort requires at least one key");
+        return false;
+    }
+    if (@as(usize, key_count) > caps.sort_keys) {
+        setError(result, "sort capacity exceeded");
+        return false;
+    }
+    if (@as(usize, result.row_count) > caps.sort_rows) {
+        setError(result, "sort row capacity exceeded");
+        return false;
+    }
+    setError(result, "sort not implemented yet");
+    return false;
+}
+
+fn applyAggregateStub(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    group_node: NodeIndex,
+    caps: *const capacity_mod.OperatorCapacities,
+) bool {
+    const node = ctx.ast.getNode(group_node);
+    const group_key_count = ctx.ast.listLen(node.data.unary);
+    if (group_key_count == 0) {
+        setError(result, "group requires at least one key");
+        return false;
+    }
+    if (@as(usize, group_key_count) > caps.group_keys) {
+        setError(result, "group key capacity exceeded");
+        return false;
+    }
+    if (@as(usize, result.row_count) > caps.aggregate_groups) {
+        setError(result, "aggregate group capacity exceeded");
+        return false;
+    }
+    setError(result, "group/aggregate not implemented yet");
+    return false;
+}
+
 /// Execute a mutation pipeline (insert, update, or delete).
 fn executeMutation(
     ctx: *const ExecContext,
@@ -394,6 +451,7 @@ fn buildOperatorList(
         const node = tree.getNode(current);
         const kind: ?OpKind = switch (node.tag) {
             .op_where => .where_filter,
+            .op_group => .group_op,
             .op_limit => .limit_op,
             .op_offset => .offset_op,
             .op_insert => .insert_op,
@@ -744,4 +802,70 @@ test "execute delete via pipeline" {
 
     try testing.expect(!result.has_error);
     try testing.expectEqual(@as(u32, 1), result.stats.rows_deleted);
+}
+
+test "execute sort returns explicit not-implemented error" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const src1 = "User |> insert(id = 1, name = \"Alice\", active = true)";
+    const tok1 = tokenizer_mod.tokenize(src1);
+    const p1 = parser_mod.parse(&tok1, src1);
+    var r1 = try execute(&env.makeCtx(tx, &snap, &p1.ast, &tok1, src1));
+    defer r1.deinit();
+
+    const src2 = "User |> sort(name asc)";
+    const tok2 = tokenizer_mod.tokenize(src2);
+    const p2 = parser_mod.parse(&tok2, src2);
+    var result = try execute(&env.makeCtx(tx, &snap, &p2.ast, &tok2, src2));
+    defer result.deinit();
+
+    try testing.expect(result.has_error);
+    const msg = result.getError().?;
+    try testing.expect(std.mem.indexOf(u8, msg, "sort not implemented yet") != null);
+}
+
+test "execute sort enforces key capacity contract" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const src = "User |> sort(id asc, name asc, active asc, id asc, name asc, active asc, id asc, name asc, active asc)";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+
+    try testing.expect(result.has_error);
+    const msg = result.getError().?;
+    try testing.expect(std.mem.indexOf(u8, msg, "sort capacity exceeded") != null);
+}
+
+test "execute group returns explicit not-implemented error" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const src = "User |> group(active)";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+
+    try testing.expect(result.has_error);
+    const msg = result.getError().?;
+    try testing.expect(std.mem.indexOf(u8, msg, "group/aggregate not implemented yet") != null);
 }

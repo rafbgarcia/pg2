@@ -14,6 +14,7 @@ pub const max_sort_scratch_bytes: usize = 256 * 1024;
 
 // Aggregate operator contracts (for upcoming implementation).
 pub const max_aggregate_groups: usize = 4096;
+pub const max_group_keys: usize = 8;
 pub const max_aggregate_state_bytes: usize = 256 * 1024;
 
 // Join operator contracts (for upcoming implementation).
@@ -26,6 +27,7 @@ pub const OperatorCapacities = struct {
     sort_keys: usize,
     sort_scratch_bytes: usize,
     aggregate_groups: usize,
+    group_keys: usize,
     aggregate_state_bytes: usize,
     join_build_rows: usize,
     join_output_rows: usize,
@@ -37,6 +39,7 @@ pub const OperatorCapacities = struct {
             .sort_keys = max_sort_keys,
             .sort_scratch_bytes = max_sort_scratch_bytes,
             .aggregate_groups = max_aggregate_groups,
+            .group_keys = max_group_keys,
             .aggregate_state_bytes = max_aggregate_state_bytes,
             .join_build_rows = max_join_build_rows,
             .join_output_rows = max_join_output_rows,
@@ -51,6 +54,7 @@ comptime {
     std.debug.assert(max_sort_rows <= scan_mod.max_result_rows);
     std.debug.assert(max_sort_keys > 0);
     std.debug.assert(max_aggregate_groups > 0);
+    std.debug.assert(max_group_keys > 0);
     std.debug.assert(max_join_build_rows > 0);
     std.debug.assert(max_join_output_rows > 0);
 }
@@ -62,4 +66,5 @@ test "default capacity contracts remain bounded by scan result ceiling" {
     try std.testing.expect(c.join_output_rows <= scan_mod.max_result_rows);
     try std.testing.expect(c.sort_keys >= 1);
     try std.testing.expect(c.aggregate_groups >= 1);
+    try std.testing.expect(c.group_keys >= 1);
 }
