@@ -10,12 +10,6 @@ All memory is statically allocated at startup. No heap allocation after initiali
 
 - On startup, pg2 `mmap`s a single contiguous region sized by the `--memory` flag (default: 512 MiB). All subsystem pools, buffers, and arenas are bump-allocated from this region.
 - After init, the allocator is sealed. Any allocation attempt after seal is a panic. This is enforced by a `StaticAllocator` that tracks `.init` vs `.static` state.
-- The total budget is subdivided by fixed compile-time ratios:
-  - ~70% buffer pool (page cache)
-  - ~5% WAL buffers
-  - ~10% connection arenas (per-query execution memory)
-  - ~10% undo log pool (MVCC version storage)
-  - ~5% catalog/metadata
 - Per-query memory uses arena allocators carved from the connection pool at startup. Arenas are reset (not freed) after each query.
 - The `--memory` value is always a fixed number set by the operator, never derived from machine hardware.
 
