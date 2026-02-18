@@ -1,5 +1,4 @@
 const std = @import("std");
-const io = @import("io.zig");
 const page_mod = @import("page.zig");
 
 const Page = page_mod.Page;
@@ -22,16 +21,7 @@ pub const RowId = struct {
 ///   Slot array grows downward from offset 6 (each slot = 4 bytes)
 ///   Row data grows upward from the end of the content area
 ///
-/// ```
-/// ┌──────────────────────────────────────┐
-/// │ SlottedHeader (6 bytes)              │
-/// ├──────────────────────────────────────┤
-/// │ Slot Array → (grows down)            │
-/// │  [offset:u16, len:u16] ...           │
-/// ├──────── free space ─────────────────┤
-/// │              ← Row Data (grows up)   │
-/// └──────────────────────────────────────┘
-/// ```
+/// Header then slot array, then free space, then row data.
 const SlottedHeader = struct {
     slot_count: u16,
     free_start: u16, // end of slot array (next free byte for slots)
@@ -40,16 +30,36 @@ const SlottedHeader = struct {
     const size = 6;
 
     fn read(content: *const [content_size]u8) SlottedHeader {
-        return .{
-            .slot_count = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, content[0..2]).*),
-            .free_start = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, content[2..4]).*),
-            .free_end = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, content[4..6]).*),
+        std.debug.assert(content_size >= SlottedHeader.size);
+        const header = SlottedHeader{
+            .slot_count = std.mem.littleToNative(
+                u16,
+                std.mem.bytesAsValue(u16, content[0..2]).*,
+            ),
+            .free_start = std.mem.littleToNative(
+                u16,
+                std.mem.bytesAsValue(u16, content[2..4]).*,
+            ),
+            .free_end = std.mem.littleToNative(
+                u16,
+                std.mem.bytesAsValue(u16, content[4..6]).*,
+            ),
         };
+        assert_header_valid(header);
+        return header;
     }
 
     fn write(self: SlottedHeader, content: *[content_size]u8) void {
-        @memcpy(content[0..2], std.mem.asBytes(&std.mem.nativeToLittle(u16, self.slot_count)));
-        @memcpy(content[2..4], std.mem.asBytes(&std.mem.nativeToLittle(u16, self.free_start)));
+        assert_header_valid(self);
+        std.debug.assert(content_size >= SlottedHeader.size);
+        @memcpy(
+            content[0..2],
+            std.mem.asBytes(&std.mem.nativeToLittle(u16, self.slot_count)),
+        );
+        @memcpy(
+            content[2..4],
+            std.mem.asBytes(&std.mem.nativeToLittle(u16, self.free_start)),
+        );
         @memcpy(content[4..6], std.mem.asBytes(&std.mem.nativeToLittle(u16, self.free_end)));
     }
 };
@@ -65,19 +75,37 @@ const Slot = struct {
     const deleted_len: u16 = 0;
 
     fn read(content: *const [content_size]u8, index: u16) Slot {
+        std.debug.assert(index < max_slot_count);
         const base = SlottedHeader.size + @as(usize, index) * Slot.size;
-        return .{
-            .offset = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, content[base..][0..2]).*),
-            .len = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, content[base + 2 ..][0..2]).*),
+        std.debug.assert(base + Slot.size <= content_size);
+        return Slot{
+            .offset = std.mem.littleToNative(
+                u16,
+                std.mem.bytesAsValue(u16, content[base..][0..2]).*,
+            ),
+            .len = std.mem.littleToNative(
+                u16,
+                std.mem.bytesAsValue(u16, content[base + 2 ..][0..2]).*,
+            ),
         };
     }
 
-    fn writeAt(content: *[content_size]u8, index: u16, slot: Slot) void {
+    fn write_at(content: *[content_size]u8, index: u16, slot: Slot) void {
+        std.debug.assert(index < max_slot_count);
         const base = SlottedHeader.size + @as(usize, index) * Slot.size;
-        @memcpy(content[base..][0..2], std.mem.asBytes(&std.mem.nativeToLittle(u16, slot.offset)));
-        @memcpy(content[base + 2 ..][0..2], std.mem.asBytes(&std.mem.nativeToLittle(u16, slot.len)));
+        std.debug.assert(base + Slot.size <= content_size);
+        @memcpy(
+            content[base..][0..2],
+            std.mem.asBytes(&std.mem.nativeToLittle(u16, slot.offset)),
+        );
+        @memcpy(
+            content[base + 2 ..][0..2],
+            std.mem.asBytes(&std.mem.nativeToLittle(u16, slot.len)),
+        );
     }
 };
+
+const max_slot_count = (content_size - SlottedHeader.size) / Slot.size;
 
 pub const HeapError = error{
     PageFull,
@@ -93,54 +121,69 @@ pub const HeapPage = struct {
 
     /// Initialize a page's content area for heap use.
     pub fn init(page: *Page) void {
+        std.debug.assert(page.header.page_type == .free or page.header.page_type == .heap);
+        std.debug.assert(content_size > SlottedHeader.size);
         page.header.page_type = .heap;
         @memset(&page.content, 0);
-        const hdr = SlottedHeader{
+        const header = SlottedHeader{
             .slot_count = 0,
             .free_start = SlottedHeader.size,
             .free_end = content_size,
         };
-        hdr.write(&page.content);
+        header.write(&page.content);
+        const written = SlottedHeader.read(&page.content);
+        std.debug.assert(written.slot_count == 0);
+        std.debug.assert(written.free_start == SlottedHeader.size);
     }
 
     /// Insert a row into the page. Returns the slot index.
     pub fn insert(page: *Page, data: []const u8) HeapError!u16 {
+        std.debug.assert(page.header.page_type == .heap);
+        std.debug.assert(data.len <= content_size);
         if (data.len > std.math.maxInt(u16)) return error.RowTooLarge;
         const row_len: u16 = @intCast(data.len);
 
-        var hdr = SlottedHeader.read(&page.content);
+        var header = SlottedHeader.read(&page.content);
+        std.debug.assert(header.slot_count < max_slot_count);
 
         // Check if there's enough space: we need room for the slot entry + row data.
         const needed = Slot.size + row_len;
-        if (hdr.free_end - hdr.free_start < needed) return error.PageFull;
+        if (header.free_end - header.free_start < needed) return error.PageFull;
 
         // Allocate row data from the end.
-        hdr.free_end -= row_len;
-        const row_offset = hdr.free_end;
+        header.free_end -= row_len;
+        const row_offset = header.free_end;
 
         // Write row data.
         @memcpy(page.content[row_offset..][0..row_len], data);
 
         // Write slot entry.
-        const slot_idx = hdr.slot_count;
-        Slot.writeAt(&page.content, slot_idx, .{ .offset = row_offset, .len = row_len });
+        const slot_index = header.slot_count;
+        Slot.write_at(&page.content, slot_index, .{ .offset = row_offset, .len = row_len });
 
         // Update header.
-        hdr.slot_count += 1;
-        hdr.free_start += Slot.size;
-        hdr.write(&page.content);
+        header.slot_count += 1;
+        header.free_start += Slot.size;
+        header.write(&page.content);
 
-        return slot_idx;
+        std.debug.assert(header.free_start <= header.free_end);
+        std.debug.assert(slot_index < header.slot_count);
+        return slot_index;
     }
 
     /// Read a row from the page. Returns a slice into the page's content.
     pub fn read(page: *const Page, slot_idx: u16) HeapError![]const u8 {
-        const hdr = SlottedHeader.read(&page.content);
-        if (slot_idx >= hdr.slot_count) return error.InvalidSlot;
+        std.debug.assert(page.header.page_type == .heap);
+        const header = SlottedHeader.read(&page.content);
+        if (slot_idx >= header.slot_count) return error.InvalidSlot;
 
         const slot = Slot.read(&page.content, slot_idx);
         if (slot.len == Slot.deleted_len) return error.InvalidSlot;
+        assert_live_slot_valid(slot, header);
 
+        const row_end = @as(usize, slot.offset) + slot.len;
+        std.debug.assert(row_end <= content_size);
+        std.debug.assert(slot.len > 0);
         return page.content[slot.offset..][0..slot.len];
     }
 
@@ -150,11 +193,13 @@ pub const HeapPage = struct {
     ///
     /// If the new row is larger, returns error.RowTooLarge.
     pub fn update(page: *Page, slot_idx: u16, new_data: []const u8) HeapError!void {
-        const hdr = SlottedHeader.read(&page.content);
-        if (slot_idx >= hdr.slot_count) return error.InvalidSlot;
+        std.debug.assert(page.header.page_type == .heap);
+        const header = SlottedHeader.read(&page.content);
+        if (slot_idx >= header.slot_count) return error.InvalidSlot;
 
         var slot = Slot.read(&page.content, slot_idx);
         if (slot.len == Slot.deleted_len) return error.InvalidSlot;
+        assert_live_slot_valid(slot, header);
 
         if (new_data.len > slot.len) return error.RowTooLarge;
 
@@ -168,46 +213,82 @@ pub const HeapPage = struct {
         }
         // Update slot length.
         slot.len = new_len;
-        Slot.writeAt(&page.content, slot_idx, slot);
+        Slot.write_at(&page.content, slot_idx, slot);
+        const row_end = @as(usize, slot.offset) + slot.len;
+        std.debug.assert(slot.len == new_len);
+        std.debug.assert(row_end <= content_size);
     }
 
     /// Delete a row by marking its slot as deleted (tombstone).
     /// Does not reclaim space — that requires compaction.
     pub fn delete(page: *Page, slot_idx: u16) HeapError!void {
-        const hdr = SlottedHeader.read(&page.content);
-        if (slot_idx >= hdr.slot_count) return error.InvalidSlot;
+        std.debug.assert(page.header.page_type == .heap);
+        const header = SlottedHeader.read(&page.content);
+        if (slot_idx >= header.slot_count) return error.InvalidSlot;
 
         var slot = Slot.read(&page.content, slot_idx);
         if (slot.len == Slot.deleted_len) return error.InvalidSlot;
+        assert_live_slot_valid(slot, header);
 
         slot.len = Slot.deleted_len;
-        Slot.writeAt(&page.content, slot_idx, slot);
+        Slot.write_at(&page.content, slot_idx, slot);
+        std.debug.assert(slot.len == Slot.deleted_len);
+        std.debug.assert(Slot.read(&page.content, slot_idx).len == Slot.deleted_len);
     }
 
     /// Returns the number of live (non-deleted) rows in the page.
-    pub fn liveCount(page: *const Page) u16 {
-        const hdr = SlottedHeader.read(&page.content);
+    pub fn live_count(page: *const Page) u16 {
+        std.debug.assert(page.header.page_type == .heap);
+        const header = SlottedHeader.read(&page.content);
         var count: u16 = 0;
-        for (0..hdr.slot_count) |i| {
+        for (0..header.slot_count) |i| {
             const slot = Slot.read(&page.content, @intCast(i));
             if (slot.len != Slot.deleted_len) count += 1;
         }
+        std.debug.assert(count <= header.slot_count);
+        std.debug.assert(header.slot_count <= max_slot_count);
         return count;
     }
 
     /// Returns the amount of free space available for new inserts
     /// (contiguous free space between slot array and row data).
-    pub fn freeSpace(page: *const Page) u16 {
-        const hdr = SlottedHeader.read(&page.content);
-        if (hdr.free_end <= hdr.free_start) return 0;
-        return hdr.free_end - hdr.free_start;
+    pub fn free_space(page: *const Page) u16 {
+        std.debug.assert(page.header.page_type == .heap);
+        const header = SlottedHeader.read(&page.content);
+        std.debug.assert(header.free_start <= content_size);
+        std.debug.assert(header.free_end <= content_size);
+        if (header.free_end <= header.free_start) return 0;
+        return header.free_end - header.free_start;
     }
 
     /// Returns the total slot count (including deleted slots).
-    pub fn slotCount(page: *const Page) u16 {
-        return SlottedHeader.read(&page.content).slot_count;
+    pub fn slot_count(page: *const Page) u16 {
+        std.debug.assert(page.header.page_type == .heap);
+        const count = SlottedHeader.read(&page.content).slot_count;
+        std.debug.assert(count <= max_slot_count);
+        const slot_array_end = @as(usize, count) * Slot.size + SlottedHeader.size;
+        std.debug.assert(slot_array_end <= content_size);
+        return count;
     }
 };
+
+fn assert_header_valid(header: SlottedHeader) void {
+    std.debug.assert(header.free_start >= SlottedHeader.size);
+    std.debug.assert(header.free_start <= content_size);
+    std.debug.assert(header.free_end <= content_size);
+    std.debug.assert(header.free_start <= header.free_end);
+    std.debug.assert((header.free_start - SlottedHeader.size) % Slot.size == 0);
+    std.debug.assert(header.slot_count <= max_slot_count);
+    const slot_bytes = @as(usize, header.slot_count) * Slot.size + SlottedHeader.size;
+    std.debug.assert(slot_bytes <= header.free_start);
+}
+
+fn assert_live_slot_valid(slot: Slot, header: SlottedHeader) void {
+    std.debug.assert(slot.len > Slot.deleted_len);
+    std.debug.assert(slot.offset >= header.free_end);
+    const row_end = @as(usize, slot.offset) + slot.len;
+    std.debug.assert(row_end <= content_size);
+}
 
 // --- Tests ---
 
@@ -216,10 +297,11 @@ test "init creates empty heap page" {
     HeapPage.init(&page);
 
     try std.testing.expectEqual(page_mod.PageType.heap, page.header.page_type);
-    try std.testing.expectEqual(@as(u16, 0), HeapPage.slotCount(&page));
-    try std.testing.expectEqual(@as(u16, 0), HeapPage.liveCount(&page));
+    try std.testing.expectEqual(@as(u16, 0), HeapPage.slot_count(&page));
+    try std.testing.expectEqual(@as(u16, 0), HeapPage.live_count(&page));
     // Free space should be content_size minus the slotted header.
-    try std.testing.expectEqual(@as(u16, content_size - SlottedHeader.size), HeapPage.freeSpace(&page));
+    const expected = @as(u16, content_size - SlottedHeader.size);
+    try std.testing.expectEqual(expected, HeapPage.free_space(&page));
 }
 
 test "insert and read single row" {
@@ -250,7 +332,7 @@ test "insert multiple rows" {
     try std.testing.expectEqualSlices(u8, "row one", try HeapPage.read(&page, s1));
     try std.testing.expectEqualSlices(u8, "row two", try HeapPage.read(&page, s2));
 
-    try std.testing.expectEqual(@as(u16, 3), HeapPage.liveCount(&page));
+    try std.testing.expectEqual(@as(u16, 3), HeapPage.live_count(&page));
 }
 
 test "delete marks slot as tombstone" {
@@ -258,11 +340,11 @@ test "delete marks slot as tombstone" {
     HeapPage.init(&page);
 
     const s0 = try HeapPage.insert(&page, "data");
-    try std.testing.expectEqual(@as(u16, 1), HeapPage.liveCount(&page));
+    try std.testing.expectEqual(@as(u16, 1), HeapPage.live_count(&page));
 
     try HeapPage.delete(&page, s0);
-    try std.testing.expectEqual(@as(u16, 0), HeapPage.liveCount(&page));
-    try std.testing.expectEqual(@as(u16, 1), HeapPage.slotCount(&page));
+    try std.testing.expectEqual(@as(u16, 0), HeapPage.live_count(&page));
+    try std.testing.expectEqual(@as(u16, 1), HeapPage.slot_count(&page));
 
     // Reading deleted slot should fail.
     const result = HeapPage.read(&page, s0);
@@ -300,15 +382,19 @@ test "page full returns error" {
     @memset(&row, 0x42);
 
     var count: u16 = 0;
-    while (true) {
+    const max_attempts = (content_size - SlottedHeader.size) / (Slot.size + row.len) + 1;
+    var saw_page_full = false;
+    while (count < max_attempts) {
         _ = HeapPage.insert(&page, &row) catch |err| {
             try std.testing.expectEqual(HeapError.PageFull, err);
+            saw_page_full = true;
             break;
         };
         count += 1;
     }
+    try std.testing.expect(saw_page_full);
     try std.testing.expect(count > 0);
-    try std.testing.expectEqual(count, HeapPage.liveCount(&page));
+    try std.testing.expectEqual(count, HeapPage.live_count(&page));
 }
 
 test "read invalid slot returns error" {
@@ -323,9 +409,9 @@ test "free space decreases after insert" {
     var page = Page.init(0, .free);
     HeapPage.init(&page);
 
-    const before = HeapPage.freeSpace(&page);
+    const before = HeapPage.free_space(&page);
     _ = try HeapPage.insert(&page, "test data");
-    const after = HeapPage.freeSpace(&page);
+    const after = HeapPage.free_space(&page);
 
     // Should decrease by slot size (4) + data length (9).
     try std.testing.expectEqual(before - after, Slot.size + 9);

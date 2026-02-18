@@ -128,7 +128,7 @@ pub fn tableScan(
         defer pool.unpin(page_id, false);
         result.pages_read += 1;
 
-        const slot_count = HeapPage.slotCount(page);
+        const slot_count = HeapPage.slot_count(page);
         var slot_idx: u16 = 0;
         while (slot_idx < slot_count) : (slot_idx += 1) {
             if (result.row_count >= max_result_rows) break;

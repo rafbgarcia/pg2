@@ -450,7 +450,7 @@ fn findPageWithSpace(
             const page_id: u64 = @as(u64, first_page_id) + p;
             const page = pool.pin(page_id) catch |e|
                 return mapPoolError(e);
-            const free = HeapPage.freeSpace(page);
+            const free = HeapPage.free_space(page);
             pool.unpin(page_id, false);
 
             // Need space for slot entry (4 bytes) + row data.
