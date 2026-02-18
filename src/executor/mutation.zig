@@ -124,9 +124,9 @@ pub fn executeInsert(
     // WAL append.
     const lsn = wal.append(
         tx_id, .insert, page_id, row_buf[0..row_len],
-    ) catch {
+    ) catch |e| {
         pool.unpin(page_id, true);
-        return error.WalWriteError;
+        return mapWalAppendError(e);
     };
     page.header.lsn = lsn;
     pool.unpin(page_id, true);
@@ -263,9 +263,9 @@ fn updateSingleRow(
     // WAL append.
     const lsn = wal.append(
         tx_id, .update, row.row_id.page_id, row_buf[0..row_len],
-    ) catch {
+    ) catch |e| {
         pool.unpin(row.row_id.page_id, true);
-        return error.WalWriteError;
+        return mapWalAppendError(e);
     };
     page.header.lsn = lsn;
     pool.unpin(row.row_id.page_id, true);
@@ -361,9 +361,9 @@ fn deleteSingleRow(
     // WAL append.
     const lsn = wal.append(
         tx_id, .delete, row.row_id.page_id, &.{},
-    ) catch {
+    ) catch |e| {
         pool.unpin(row.row_id.page_id, true);
-        return error.WalWriteError;
+        return mapWalAppendError(e);
     };
     page.header.lsn = lsn;
     pool.unpin(row.row_id.page_id, true);
@@ -514,6 +514,19 @@ fn mapFilterError(err: filter_mod.EvalError) MutationError {
         error.InvalidLiteral => error.InvalidLiteral,
         error.UnknownFunction => error.UnknownFunction,
         error.NullInPredicate => error.NullInPredicate,
+    };
+}
+
+fn mapWalAppendError(err: wal_mod.WalError) MutationError {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.PayloadTooLarge => error.RowTooLarge,
+        error.WalReadError => error.WalWriteError,
+        error.WalWriteError => error.WalWriteError,
+        error.WalFsyncError => error.WalFsyncError,
+        error.InvalidEnvelope => error.WalWriteError,
+        error.CorruptEnvelope => error.WalWriteError,
+        error.UnsupportedEnvelopeVersion => error.WalWriteError,
     };
 }
 

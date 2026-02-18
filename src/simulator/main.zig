@@ -28,7 +28,10 @@ pub fn main() !void {
     }
 
     var buf: [128]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, "pg2 simulation — seed: {d}, ticks: {d}\n", .{ seed, ticks }) catch unreachable;
+    const msg = std.fmt.bufPrint(&buf, "pg2 simulation — seed: {d}, ticks: {d}\n", .{ seed, ticks }) catch {
+        try stdout.writeAll("simulation banner format overflow\n");
+        return;
+    };
     try stdout.writeAll(msg);
     try stdout.writeAll("(no simulation logic yet)\n");
 }

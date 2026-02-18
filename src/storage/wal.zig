@@ -617,20 +617,10 @@ test "WAL survives crash after flush" {
         // WAL is flushed and fsynced. Simulate crash.
     }
 
-    // After crash — data is durable because we fsynced.
-    // Create a new WAL instance pointing at the same storage,
-    // and read back the records.
+    // After crash — recover offsets from metadata and read records.
     var wal2 = Wal.init(std.testing.allocator, disk.storage());
     defer wal2.deinit();
-    // We need to tell wal2 where the data ends. In a real system,
-    // recovery would scan forward. For now, set the page offset.
-    wal2.wal_page_offset = 1; // data fit in one page
-    wal2.wal_byte_offset = 0;
-
-    // Actually let's compute: 3 records, each ~31 bytes = ~93 bytes total.
-    // That fits in one page. So page_offset=0, byte_offset=93ish.
-    // Let's just set it to read 1 full page.
-    wal2.wal_page_offset = 1;
+    try wal2.recover();
 
     const records = try wal2.readFrom(1, std.testing.allocator);
     defer Wal.freeRecords(records, std.testing.allocator);

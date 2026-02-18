@@ -475,7 +475,8 @@ pub const BTree = struct {
         if (leaf_result) |_| {
             // Log WAL record after successful modification.
             if (self.wal) |wal| {
-                const lsn = wal.append(0, .btree_insert, page_id, key) catch return error.WalWriteError;
+                const lsn = wal.append(0, .btree_insert, page_id, key) catch |e|
+                    return mapWalAppendError(e);
                 leaf_page.header.lsn = lsn;
             }
             self.pool.unpin(page_id, true);
@@ -513,7 +514,8 @@ pub const BTree = struct {
                     };
                     // Log WAL record after successful modification.
                     if (self.wal) |wal| {
-                        const lsn = wal.append(0, .btree_delete, page_id, key) catch return error.WalWriteError;
+                        const lsn = wal.append(0, .btree_delete, page_id, key) catch |e|
+                            return mapWalAppendError(e);
                         page.header.lsn = lsn;
                     }
                     self.pool.unpin(page_id, true);
@@ -650,7 +652,8 @@ pub const BTree = struct {
 
         // Log WAL for the split.
         if (self.wal) |wal| {
-            const lsn = wal.append(0, .btree_split_leaf, leaf_id, key) catch return error.WalWriteError;
+            const lsn = wal.append(0, .btree_split_leaf, leaf_id, key) catch |e|
+                return mapWalAppendError(e);
             left_page.header.lsn = lsn;
             right_page.header.lsn = lsn;
         }
@@ -659,12 +662,14 @@ pub const BTree = struct {
 
         // Fill left page with [0..mid).
         for (0..mid) |i| {
-            LeafNode.insert(&left_page.content, entries[i].key, entries[i].row_id) catch unreachable;
+            LeafNode.insert(&left_page.content, entries[i].key, entries[i].row_id) catch
+                @panic("leaf split redistribution failed");
         }
 
         // Fill right page with [mid..total).
         for (mid..total) |i| {
-            LeafNode.insert(&right_page.content, entries[i].key, entries[i].row_id) catch unreachable;
+            LeafNode.insert(&right_page.content, entries[i].key, entries[i].row_id) catch
+                @panic("leaf split redistribution failed");
         }
 
         // Set sibling pointers: left -> right -> old_right_sibling.
@@ -691,7 +696,8 @@ pub const BTree = struct {
         const parent_page = self.pool.pin(parent_id) catch |e| return mapPoolError(e);
 
         if (self.wal) |wal| {
-            const lsn = wal.append(0, .btree_split_internal, parent_id, key) catch return error.WalWriteError;
+            const lsn = wal.append(0, .btree_split_internal, parent_id, key) catch |e|
+                return mapWalAppendError(e);
             parent_page.header.lsn = lsn;
         }
 
@@ -775,7 +781,8 @@ pub const BTree = struct {
         };
 
         if (self.wal) |wal| {
-            const lsn = wal.append(0, .btree_split_internal, node_id, new_key) catch return error.WalWriteError;
+            const lsn = wal.append(0, .btree_split_internal, node_id, new_key) catch |e|
+                return mapWalAppendError(e);
             left_page.header.lsn = lsn;
             right_page.header.lsn = lsn;
         }
@@ -785,7 +792,8 @@ pub const BTree = struct {
 
         // Fill left with [0..mid).
         for (0..mid) |i| {
-            InternalNode.insert(&left_page.content, entries[i].key, entries[i].right_child) catch unreachable;
+            InternalNode.insert(&left_page.content, entries[i].key, entries[i].right_child) catch
+                @panic("internal split redistribution failed");
         }
 
         // Promoted key is entries[mid]. Right child's left_child = entries[mid].right_child.
@@ -793,7 +801,8 @@ pub const BTree = struct {
 
         // Fill right with [mid+1..total).
         for (mid + 1..total) |i| {
-            InternalNode.insert(&right_page.content, entries[i].key, entries[i].right_child) catch unreachable;
+            InternalNode.insert(&right_page.content, entries[i].key, entries[i].right_child) catch
+                @panic("internal split redistribution failed");
         }
 
         self.pool.unpin(node_id, true);
@@ -809,12 +818,14 @@ pub const BTree = struct {
         InternalNode.init(root_page);
 
         if (self.wal) |wal| {
-            const lsn = wal.append(0, .btree_new_root, new_root_id, key) catch return error.WalWriteError;
+            const lsn = wal.append(0, .btree_new_root, new_root_id, key) catch |e|
+                return mapWalAppendError(e);
             root_page.header.lsn = lsn;
         }
 
         InternalNode.setLeftChild(&root_page.content, left_id);
-        InternalNode.insert(&root_page.content, key, right_id) catch unreachable;
+        InternalNode.insert(&root_page.content, key, right_id) catch
+            @panic("root split insertion failed");
 
         self.pool.unpin(new_root_id, true);
         self.root_page_id = new_root_id;
@@ -951,6 +962,19 @@ fn mapPoolError(err: buffer_pool_mod.BufferPoolError) BTreeError {
         error.StorageWrite => error.StorageWrite,
         error.StorageFsync => error.StorageFsync,
         error.WalNotFlushed => error.WalNotFlushed,
+    };
+}
+
+fn mapWalAppendError(err: wal_mod.WalError) BTreeError {
+    return switch (err) {
+        error.OutOfMemory => error.OutOfMemory,
+        error.PayloadTooLarge => error.WalWriteError,
+        error.WalReadError => error.WalWriteError,
+        error.WalWriteError => error.WalWriteError,
+        error.WalFsyncError => error.WalFsyncError,
+        error.InvalidEnvelope => error.WalWriteError,
+        error.CorruptEnvelope => error.WalWriteError,
+        error.UnsupportedEnvelopeVersion => error.WalWriteError,
     };
 }
 
@@ -1579,7 +1603,7 @@ test "btree: page LSN updated on insert" {
     try tree.insert("key1", RowId{ .page_id = 1, .slot = 0 });
 
     // Pin root page and check LSN > 0.
-    const page = pool.pin(tree.root_page_id) catch unreachable;
+    const page = try pool.pin(tree.root_page_id);
     try testing.expect(page.header.lsn > 0);
     pool.unpin(tree.root_page_id, false);
 }

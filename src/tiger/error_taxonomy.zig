@@ -1,6 +1,7 @@
 const scan_mod = @import("../executor/scan.zig");
 const mutation_mod = @import("../executor/mutation.zig");
 const buffer_pool_mod = @import("../storage/buffer_pool.zig");
+const wal_mod = @import("../storage/wal.zig");
 const tx_mod = @import("../mvcc/transaction.zig");
 
 /// Stable machine-actionable Tiger error classes.
@@ -73,10 +74,22 @@ pub fn classifyTxManager(err: tx_mod.TxManagerError) ErrorClass {
     };
 }
 
+pub fn classifyWal(err: wal_mod.WalError) ErrorClass {
+    return switch (err) {
+        error.OutOfMemory => .resource_exhausted,
+        error.PayloadTooLarge => .resource_exhausted,
+        error.WalReadError => .retryable,
+        error.WalWriteError => .retryable,
+        error.WalFsyncError => .retryable,
+        error.InvalidEnvelope => .corruption,
+        error.CorruptEnvelope => .corruption,
+        error.UnsupportedEnvelopeVersion => .fatal,
+    };
+}
+
 test "scan corruption class mapping" {
     try @import("std").testing.expectEqual(
         ErrorClass.corruption,
         classifyScan(error.Corruption),
     );
 }
-

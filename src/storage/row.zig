@@ -72,7 +72,7 @@ pub fn compareValues(a: Value, b: Value) std.math.Order {
             .timestamp => |bv| std.math.order(av, bv),
             else => .lt,
         },
-        .null_value => unreachable, // handled above
+        .null_value => @panic("compareValues null arm reached unexpectedly"),
     };
 }
 
