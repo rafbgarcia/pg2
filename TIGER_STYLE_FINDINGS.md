@@ -76,8 +76,8 @@ This tracker exists to keep continuity across sessions:
 6. Static allocation/allocator sealing policy not yet enforced.
    Status: `partial`
    Refs: runtime alloc paths across executor/storage/mvcc
-   Notes: Removed hot-path dynamic allocator usage from B-tree split logic by using fixed-capacity split scratch buffers derived from page-size bounds; removed `BTree` allocator dependency from runtime API/state after split-path sealing (`src/storage/btree.zig`). Added bounded no-allocation WAL decode path `readFromInto` with caller-owned record/payload buffers and explicit capacity errors (`src/storage/wal.zig`), reducing recovery-path dependence on heap-owned record payload copies. Migrated seeded recovery scenario to bounded decode (`src/simulator/fault_matrix.zig`) to exercise call-site capacity contracts. Added bounded `tableScanInto` scan path (`src/executor/scan.zig`) and switched read execution pipeline to scan directly into preallocated query-result storage (`src/executor/executor.zig`), removing one per-query scan allocation/copy path.
-   Remaining: migrate mutation scan/read paths to bounded caller-owned scan buffers and continue applying allocator-sealing strategy across other core runtime buffering paths.
+   Notes: Removed hot-path dynamic allocator usage from B-tree split logic by using fixed-capacity split scratch buffers derived from page-size bounds; removed `BTree` allocator dependency from runtime API/state after split-path sealing (`src/storage/btree.zig`). Added bounded no-allocation WAL decode path `readFromInto` with caller-owned record/payload buffers and explicit capacity errors (`src/storage/wal.zig`), reducing recovery-path dependence on heap-owned record payload copies. Migrated seeded recovery scenario to bounded decode (`src/simulator/fault_matrix.zig`) to exercise call-site capacity contracts. Added bounded `tableScanInto` scan path (`src/executor/scan.zig`) and switched read execution pipeline to scan directly into preallocated query-result storage (`src/executor/executor.zig`), removing one per-query scan allocation/copy path. Reworked mutation update/delete paths to iterate visible rows in-place without allocator-backed `tableScan` materialization (`src/executor/mutation.zig`), preserving predicate and MVCC visibility checks.
+   Remaining: continue applying allocator-sealing strategy across remaining runtime buffering paths (e.g., batch/result shaping for future sort/aggregate/join operators and other core executor intermediates).
 
 7. Deterministic fault injection matrix incomplete.
    Status: `partial`
@@ -105,14 +105,15 @@ This tracker exists to keep continuity across sessions:
   - Migrated seeded WAL partial-write recovery matrix scenario to bounded caller-owned WAL decode buffers via `readFromInto` (`src/simulator/fault_matrix.zig`).
   - Added seeded replay-deterministic multi-fault WAL interleaving scenario (torn write + fsync failure on commit + retry flush + crash/recover) in `src/simulator/fault_matrix.zig`.
   - Added bounded `tableScanInto` with explicit caller capacity contracts and regression coverage (`src/executor/scan.zig`), and switched read query execution to use the bounded scan path directly (`src/executor/executor.zig`).
+  - Replaced allocator-backed mutation scan materialization with in-place visible-row iteration in `executeUpdate`/`executeDelete` (`src/executor/mutation.zig`), removing another executor runtime allocation path.
   - Updated WAL error mappings in taxonomy/boundary adapters (`src/tiger/error_taxonomy.zig`, `src/executor/mutation.zig`, `src/storage/btree.zig`).
 - In progress:
-  - Allocator-sealing migration is still partial at the system level; read query scan path now uses bounded caller-owned buffers, while mutation scan/read paths still depend on allocator-backed scan results.
+  - Allocator-sealing migration is still partial at the system level; executor scan/mutation runtime paths are now bounded, while future operator intermediates (sort/aggregate/join) and other buffering paths still need explicit capacity contracts.
 - Blockers / decisions needed:
   - Define explicit per-call-site WAL decode capacity budgets (record count + payload bytes) for remaining recovery/read paths as those paths are introduced/expanded.
 - Tests run:
   - `zig build test`
 - Next recommended step:
-  1. Migrate mutation scan/read paths (`executeUpdate` / `executeDelete`) to bounded caller-owned scan buffers (or chunked scan iteration) to remove remaining allocator-backed scan-result dependence in executor runtime paths.
+  1. Expand seeded fault-matrix schedules to combined buffer-pool corruption + WAL failure/recovery interleavings in one run (single deterministic scenario with multiple phases/fault classes).
   2. Continue migrating runtime WAL recovery/read callers to bounded decode APIs as new runtime call sites are added.
-  3. Expand seeded fault-matrix schedules to combined buffer-pool corruption + WAL failure/recovery interleavings in one run.
+  3. Define capacity contracts up front for upcoming executor operator intermediates (sort/aggregate/join) to avoid reintroducing unbounded allocator growth.

@@ -167,36 +167,49 @@ pub fn executeUpdate(
     allocator: Allocator,
 ) MutationError!u32 {
     std.debug.assert(model_id < catalog.model_count);
+    _ = allocator;
     const model = &catalog.models[model_id];
     const schema = &model.row_schema;
 
-    // Scan for matching rows.
-    var scan_result = scan_mod.tableScan(
-        catalog, pool, undo_log, snapshot, tx_manager, model_id, allocator,
-    ) catch |e| return mapScanError(e);
-    defer scan_result.deinit();
-
     var updated_count: u32 = 0;
+    const first_page = model.heap_first_page_id;
+    const total_pages = model.total_pages;
 
-    var i: u16 = 0;
-    while (i < scan_result.row_count) : (i += 1) {
-        const row = &scan_result.rows[i];
+    var page_idx: u32 = 0;
+    while (page_idx < total_pages) : (page_idx += 1) {
+        const page_id: u64 = @as(u64, first_page) + page_idx;
+        const page = pool.pin(page_id) catch |e| return mapPoolError(e);
+        defer pool.unpin(page_id, false);
 
-        // Apply predicate filter.
-        if (predicate_node != null_node) {
-            const matches = filter_mod.evaluatePredicate(
-                tree, tokens, source, predicate_node,
-                row.values[0..row.column_count], schema,
-            ) catch continue;
-            if (!matches) continue;
+        const slot_count = HeapPage.slot_count(page);
+        var slot_idx: u16 = 0;
+        while (slot_idx < slot_count) : (slot_idx += 1) {
+            const row_data = HeapPage.read(page, slot_idx) catch continue;
+            const data_to_decode = resolveVisibleVersion(
+                undo_log, page_id, slot_idx, snapshot, tx_manager, row_data,
+            );
+
+            var row = scan_mod.ResultRow.init();
+            row.row_id = .{ .page_id = page_id, .slot = slot_idx };
+            row.column_count = schema.column_count;
+            row_mod.decodeRowChecked(schema, data_to_decode, &row.values) catch
+                return error.Corruption;
+
+            // Apply predicate filter.
+            if (predicate_node != null_node) {
+                const matches = filter_mod.evaluatePredicate(
+                    tree, tokens, source, predicate_node,
+                    row.values[0..row.column_count], schema,
+                ) catch continue;
+                if (!matches) continue;
+            }
+
+            try updateSingleRow(
+                pool, wal, undo_log, tx_id, schema, tree, tokens, source,
+                row.row_id, row.values[0..row.column_count], first_assignment_node,
+            );
+            updated_count += 1;
         }
-
-        // Read old data for undo log.
-        try updateSingleRow(
-            pool, wal, undo_log, tx_id, schema, tree, tokens, source,
-            row, first_assignment_node,
-        );
-        updated_count += 1;
     }
 
     return updated_count;
@@ -213,34 +226,35 @@ fn updateSingleRow(
     tree: *const Ast,
     tokens: *const TokenizeResult,
     source: []const u8,
-    row: *const scan_mod.ResultRow,
+    row_id: RowId,
+    row_values: []const Value,
     first_assignment_node: NodeIndex,
 ) MutationError!void {
-    const page = pool.pin(row.row_id.page_id) catch |e|
+    const page = pool.pin(row_id.page_id) catch |e|
         return mapPoolError(e);
 
     // Read old data for undo.
-    const old_data = HeapPage.read(page, row.row_id.slot) catch {
-        pool.unpin(row.row_id.page_id, false);
+    const old_data = HeapPage.read(page, row_id.slot) catch {
+        pool.unpin(row_id.page_id, false);
         return error.StorageRead;
     };
 
     _ = undo_log.push(
-        tx_id, row.row_id.page_id, row.row_id.slot, old_data,
+        tx_id, row_id.page_id, row_id.slot, old_data,
     ) catch {
-        pool.unpin(row.row_id.page_id, false);
+        pool.unpin(row_id.page_id, false);
         return error.UndoLogFull;
     };
 
     // Apply assignments to existing values.
     var new_values: [max_assignments]Value = undefined;
-    for (0..row.column_count) |c| {
-        new_values[c] = row.values[c];
+    for (0..schema.column_count) |c| {
+        new_values[c] = row_values[c];
     }
     applyAssignments(
         tree, tokens, source, schema, first_assignment_node, &new_values,
     ) catch {
-        pool.unpin(row.row_id.page_id, false);
+        pool.unpin(row_id.page_id, false);
         return error.ColumnNotFound;
     };
 
@@ -249,27 +263,27 @@ fn updateSingleRow(
     const row_len = row_mod.encodeRow(
         schema, new_values[0..schema.column_count], &row_buf,
     ) catch |e| {
-        pool.unpin(row.row_id.page_id, false);
+        pool.unpin(row_id.page_id, false);
         return mapEncodeError(e);
     };
 
     // Update in-place.
     HeapPage.update(
-        page, row.row_id.slot, row_buf[0..row_len],
+        page, row_id.slot, row_buf[0..row_len],
     ) catch |e| {
-        pool.unpin(row.row_id.page_id, false);
+        pool.unpin(row_id.page_id, false);
         return mapHeapError(e);
     };
 
     // WAL append.
     const lsn = wal.append(
-        tx_id, .update, row.row_id.page_id, row_buf[0..row_len],
+        tx_id, .update, row_id.page_id, row_buf[0..row_len],
     ) catch |e| {
-        pool.unpin(row.row_id.page_id, true);
+        pool.unpin(row_id.page_id, true);
         return mapWalAppendError(e);
     };
     page.header.lsn = lsn;
-    pool.unpin(row.row_id.page_id, true);
+    pool.unpin(row_id.page_id, true);
 }
 
 /// Execute a DELETE operation.
@@ -293,33 +307,47 @@ pub fn executeDelete(
     allocator: Allocator,
 ) MutationError!u32 {
     std.debug.assert(model_id < catalog.model_count);
+    _ = allocator;
 
     const model = &catalog.models[model_id];
     const schema = &model.row_schema;
 
-    // Scan for matching rows.
-    var scan_result = scan_mod.tableScan(
-        catalog, pool, undo_log, snapshot, tx_manager, model_id, allocator,
-    ) catch |e| return mapScanError(e);
-    defer scan_result.deinit();
-
     var deleted_count: u32 = 0;
+    const first_page = model.heap_first_page_id;
+    const total_pages = model.total_pages;
 
-    var i: u16 = 0;
-    while (i < scan_result.row_count) : (i += 1) {
-        const row = &scan_result.rows[i];
+    var page_idx: u32 = 0;
+    while (page_idx < total_pages) : (page_idx += 1) {
+        const page_id: u64 = @as(u64, first_page) + page_idx;
+        const page = pool.pin(page_id) catch |e| return mapPoolError(e);
+        defer pool.unpin(page_id, false);
 
-        // Apply predicate filter.
-        if (predicate_node != null_node) {
-            const matches = filter_mod.evaluatePredicate(
-                tree, tokens, source, predicate_node,
-                row.values[0..row.column_count], schema,
-            ) catch continue;
-            if (!matches) continue;
+        const slot_count = HeapPage.slot_count(page);
+        var slot_idx: u16 = 0;
+        while (slot_idx < slot_count) : (slot_idx += 1) {
+            const row_data = HeapPage.read(page, slot_idx) catch continue;
+            const data_to_decode = resolveVisibleVersion(
+                undo_log, page_id, slot_idx, snapshot, tx_manager, row_data,
+            );
+
+            var row = scan_mod.ResultRow.init();
+            row.row_id = .{ .page_id = page_id, .slot = slot_idx };
+            row.column_count = schema.column_count;
+            row_mod.decodeRowChecked(schema, data_to_decode, &row.values) catch
+                return error.Corruption;
+
+            // Apply predicate filter.
+            if (predicate_node != null_node) {
+                const matches = filter_mod.evaluatePredicate(
+                    tree, tokens, source, predicate_node,
+                    row.values[0..row.column_count], schema,
+                ) catch continue;
+                if (!matches) continue;
+            }
+
+            try deleteSingleRow(pool, wal, undo_log, tx_id, row.row_id);
+            deleted_count += 1;
         }
-
-        try deleteSingleRow(pool, wal, undo_log, tx_id, row);
-        deleted_count += 1;
     }
 
     if (deleted_count > 0) {
@@ -335,39 +363,55 @@ fn deleteSingleRow(
     wal: *Wal,
     undo_log: *UndoLog,
     tx_id: TxId,
-    row: *const scan_mod.ResultRow,
+    row_id: RowId,
 ) MutationError!void {
-    const page = pool.pin(row.row_id.page_id) catch |e|
+    const page = pool.pin(row_id.page_id) catch |e|
         return mapPoolError(e);
 
     // Read old data for undo.
-    const old_data = HeapPage.read(page, row.row_id.slot) catch {
-        pool.unpin(row.row_id.page_id, false);
+    const old_data = HeapPage.read(page, row_id.slot) catch {
+        pool.unpin(row_id.page_id, false);
         return error.StorageRead;
     };
 
     _ = undo_log.push(
-        tx_id, row.row_id.page_id, row.row_id.slot, old_data,
+        tx_id, row_id.page_id, row_id.slot, old_data,
     ) catch {
-        pool.unpin(row.row_id.page_id, false);
+        pool.unpin(row_id.page_id, false);
         return error.UndoLogFull;
     };
 
     // Tombstone the slot.
-    HeapPage.delete(page, row.row_id.slot) catch {
-        pool.unpin(row.row_id.page_id, false);
+    HeapPage.delete(page, row_id.slot) catch {
+        pool.unpin(row_id.page_id, false);
         return error.StorageRead;
     };
 
     // WAL append.
     const lsn = wal.append(
-        tx_id, .delete, row.row_id.page_id, &.{},
+        tx_id, .delete, row_id.page_id, &.{},
     ) catch |e| {
-        pool.unpin(row.row_id.page_id, true);
+        pool.unpin(row_id.page_id, true);
         return mapWalAppendError(e);
     };
     page.header.lsn = lsn;
-    pool.unpin(row.row_id.page_id, true);
+    pool.unpin(row_id.page_id, true);
+}
+
+fn resolveVisibleVersion(
+    undo_log: *const UndoLog,
+    page_id: u64,
+    slot_idx: u16,
+    snapshot: *const Snapshot,
+    tx_manager: *const TxManager,
+    heap_data: []const u8,
+) []const u8 {
+    const head = undo_log.getHead(page_id, slot_idx);
+    if (head == null) return heap_data;
+    const vis = undo_log.findVisible(
+        page_id, slot_idx, snapshot, tx_manager,
+    );
+    return vis orelse heap_data;
 }
 
 /// Build a Value array from an assignment linked list.
