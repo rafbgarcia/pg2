@@ -243,6 +243,8 @@ pub const Wal = struct {
 
     /// In-memory write buffer. Records accumulate here until flush.
     buffer: std.ArrayList(u8) = .{},
+    /// Optional explicit cap used to guarantee no post-seal buffer growth.
+    buffer_capacity_limit: ?usize = null,
     /// LSN of the most recent record in the buffer (unflushed).
     buffer_max_lsn: u64 = 0,
 
@@ -278,6 +280,14 @@ pub const Wal = struct {
         self.buffer.deinit(self.allocator);
     }
 
+    /// Reserve WAL buffer bytes during startup and lock append growth to this
+    /// ceiling. Useful with sealed allocators where runtime growth is forbidden.
+    pub fn reserveBufferCapacity(self: *Wal, capacity_bytes: usize) WalError!void {
+        self.buffer.ensureTotalCapacity(self.allocator, capacity_bytes) catch
+            return error.OutOfMemory;
+        self.buffer_capacity_limit = capacity_bytes;
+    }
+
     /// Append a record to the WAL. Returns the LSN assigned to this record.
     /// The record is buffered in memory — call `flush()` to make it durable.
     pub fn append(self: *Wal, tx_id: u64, record_type: RecordType, page_id: u64, payload: []const u8) WalError!u64 {
@@ -295,6 +305,9 @@ pub const Wal = struct {
 
         const size = rec.serializedSize();
         const start = self.buffer.items.len;
+        if (self.buffer_capacity_limit) |limit| {
+            if (start + size > limit) return error.OutOfMemory;
+        }
         self.buffer.resize(self.allocator, start + size) catch
             return error.OutOfMemory;
         _ = rec.serialize(self.buffer.items[start..]);

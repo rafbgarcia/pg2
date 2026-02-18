@@ -39,6 +39,10 @@ pub const simulator = struct {
     pub const fault_matrix = @import("simulator/fault_matrix.zig");
 };
 
+pub const runtime = struct {
+    pub const bootstrap = @import("runtime/bootstrap.zig");
+};
+
 pub const tiger = struct {
     pub const error_taxonomy = @import("tiger/error_taxonomy.zig");
     pub const static_allocator = @import("tiger/static_allocator.zig");
@@ -69,6 +73,7 @@ comptime {
     _ = simulator.disk;
     _ = simulator.clock;
     _ = simulator.fault_matrix;
+    _ = runtime.bootstrap;
     _ = tiger.error_taxonomy;
     _ = tiger.static_allocator;
 }

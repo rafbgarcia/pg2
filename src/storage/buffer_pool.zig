@@ -63,9 +63,13 @@ pub const BufferPool = struct {
             };
         }
 
+        var page_table = std.AutoHashMap(u64, usize).init(allocator);
+        errdefer page_table.deinit();
+        try page_table.ensureTotalCapacity(@intCast(num_frames));
+
         return .{
             .frames = frames,
-            .page_table = std.AutoHashMap(u64, usize).init(allocator),
+            .page_table = page_table,
             .storage = storage,
             .clock_hand = 0,
             .allocator = allocator,
