@@ -351,49 +351,63 @@ pub const Wal = struct {
     /// Read all records from WAL storage starting from a given LSN.
     /// Used for recovery. Returns owned slice — caller must free.
     pub fn readFrom(self: *Wal, from_lsn: u64, allocator: std.mem.Allocator) WalError![]Record {
-        // Read all WAL pages into a contiguous buffer.
-        const page_size = io.page_size;
+        // Compatibility API: uses bounded readFromInto with temporary
+        // buffers, then deep-copies payloads for caller ownership.
         const total_pages = self.wal_page_offset + @as(u64, if (self.wal_byte_offset > 0) 1 else 0);
         if (total_pages == 0) return allocator.alloc(Record, 0) catch
             return error.OutOfMemory;
 
-        const raw = allocator.alloc(u8, @intCast(total_pages * page_size)) catch
-            return error.OutOfMemory;
-        defer allocator.free(raw);
-
-        for (0..@intCast(total_pages)) |i| {
-            var page_buf: [page_size]u8 = undefined;
-            self.storage.read(self.wal_page_base + @as(u64, @intCast(i)), &page_buf) catch
-                return error.WalReadError;
-            @memcpy(raw[i * page_size ..][0..page_size], &page_buf);
-        }
-
-        // Total bytes of WAL data.
         const total_bytes: usize = if (self.wal_byte_offset > 0)
-            @intCast((self.wal_page_offset) * page_size + self.wal_byte_offset)
+            @intCast(self.wal_page_offset * io.page_size + self.wal_byte_offset)
         else
-            @intCast(self.wal_page_offset * page_size);
+            @intCast(total_pages * io.page_size);
+        const max_record_capacity = @max(
+            @as(usize, 1),
+            total_bytes / (Record.header_size + Record.crc_size),
+        );
 
-        // Parse records. Payload slices point into `raw`, so we must
-        // duplicate them before `raw` is freed.
-        var records: std.ArrayList(Record) = .{};
-        var offset: usize = 0;
-        while (offset < total_bytes) {
-            const result = Record.deserialize(raw[offset..total_bytes]) catch break;
-            if (result.record.lsn >= from_lsn) {
-                var rec = result.record;
-                if (rec.payload.len > 0) {
-                    const owned = allocator.alloc(u8, rec.payload.len) catch
-                        return error.OutOfMemory;
-                    @memcpy(owned, rec.payload);
-                    rec.payload = owned;
+        const tmp_records = allocator.alloc(Record, max_record_capacity) catch
+            return error.OutOfMemory;
+        defer allocator.free(tmp_records);
+
+        const tmp_payload = allocator.alloc(u8, total_bytes) catch
+            return error.OutOfMemory;
+        defer allocator.free(tmp_payload);
+
+        const decoded = try self.readFromInto(from_lsn, tmp_records, tmp_payload);
+        const decoded_records = tmp_records[0..decoded.records_len];
+
+        const owned_records = allocator.alloc(Record, decoded_records.len) catch
+            return error.OutOfMemory;
+        var initialized_len: usize = 0;
+        errdefer {
+            var i: usize = 0;
+            while (i < initialized_len) : (i += 1) {
+                if (owned_records[i].payload.len > 0) {
+                    allocator.free(owned_records[i].payload);
                 }
-                records.append(allocator, rec) catch return error.OutOfMemory;
             }
-            offset += result.bytes_consumed;
+            allocator.free(owned_records);
         }
 
-        return records.toOwnedSlice(allocator) catch return error.OutOfMemory;
+        for (decoded_records, 0..) |rec, i| {
+            var owned_payload: []const u8 = &.{};
+            if (rec.payload.len > 0) {
+                const payload_mem = allocator.alloc(u8, rec.payload.len) catch
+                    return error.OutOfMemory;
+                @memcpy(payload_mem, rec.payload);
+                owned_payload = payload_mem;
+            }
+            owned_records[i] = .{
+                .lsn = rec.lsn,
+                .tx_id = rec.tx_id,
+                .record_type = rec.record_type,
+                .page_id = rec.page_id,
+                .payload = owned_payload,
+            };
+            initialized_len = i + 1;
+        }
+        return owned_records;
     }
 
     /// Bounded no-allocation WAL decode path. Caller provides fixed-capacity
@@ -645,7 +659,7 @@ test "WAL commitTx flushes automatically" {
     try std.testing.expectEqual(@as(u64, 2), disk.fsyncs);
 }
 
-test "WAL readFrom recovers records" {
+test "WAL readFrom compatibility matches bounded decode" {
     const disk_mod = @import("../simulator/disk.zig");
     var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
     defer disk.deinit();
@@ -661,14 +675,23 @@ test "WAL readFrom recovers records" {
     _ = try wal.append(2, .insert, 6, "data2");
     _ = try wal.commitTx(2);
 
-    const records = try wal.readFrom(1, std.testing.allocator);
-    defer Wal.freeRecords(records, std.testing.allocator);
+    var bounded_buf: [16]Record = undefined;
+    var bounded_payload: [256]u8 = undefined;
+    const bounded = try wal.readFromInto(1, &bounded_buf, &bounded_payload);
+    const bounded_records = bounded_buf[0..bounded.records_len];
 
-    try std.testing.expectEqual(@as(usize, 6), records.len);
-    try std.testing.expectEqual(RecordType.tx_begin, records[0].record_type);
-    try std.testing.expectEqual(RecordType.insert, records[1].record_type);
-    try std.testing.expectEqual(RecordType.tx_commit, records[2].record_type);
-    try std.testing.expectEqual(RecordType.tx_begin, records[3].record_type);
+    const compat_records = try wal.readFrom(1, std.testing.allocator);
+    defer Wal.freeRecords(compat_records, std.testing.allocator);
+
+    try std.testing.expectEqual(@as(usize, 6), compat_records.len);
+    try std.testing.expectEqual(compat_records.len, bounded_records.len);
+    for (compat_records, bounded_records) |compat, bounded_rec| {
+        try std.testing.expectEqual(bounded_rec.lsn, compat.lsn);
+        try std.testing.expectEqual(bounded_rec.tx_id, compat.tx_id);
+        try std.testing.expectEqual(bounded_rec.record_type, compat.record_type);
+        try std.testing.expectEqual(bounded_rec.page_id, compat.page_id);
+        try std.testing.expectEqualSlices(u8, bounded_rec.payload, compat.payload);
+    }
 }
 
 test "WAL readFrom filters by LSN" {

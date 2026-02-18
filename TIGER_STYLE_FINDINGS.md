@@ -89,66 +89,27 @@ This tracker exists to keep continuity across sessions:
 
 - `zig build test` passing after the completed changes.
 
-### Session Handoff - 2026-02-18
+### Session Handoff
 
-- Goal this session:
-  - Continue Tiger-style hardening by moving deterministic fault testing from single-fault injection toward seeded multi-step scenarios, then advance allocator sealing in WAL decode paths.
-- Completed:
-  - Added seeded replay-deterministic fault-matrix scenarios in `src/simulator/fault_matrix.zig` for:
-    - partial WAL write + crash + recover
-    - data-page bitflip + checksum enforcement
-    - WAL fsync failure + WAL-gated page flush behavior
-  - Wired fault-matrix module into test discovery (`src/pg2.zig`).
-  - Extended `SimulatedDisk` with deterministic one-shot `partialWriteAt` and `bitflipWriteAt` injection APIs and tests (`src/simulator/disk.zig`).
-  - Added WAL torn-write recovery regression (`src/storage/wal.zig`).
-  - Added bounded no-allocation WAL decode API `readFromInto` with explicit `RecordBufferTooSmall` / `PayloadBufferTooSmall` errors and tests (`src/storage/wal.zig`).
-  - Migrated seeded WAL partial-write recovery matrix scenario to bounded caller-owned WAL decode buffers via `readFromInto` (`src/simulator/fault_matrix.zig`).
-  - Added seeded replay-deterministic multi-fault WAL interleaving scenario (torn write + fsync failure on commit + retry flush + crash/recover) in `src/simulator/fault_matrix.zig`.
-  - Added bounded `tableScanInto` with explicit caller capacity contracts and regression coverage (`src/executor/scan.zig`), and switched read query execution to use the bounded scan path directly (`src/executor/executor.zig`).
-  - Replaced allocator-backed mutation scan materialization with in-place visible-row iteration in `executeUpdate`/`executeDelete` (`src/executor/mutation.zig`), removing another executor runtime allocation path.
-  - Added seeded combined cross-subsystem fault schedule in `src/simulator/fault_matrix.zig` covering WAL fsync failure/retry + WAL-gated page flush + data-page bitflip corruption + checksum detection + WAL recover/replay.
-  - Migrated WAL recovery/filter/multi-page regression coverage to bounded `readFromInto` call patterns with explicit fixed capacities (`src/storage/wal.zig`), keeping one compatibility test for allocator-backed `readFrom`.
-  - Added explicit executor capacity-contract module for sort/aggregate/join operator intermediates with bounded defaults and invariants (`src/executor/capacity.zig`), and wired executor operator-count limit to shared contract constants (`src/executor/executor.zig`).
-  - Added explicit sort/group executor stubs with capacity checks and non-silent failure semantics, with regression coverage for not-implemented and capacity-exceeded paths (`src/executor/executor.zig`).
-  - Replaced sort stub with bounded in-place sort execution (supports multi-key `asc`/`desc` and expression keys, with no runtime allocator usage) and added regression coverage for direction and expression-key ordering (`src/executor/executor.zig`).
-  - Added explicit sort-key metadata encoding for expression keys in parser output so executor decoding is deterministic (`src/parser/parser.zig`, `src/parser/ast.zig`).
-  - Replaced group stub with bounded in-place group-key execution (distinct-by-key row collapse using fixed capacities, no runtime allocator usage) and added regression coverage for grouped output and group-key capacity enforcement (`src/executor/executor.zig`).
-  - Added grouped aggregate `count(*)` runtime state and aggregate-aware expression evaluation hooks so post-group `sort`/`where` can evaluate `count(*)` deterministically without heap allocation (`src/executor/executor.zig`, `src/executor/filter.zig`).
-  - Extended grouped aggregate runtime to support `sum` / `avg` / `min` / `max` with bounded per-query aggregate-state contracts (`group_aggregate_exprs` + `aggregate_state_bytes`) and fail-closed evaluation/update paths (type mismatch and numeric overflow surface as query errors), with regressions covering grouped aggregate behavior, type safety, and aggregate-expression capacity enforcement (`src/executor/executor.zig`, `src/executor/capacity.zig`).
-  - Updated WAL error mappings in taxonomy/boundary adapters (`src/tiger/error_taxonomy.zig`, `src/executor/mutation.zig`, `src/storage/btree.zig`).
-  - Broadened fault-matrix replay checks to run all seeded schedules across an expanded multi-seed set (`src/simulator/fault_matrix.zig`).
-  - Added a repeated crash/recover WAL schedule with mixed fsync-failure retry and torn-write interleaving, validated replay-deterministically across the seed set (`src/simulator/fault_matrix.zig`).
-  - Expanded the seed corpus again and added a longer mixed WAL+buffer-pool interleaving schedule that combines WAL fsync failure gating, page bitflip corruption, page partial-write corruption, and repeated crash/recover validation (`src/simulator/fault_matrix.zig`).
-- In progress:
-  - Allocator-sealing migration is still partial at the system level; scan/sort/group/aggregate runtime paths now use bounded in-memory contracts, while join operators and remaining buffering paths still need explicit non-allocating contracts.
-- Blockers / decisions needed:
-  - Define explicit per-call-site WAL decode capacity budgets (record count + payload bytes) for remaining recovery/read paths as those paths are introduced/expanded.
-- Tests run:
+- State summary:
+  - Bounded runtime contracts are in place for scan/sort/group/aggregate and most WAL read paths.
+  - WAL compatibility path `readFrom` now reuses bounded `readFromInto` internally and is verified against it (`src/storage/wal.zig`).
+  - Deterministic fault matrix includes multi-step schedules and CI-oriented seed sweeps with bounded budgets (`src/simulator/fault_matrix.zig`).
+- Still open:
+  - Allocator-sealing migration is `partial`; join execution is the largest missing bounded runtime path.
+  - Deterministic fault matrix should keep expanding as new persistence/recovery paths land.
+- Blockers / decisions:
+  - None currently.
+- Last validation run:
   - `zig build test`
-- Next recommended step:
-  1. Implement bounded join operator execution (state/scratch/output contracts, fail-closed capacity errors, deterministic regressions).
-  2. Add CI-oriented seed sweeps for fault-matrix scenarios (larger deterministic seed corpus with bounded runtime budget and failure-shrinking output).
-  3. Continue retiring allocator-backed WAL `readFrom` usage outside explicit compatibility tests as new recovery/read call sites are added.
 
-### Session Handoff - 2026-02-18 (continued)
+#### Next Codex Session Plan
 
-- Goal this session:
-  - Continue Tiger-style hardening by adding CI-oriented deterministic replay sweeps with explicit runtime bounds and better failure diagnostics.
-- Completed:
-  - Added deterministic seed-set generator utilities (`splitMix64`, `buildSeedSet`) in `src/simulator/fault_matrix.zig` so seed corpora are reproducible and easy to scale.
-  - Added reusable replay-determinism assertion helper (`expectReplayDeterministicAcrossSeeds`) with explicit mismatch diagnostics that include scenario name, seed index, and seed value.
-  - Added bounded CI-oriented seed sweeps:
-    - `ci_short_seed_budget = 24` for shorter schedules.
-    - `ci_long_seed_budget = 12` for longer schedules.
-  - Added two dedicated sweep tests to keep runtime bounded while increasing seed breadth:
-    - extended deterministic replay coverage for short schedules.
-    - bounded deterministic replay coverage for long schedules.
-- In progress:
-  - Deterministic fault matrix remains `partial`; the matrix now has broader CI seed coverage, but additional interleavings should continue to be added as new persistence/recovery paths land.
-- Blockers / decisions needed:
-  - None for this increment.
-- Tests run:
-  - `zig build test`
-- Next recommended step:
-  1. Implement bounded join operator execution (state/scratch/output contracts, fail-closed capacity errors, deterministic regressions).
-  2. Continue retiring allocator-backed WAL `readFrom` usage outside explicit compatibility tests as new recovery/read call sites are introduced.
+1. Implement bounded join operator execution in `src/executor/executor.zig` using existing capacity contracts from `src/executor/capacity.zig`.
+   Done criteria: join path enforces `join_build_rows`, `join_output_rows`, and `join_state_bytes` with fail-closed query errors.
+2. Add deterministic join regressions in `src/executor/executor.zig` tests.
+   Done criteria: coverage for normal join behavior, each capacity-overflow failure path, and deterministic output ordering.
+3. Wire tracker updates after code lands.
+   Update `Remaining Findings` item 6 and this handoff section in `TIGER_STYLE_FINDINGS.md` with concrete refs and test evidence.
+4. Validation before handoff.
+   Run `zig build test` and record pass/fail outcome in this file.
