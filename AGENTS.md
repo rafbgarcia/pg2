@@ -102,7 +102,6 @@ Do not use recursion. Use explicit fixed-capacity stacks allocated at startup. R
 ### Function and code structure
 
 - **70-line hard limit per function.** If a function exceeds this, it must be split. No exceptions.
-- **100-column line limit.**
 - Declare variables in the smallest possible scope. No declarations at function top "for later."
 - One statement per line. No chained operations that obscure control flow.
 - Centralize control flow — avoid distributing related branching logic across multiple functions when it can live in one place.
