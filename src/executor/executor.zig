@@ -348,9 +348,43 @@ fn applyNestedSelectionJoin(
 ) bool {
     const selection = getPipelineSelection(ctx.ast, pipeline_node) orelse
         return true;
-    const nested = findSingleNestedSelection(ctx.ast, selection, result) orelse
-        return !result.has_error;
+    var field = ctx.ast.getNode(selection).data.unary;
+    while (field != null_node) {
+        const node = ctx.ast.getNode(field);
+        if (node.tag == .select_nested) {
+            if (!applySingleNestedSelectionJoin(
+                ctx,
+                result,
+                source_model_id,
+                field,
+                caps,
+            )) return false;
+        }
+        field = node.next;
+    }
+    return true;
+}
 
+fn getPipelineSelection(
+    tree: *const Ast,
+    pipeline_node: NodeIndex,
+) ?NodeIndex {
+    const pipeline = tree.getNode(pipeline_node);
+    if (pipeline.tag != .pipeline) return null;
+    const idx: NodeIndex = pipeline.extra;
+    if (idx >= tree.node_count) return null;
+    const node = tree.getNode(idx);
+    if (node.tag != .selection_set) return null;
+    return idx;
+}
+
+fn applySingleNestedSelectionJoin(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    source_model_id: ModelId,
+    nested: NodeIndex,
+    caps: *const capacity_mod.OperatorCapacities,
+) bool {
     const relation_name = ctx.tokens.getText(
         ctx.ast.getNode(nested).extra,
         ctx.source,
@@ -441,43 +475,6 @@ fn applyNestedSelectionJoin(
     }
     result.stats.pages_read += right_result.stats.pages_read;
     return true;
-}
-
-fn getPipelineSelection(
-    tree: *const Ast,
-    pipeline_node: NodeIndex,
-) ?NodeIndex {
-    const pipeline = tree.getNode(pipeline_node);
-    if (pipeline.tag != .pipeline) return null;
-    const idx: NodeIndex = pipeline.extra;
-    if (idx >= tree.node_count) return null;
-    const node = tree.getNode(idx);
-    if (node.tag != .selection_set) return null;
-    return idx;
-}
-
-fn findSingleNestedSelection(
-    tree: *const Ast,
-    selection_node: NodeIndex,
-    result: *QueryResult,
-) ?NodeIndex {
-    const selection = tree.getNode(selection_node);
-    if (selection.tag != .selection_set) return null;
-
-    var nested: NodeIndex = null_node;
-    var field = selection.data.unary;
-    while (field != null_node) {
-        const node = tree.getNode(field);
-        if (node.tag == .select_nested) {
-            if (nested != null_node) {
-                setError(result, "multiple nested relations not yet supported");
-                return null;
-            }
-            nested = field;
-        }
-        field = node.next;
-    }
-    return if (nested == null_node) null else nested;
 }
 
 fn inferAssociationJoinDescriptor(
@@ -2134,6 +2131,89 @@ test "execute nested relation join through selection set" {
     try testing.expectEqual(@as(i64, 20), result.rows[1].values[3].bigint);
     try testing.expectEqual(@as(i64, 2), result.rows[2].values[0].bigint);
     try testing.expectEqual(@as(i64, 15), result.rows[2].values[3].bigint);
+}
+
+test "execute multiple nested relations through selection set" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const post_model = try env.catalog.addModel("Post");
+    _ = try env.catalog.addColumn(post_model, "id", .bigint, false);
+    _ = try env.catalog.addColumn(post_model, "user_id", .bigint, false);
+    env.catalog.models[post_model].heap_first_page_id = 120;
+    env.catalog.models[post_model].total_pages = 1;
+
+    const comment_model = try env.catalog.addModel("Comment");
+    _ = try env.catalog.addColumn(comment_model, "id", .bigint, false);
+    _ = try env.catalog.addColumn(comment_model, "user_id", .bigint, false);
+    env.catalog.models[comment_model].heap_first_page_id = 121;
+    env.catalog.models[comment_model].total_pages = 1;
+
+    _ = try env.catalog.addAssociation(
+        env.model_id,
+        "posts",
+        AssociationKind.has_many,
+        "Post",
+    );
+    _ = try env.catalog.addAssociation(
+        env.model_id,
+        "comments",
+        AssociationKind.has_many,
+        "Comment",
+    );
+    try env.catalog.resolveAssociations();
+
+    const post_page = try env.pool.pin(120);
+    heap_mod.HeapPage.init(post_page);
+    env.pool.unpin(120, true);
+
+    const comment_page = try env.pool.pin(121);
+    heap_mod.HeapPage.init(comment_page);
+    env.pool.unpin(121, true);
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const inserts = [_][]const u8{
+        "User |> insert(id = 1, name = \"Alice\", active = true)",
+        "User |> insert(id = 2, name = \"Bob\", active = true)",
+        "Post |> insert(id = 20, user_id = 1)",
+        "Post |> insert(id = 10, user_id = 1)",
+        "Post |> insert(id = 15, user_id = 2)",
+        "Comment |> insert(id = 200, user_id = 1)",
+        "Comment |> insert(id = 100, user_id = 1)",
+        "Comment |> insert(id = 150, user_id = 2)",
+    };
+    for (inserts) |src| {
+        const tok = tokenizer_mod.tokenize(src);
+        const p = parser_mod.parse(&tok, src);
+        try testing.expect(!p.has_error);
+        var r = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+        defer r.deinit();
+        try testing.expect(!r.has_error);
+    }
+
+    const src =
+        "User |> sort(id asc) { id posts |> sort(id asc) { id } comments |> sort(id asc) { id } }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(@as(u16, 5), result.row_count);
+    try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].bigint);
+    try testing.expectEqual(@as(i64, 10), result.rows[0].values[3].bigint);
+    try testing.expectEqual(@as(i64, 100), result.rows[0].values[5].bigint);
+    try testing.expectEqual(@as(i64, 1), result.rows[3].values[0].bigint);
+    try testing.expectEqual(@as(i64, 20), result.rows[3].values[3].bigint);
+    try testing.expectEqual(@as(i64, 200), result.rows[3].values[5].bigint);
+    try testing.expectEqual(@as(i64, 2), result.rows[4].values[0].bigint);
+    try testing.expectEqual(@as(i64, 15), result.rows[4].values[3].bigint);
+    try testing.expectEqual(@as(i64, 150), result.rows[4].values[5].bigint);
 }
 
 test "execute nested relation fails closed when association is missing" {
