@@ -56,6 +56,7 @@ pub fn classifyMutation(err: mutation_mod.MutationError) ErrorClass {
         error.StackOverflow => .resource_exhausted,
         error.StackUnderflow => .fatal,
         error.DivisionByZero => .fatal,
+        error.NumericOverflow => .fatal,
         error.UnknownFunction => .fatal,
         error.NullInPredicate => .fatal,
         error.ResultOverflow => .resource_exhausted,

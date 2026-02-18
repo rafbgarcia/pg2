@@ -368,9 +368,12 @@ pub const InternalNode = struct {
 // B+ Tree
 // ============================================================================
 
-/// Max tree depth for path tracking. 16 levels with fanout ~400 can index
-/// far more entries than any reasonable dataset.
-const max_depth = 16;
+/// Max number of internal levels traversed from root to leaf.
+/// 16 levels with fanout ~400 can index far more entries than any reasonable dataset.
+const max_btree_depth = 16;
+/// Max sibling-page hops while advancing a range scan iterator.
+/// This guards against malformed cyclic sibling chains.
+const max_leaf_sibling_hops = 1024;
 
 /// A path entry tracks the page_id and the child index followed at each level.
 const PathEntry = struct {
@@ -411,9 +414,11 @@ pub const BTree = struct {
     /// Look up a key. Returns the RowId if found, null otherwise.
     pub fn find(self: *BTree, key: []const u8) BTreeError!?RowId {
         var page_id = self.root_page_id;
+        var depth: usize = 0;
 
         // Traverse internal nodes to find the leaf.
         while (true) {
+            if (depth > max_btree_depth) return error.Corruption;
             const page = self.pool.pin(page_id) catch |e| return mapPoolError(e);
             defer self.pool.unpin(page_id, false);
 
@@ -428,7 +433,10 @@ pub const BTree = struct {
                 },
                 .btree_internal => {
                     if (!validateInternalStructure(&page.content)) return error.Corruption;
-                    page_id = InternalNode.findChild(&page.content, key);
+                    const next = InternalNode.findChild(&page.content, key);
+                    if (next == page_id) return error.Corruption;
+                    page_id = next;
+                    depth += 1;
                 },
                 else => return error.InvalidPage,
             }
@@ -438,7 +446,7 @@ pub const BTree = struct {
     /// Insert a key/RowId pair. Handles splits automatically.
     pub fn insert(self: *BTree, key: []const u8, row_id: RowId) BTreeError!void {
         // Build path from root to leaf.
-        var path: [max_depth]PathEntry = undefined;
+        var path: [max_btree_depth]PathEntry = undefined;
         var depth: usize = 0;
         var page_id = self.root_page_id;
 
@@ -460,17 +468,24 @@ pub const BTree = struct {
                         return error.Corruption;
                     }
                     const child_index = InternalNode.findChildIndex(&page.content, key);
-                    self.pool.unpin(page_id, false);
-
+                    const next = if (child_index == 0)
+                        InternalNode.leftChild(&page.content)
+                    else
+                        InternalNode.getRightChild(&page.content, child_index - 1);
+                    if (next == page_id) {
+                        self.pool.unpin(page_id, false);
+                        return error.Corruption;
+                    }
+                    if (depth >= max_btree_depth) {
+                        self.pool.unpin(page_id, false);
+                        return error.Corruption;
+                    }
                     path[depth] = .{ .page_id = page_id, .child_index = child_index };
                     depth += 1;
+                    self.pool.unpin(page_id, false);
 
                     // Follow the child pointer.
-                    if (child_index == 0) {
-                        page_id = InternalNode.leftChild(&page.content);
-                    } else {
-                        page_id = InternalNode.getRightChild(&page.content, child_index - 1);
-                    }
+                    page_id = next;
                 },
                 else => {
                     self.pool.unpin(page_id, false);
@@ -516,9 +531,11 @@ pub const BTree = struct {
     /// Delete a key from the tree. No rebalancing (PostgreSQL-style).
     pub fn delete(self: *BTree, key: []const u8) BTreeError!void {
         var page_id = self.root_page_id;
+        var depth: usize = 0;
 
         // Traverse to the leaf.
         while (true) {
+            if (depth > max_btree_depth) return error.Corruption;
             const page = self.pool.pin(page_id) catch |e| return mapPoolError(e);
 
             switch (page.header.page_type) {
@@ -546,8 +563,13 @@ pub const BTree = struct {
                         return error.Corruption;
                     }
                     const next = InternalNode.findChild(&page.content, key);
+                    if (next == page_id) {
+                        self.pool.unpin(page_id, false);
+                        return error.Corruption;
+                    }
                     self.pool.unpin(page_id, false);
                     page_id = next;
+                    depth += 1;
                 },
                 else => {
                     self.pool.unpin(page_id, false);
@@ -562,8 +584,10 @@ pub const BTree = struct {
     pub fn rangeScan(self: *BTree, lo: ?[]const u8, hi: ?[]const u8) BTreeError!RangeScanIterator {
         // Find the starting leaf.
         var page_id = self.root_page_id;
+        var depth: usize = 0;
 
         while (true) {
+            if (depth > max_btree_depth) return error.Corruption;
             const page = self.pool.pin(page_id) catch |e| return mapPoolError(e);
 
             switch (page.header.page_type) {
@@ -587,6 +611,7 @@ pub const BTree = struct {
                         .hi = hi,
                         .done = false,
                         .has_pinned_page = false,
+                        .sibling_hops = 0,
                     };
                 },
                 .btree_internal => {
@@ -599,8 +624,13 @@ pub const BTree = struct {
                     else
                         // No lower bound — start from leftmost child.
                         InternalNode.leftChild(&page.content);
+                    if (next == page_id) {
+                        self.pool.unpin(page_id, false);
+                        return error.Corruption;
+                    }
                     self.pool.unpin(page_id, false);
                     page_id = next;
+                    depth += 1;
                 },
                 else => {
                     self.pool.unpin(page_id, false);
@@ -885,6 +915,7 @@ pub const RangeScanIterator = struct {
     /// The page stays pinned so returned key slices remain valid
     /// until the next call to `next()` or `close()`.
     has_pinned_page: bool,
+    sibling_hops: usize,
 
     pub const Entry = struct {
         key: []const u8,
@@ -893,7 +924,7 @@ pub const RangeScanIterator = struct {
 
     /// Advance the iterator. Returns the next key/RowId pair, or null when exhausted.
     /// The returned key slice is valid until the next call to `next()` or `close()`.
-        pub fn next(self: *RangeScanIterator) BTreeError!?Entry {
+    pub fn next(self: *RangeScanIterator) BTreeError!?Entry {
         while (!self.done) {
             // Release the pin from the previous next() call.
             if (self.has_pinned_page) {
@@ -920,6 +951,9 @@ pub const RangeScanIterator = struct {
                     self.done = true;
                     return null;
                 }
+                if (sibling == self.current_page_id) return error.Corruption;
+                if (self.sibling_hops >= max_leaf_sibling_hops) return error.Corruption;
+                self.sibling_hops += 1;
 
                 self.current_page_id = sibling;
                 self.current_index = 0;
@@ -1345,6 +1379,101 @@ test "btree: corrupted leaf structure returns Corruption" {
 
     const result = tree.find("anything");
     try testing.expectError(error.Corruption, result);
+}
+
+test "btree: corrupted leaf cell pointer returns Corruption" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
+    defer pool.deinit();
+
+    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    try tree.insert("k", RowId{ .page_id = 1, .slot = 1 });
+
+    const root = try pool.pin(tree.root_page_id);
+    const free_end = readU16(&root.content, 4);
+    writeU16(&root.content, LeafNode.header_size, free_end - 1);
+    pool.unpin(tree.root_page_id, true);
+
+    try testing.expectError(error.Corruption, tree.find("k"));
+}
+
+test "btree: corrupted internal key length returns Corruption" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
+    defer pool.deinit();
+
+    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+    const root = try pool.pin(tree.root_page_id);
+    InternalNode.init(root);
+    InternalNode.setLeftChild(&root.content, 1);
+    try InternalNode.insert(&root.content, "m", 1);
+    const cell_off = readU16(&root.content, InternalNode.header_size);
+    writeU16(&root.content, cell_off, content_size);
+    pool.unpin(tree.root_page_id, true);
+
+    const child = try pool.pin(1);
+    LeafNode.init(child);
+    pool.unpin(1, true);
+
+    try testing.expectError(error.Corruption, tree.find("z"));
+}
+
+test "btree: traversal depth guard returns Corruption" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(testing.allocator, disk.storage(), 32);
+    defer pool.deinit();
+
+    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+
+    var page_id: u64 = tree.root_page_id;
+    var level: usize = 0;
+    while (level <= max_btree_depth) : (level += 1) {
+        const internal = try pool.pin(page_id);
+        InternalNode.init(internal);
+        InternalNode.setLeftChild(&internal.content, page_id + 1);
+        pool.unpin(page_id, true);
+        page_id += 1;
+    }
+
+    const leaf = try pool.pin(page_id);
+    LeafNode.init(leaf);
+    pool.unpin(page_id, true);
+
+    try testing.expectError(error.Corruption, tree.find("anything"));
+}
+
+test "btree: range scan sibling cycle returns Corruption" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(testing.allocator, disk.storage(), 16);
+    defer pool.deinit();
+
+    var tree = try BTree.init(testing.allocator, &pool, null, 0);
+
+    const leaf0 = try pool.pin(tree.root_page_id);
+    LeafNode.init(leaf0);
+    LeafNode.setRightSibling(&leaf0.content, 1);
+    pool.unpin(tree.root_page_id, true);
+
+    const leaf1 = try pool.pin(1);
+    LeafNode.init(leaf1);
+    LeafNode.setRightSibling(&leaf1.content, tree.root_page_id);
+    pool.unpin(1, true);
+
+    var iter = try tree.rangeScan(null, null);
+    defer iter.close();
+    try testing.expectError(error.Corruption, iter.next());
 }
 
 test "btree: single insert and find" {

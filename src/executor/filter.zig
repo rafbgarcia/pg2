@@ -22,6 +22,7 @@ pub const EvalError = error{
     StackUnderflow,
     TypeMismatch,
     DivisionByZero,
+    NumericOverflow,
     ColumnNotFound,
     InvalidLiteral,
     UnknownFunction,
@@ -311,11 +312,12 @@ fn applyArithmetic(lhs: Value, rhs: Value, op: ArithOp) EvalError!Value {
         const a = lhs.bigint;
         const b = rhs.bigint;
         return Value{ .bigint = switch (op) {
-            .add => a + b,
-            .sub => a - b,
-            .mul => a * b,
+            .add => std.math.add(i64, a, b) catch return error.NumericOverflow,
+            .sub => std.math.sub(i64, a, b) catch return error.NumericOverflow,
+            .mul => std.math.mul(i64, a, b) catch return error.NumericOverflow,
             .div => blk: {
                 if (b == 0) return error.DivisionByZero;
+                if (a == std.math.minInt(i64) and b == -1) return error.NumericOverflow;
                 break :blk @divTrunc(a, b);
             },
         } };
@@ -324,11 +326,12 @@ fn applyArithmetic(lhs: Value, rhs: Value, op: ArithOp) EvalError!Value {
         const a = lhs.int;
         const b = rhs.int;
         return Value{ .int = switch (op) {
-            .add => a + b,
-            .sub => a - b,
-            .mul => a * b,
+            .add => std.math.add(i32, a, b) catch return error.NumericOverflow,
+            .sub => std.math.sub(i32, a, b) catch return error.NumericOverflow,
+            .mul => std.math.mul(i32, a, b) catch return error.NumericOverflow,
             .div => blk: {
                 if (b == 0) return error.DivisionByZero;
+                if (a == std.math.minInt(i32) and b == -1) return error.NumericOverflow;
                 break :blk @divTrunc(a, b);
             },
         } };
@@ -423,8 +426,14 @@ pub fn applyUnaryOp(operand: Value, op: TokenType) EvalError!Value {
             break :blk Value{ .boolean = !operand.boolean };
         },
         .minus => blk: {
-            if (operand == .bigint) break :blk Value{ .bigint = -operand.bigint };
-            if (operand == .int) break :blk Value{ .int = -operand.int };
+            if (operand == .bigint) {
+                if (operand.bigint == std.math.minInt(i64)) return error.NumericOverflow;
+                break :blk Value{ .bigint = -operand.bigint };
+            }
+            if (operand == .int) {
+                if (operand.int == std.math.minInt(i32)) return error.NumericOverflow;
+                break :blk Value{ .int = -operand.int };
+            }
             if (operand == .float) break :blk Value{ .float = -operand.float };
             return error.TypeMismatch;
         },
@@ -442,8 +451,18 @@ pub fn applyBuiltinFunction(
             if (args.len < 1) return error.TypeMismatch;
             const v = args[0];
             if (v == .null_value) break :blk Value{ .null_value = {} };
-            if (v == .bigint) break :blk Value{ .bigint = @as(i64, @intCast(@abs(v.bigint))) };
-            if (v == .int) break :blk Value{ .int = @as(i32, @intCast(@abs(v.int))) };
+            if (v == .bigint) {
+                if (v.bigint == std.math.minInt(i64)) return error.NumericOverflow;
+                break :blk Value{
+                    .bigint = if (v.bigint < 0) -v.bigint else v.bigint,
+                };
+            }
+            if (v == .int) {
+                if (v.int == std.math.minInt(i32)) return error.NumericOverflow;
+                break :blk Value{
+                    .int = if (v.int < 0) -v.int else v.int,
+                };
+            }
             if (v == .float) break :blk Value{ .float = @abs(v.float) };
             return error.TypeMismatch;
         },
@@ -699,6 +718,39 @@ test "division by zero" {
         .slash,
     );
     try testing.expectError(error.DivisionByZero, result);
+}
+
+test "bigint arithmetic overflow returns error" {
+    const result = applyBinaryOp(
+        .{ .bigint = std.math.maxInt(i64) },
+        .{ .bigint = 1 },
+        .plus,
+    );
+    try testing.expectError(error.NumericOverflow, result);
+}
+
+test "int arithmetic overflow returns error" {
+    const result = applyBinaryOp(
+        .{ .int = std.math.maxInt(i32) },
+        .{ .int = 2 },
+        .star,
+    );
+    try testing.expectError(error.NumericOverflow, result);
+}
+
+test "unary minus overflow returns error" {
+    const result = applyUnaryOp(
+        .{ .bigint = std.math.minInt(i64) },
+        .minus,
+    );
+    try testing.expectError(error.NumericOverflow, result);
+}
+
+test "abs overflow returns error" {
+    const result = applyBuiltinFunction(.fn_abs, &[_]Value{
+        .{ .bigint = std.math.minInt(i64) },
+    });
+    try testing.expectError(error.NumericOverflow, result);
 }
 
 test "predicate wrapper — true" {
