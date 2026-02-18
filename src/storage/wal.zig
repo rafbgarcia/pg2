@@ -731,3 +731,32 @@ test "WAL spanning multiple pages" {
     try std.testing.expectEqual(@as(u64, 1), records[0].lsn);
     try std.testing.expectEqual(@as(u64, 100), records[99].lsn);
 }
+
+test "WAL recover handles deterministic torn-write corruption" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    {
+        var wal = Wal.init(std.testing.allocator, disk.storage());
+        defer wal.deinit();
+
+        // Corrupt the first WAL page write deterministically (torn write).
+        disk.partialWriteAt(1, Record.header_size / 2);
+        _ = try wal.beginTx(1);
+        _ = try wal.append(1, .insert, 99, "faulty");
+        _ = try wal.commitTx(1);
+    }
+
+    disk.crash();
+
+    // Recovery envelope should still be readable; record parsing may stop
+    // early due to CRC/truncation, but must not crash.
+    var recovered = Wal.init(std.testing.allocator, disk.storage());
+    defer recovered.deinit();
+    try recovered.recover();
+
+    const records = try recovered.readFrom(1, std.testing.allocator);
+    defer Wal.freeRecords(records, std.testing.allocator);
+    try std.testing.expect(records.len <= 3);
+}

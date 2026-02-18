@@ -23,6 +23,11 @@ pub const SimulatedDisk = struct {
     fail_read_at: ?u64 = null,
     fail_write_at: ?u64 = null,
     fail_fsync_at: ?u64 = null,
+    partial_write_at: ?u64 = null,
+    partial_write_prefix_bytes: usize = 0,
+    bitflip_write_at: ?u64 = null,
+    bitflip_write_offset: usize = 0,
+    bitflip_write_mask: u8 = 0,
 
     pub fn init(allocator: std.mem.Allocator) SimulatedDisk {
         return .{
@@ -82,7 +87,34 @@ pub const SimulatedDisk = struct {
                 return error.WriteError;
             }
         }
-        self.pending.put(page_id, data.*) catch return error.WriteError;
+
+        var page_data = data.*;
+
+        if (self.partial_write_at) |n| {
+            if (self.writes == n) {
+                self.partial_write_at = null;
+                const keep_prefix = @min(self.partial_write_prefix_bytes, page_size);
+                if (keep_prefix < page_size) {
+                    var previous = std.mem.zeroes([page_size]u8);
+                    if (self.pending.get(page_id)) |pending_data| {
+                        previous = pending_data;
+                    } else if (self.pages.get(page_id)) |durable_data| {
+                        previous = durable_data;
+                    }
+                    @memcpy(page_data[keep_prefix..], previous[keep_prefix..]);
+                }
+            }
+        }
+
+        if (self.bitflip_write_at) |n| {
+            if (self.writes == n) {
+                self.bitflip_write_at = null;
+                const offset = @min(self.bitflip_write_offset, page_size - 1);
+                page_data[offset] ^= self.bitflip_write_mask;
+            }
+        }
+
+        self.pending.put(page_id, page_data) catch return error.WriteError;
     }
 
     fn fsyncImpl(ptr: *anyopaque) io.StorageError!void {
@@ -134,6 +166,23 @@ pub const SimulatedDisk = struct {
     pub fn failFsyncAt(self: *SimulatedDisk, n: u64) void {
         std.debug.assert(n > 0);
         self.fail_fsync_at = n;
+    }
+
+    /// Inject a one-shot partial write on the Nth write operation.
+    /// Only the first `prefix_bytes` are taken from the incoming page;
+    /// remaining bytes retain prior page contents (or zeroes if new page).
+    pub fn partialWriteAt(self: *SimulatedDisk, n: u64, prefix_bytes: usize) void {
+        std.debug.assert(n > 0);
+        self.partial_write_at = n;
+        self.partial_write_prefix_bytes = prefix_bytes;
+    }
+
+    /// Inject a one-shot byte corruption on the Nth write operation.
+    pub fn bitflipWriteAt(self: *SimulatedDisk, n: u64, byte_offset: usize, mask: u8) void {
+        std.debug.assert(n > 0);
+        self.bitflip_write_at = n;
+        self.bitflip_write_offset = byte_offset;
+        self.bitflip_write_mask = mask;
     }
 };
 
@@ -302,4 +351,63 @@ test "deterministic fsync failure injection" {
     // One-shot failure should clear; next fsync succeeds and persists.
     try s.fsync();
     try std.testing.expect(disk.isDurable(0));
+}
+
+test "deterministic partial write injection" {
+    var disk = SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+    const s = disk.storage();
+
+    var baseline: [page_size]u8 = undefined;
+    @memset(&baseline, 0x11);
+    try s.write(7, &baseline);
+    try s.fsync();
+
+    var replacement: [page_size]u8 = undefined;
+    @memset(&replacement, 0xAA);
+
+    // Write #2 should be torn: first 128 bytes from replacement, rest preserved.
+    disk.partialWriteAt(2, 128);
+    try s.write(7, &replacement);
+    try s.fsync();
+
+    var out: [page_size]u8 = undefined;
+    try s.read(7, &out);
+    for (out[0..128]) |b| {
+        try std.testing.expectEqual(@as(u8, 0xAA), b);
+    }
+    for (out[128..]) |b| {
+        try std.testing.expectEqual(@as(u8, 0x11), b);
+    }
+
+    // One-shot should clear; next write should be complete.
+    try s.write(7, &replacement);
+    try s.fsync();
+    try s.read(7, &out);
+    try std.testing.expectEqualSlices(u8, &replacement, &out);
+}
+
+test "deterministic bitflip write injection" {
+    var disk = SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+    const s = disk.storage();
+
+    var data: [page_size]u8 = undefined;
+    @memset(&data, 0x5A);
+
+    disk.bitflipWriteAt(1, 17, 0x0F);
+    try s.write(9, &data);
+    try s.fsync();
+
+    var out: [page_size]u8 = undefined;
+    try s.read(9, &out);
+    try std.testing.expectEqual(@as(u8, 0x5A ^ 0x0F), out[17]);
+    try std.testing.expectEqual(@as(u8, 0x5A), out[16]);
+    try std.testing.expectEqual(@as(u8, 0x5A), out[18]);
+
+    // One-shot should clear; following write has no corruption.
+    try s.write(9, &data);
+    try s.fsync();
+    try s.read(9, &out);
+    try std.testing.expectEqualSlices(u8, &data, &out);
 }
