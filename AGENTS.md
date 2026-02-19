@@ -96,8 +96,8 @@ For any PR touching core DB code, complete the mandatory checklist in `docs/TIGE
 - [ ] **Phase 4: Server** *(Linux-only target; use Docker for dev/test on macOS)*
   - [x] Session request path (tokenize → parse → execute → serialize, no network I/O)
   - [x] Transport abstractions + TCP and io_uring backends — `src/server/`
-  - [ ] Connection pooling (two-layer: client connections + pool connections)
-  - [ ] Runtime statistics exposure + query introspection (`inspect`)
+  - [x] Connection pooling (two-layer: client connections + pool connections)
+  - [x] Runtime statistics exposure + query introspection (`inspect`)
 - [ ] **Phase 5: Replication**
   - [ ] WAL streaming to replicas
   - [ ] Replica read path
