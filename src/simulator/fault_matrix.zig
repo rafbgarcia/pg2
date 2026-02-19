@@ -620,6 +620,159 @@ fn runBTreeSplitFlushCrashInterleaving(seed: u64) !ScenarioOutcome {
     return .{ .signature = h.final() };
 }
 
+fn classifyBTreeLookup(
+    tree: *BTree,
+    key_buf: *[8]u8,
+    expected_page_id: u64,
+) u8 {
+    const found = tree.find(key_buf) catch |err| {
+        return switch (err) {
+            error.Corruption => 1,
+            error.StorageRead => 2,
+            error.InvalidPage => 3,
+            else => 4,
+        };
+    };
+    if (found) |row_id| {
+        return if (row_id.page_id == expected_page_id) 5 else 6;
+    }
+    return 0;
+}
+
+fn runBTreeSplitProtocolCutScenario(
+    seed: u64,
+    durable_flush_steps: u8,
+    fault_mode: u8,
+    fault_step: u8,
+) !u64 {
+    std.debug.assert(durable_flush_steps <= 3);
+    std.debug.assert(fault_mode <= 3);
+    std.debug.assert(fault_step <= 2);
+
+    var prng = std.Random.DefaultPrng.init(
+        seed ^ (@as(u64, durable_flush_steps) << 16) ^
+            (@as(u64, fault_mode) << 8) ^ fault_step,
+    );
+    const rand = prng.random();
+
+    var disk = SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 64);
+    defer pool.deinit();
+
+    var tree = try BTree.init(&pool, null, 0);
+    var key_buf: [8]u8 = undefined;
+    const insert_count: u64 = 420 + rand.uintLessThan(u64, 16);
+    var i: u64 = 0;
+    while (i < insert_count) : (i += 1) {
+        const key_val = std.mem.nativeToBig(u64, i);
+        @memcpy(&key_buf, std.mem.asBytes(&key_val));
+        try tree.insert(&key_buf, RowId{ .page_id = i, .slot = 0 });
+    }
+    std.debug.assert(tree.root_page_id >= 2);
+
+    const flush_plan = [3]u64{ 0, 1, tree.root_page_id };
+    var step_idx: u8 = 0;
+    while (step_idx < durable_flush_steps) : (step_idx += 1) {
+        try pool.flush(flush_plan[step_idx]);
+        try disk.storage().fsync();
+    }
+
+    const target_page = flush_plan[fault_step];
+    switch (fault_mode) {
+        0 => {
+            disk.failWriteAt(disk.writes + 1);
+            try std.testing.expectError(error.StorageWrite, pool.flush(target_page));
+        },
+        1 => {
+            const keep_prefix = 16 + rand.uintLessThan(usize, 192);
+            disk.partialWriteAt(disk.writes + 1, keep_prefix);
+            try pool.flush(target_page);
+            try disk.storage().fsync();
+        },
+        2 => {
+            const bitflip_offset = rand.uintLessThan(usize, 128);
+            const bitflip_mask: u8 = @as(u8, 1) << @as(u3, @intCast(rand.uintLessThan(u8, 7)));
+            disk.bitflipWriteAt(disk.writes + 1, bitflip_offset, bitflip_mask);
+            try pool.flush(target_page);
+            try disk.storage().fsync();
+        },
+        3 => {},
+        else => unreachable,
+    }
+
+    disk.crash();
+
+    var verify_pool = try BufferPool.init(std.testing.allocator, disk.storage(), 64);
+    defer verify_pool.deinit();
+    var verify_tree = BTree{
+        .root_page_id = tree.root_page_id,
+        .next_page_id = tree.next_page_id,
+        .pool = &verify_pool,
+        .wal = null,
+    };
+
+    const probe_low: u64 = 0;
+    const probe_mid: u64 = insert_count / 2;
+    const probe_high: u64 = insert_count - 1;
+
+    const low_key = std.mem.nativeToBig(u64, probe_low);
+    @memcpy(&key_buf, std.mem.asBytes(&low_key));
+    const low_outcome = classifyBTreeLookup(&verify_tree, &key_buf, probe_low);
+
+    const mid_key = std.mem.nativeToBig(u64, probe_mid);
+    @memcpy(&key_buf, std.mem.asBytes(&mid_key));
+    const mid_outcome = classifyBTreeLookup(&verify_tree, &key_buf, probe_mid);
+
+    const high_key = std.mem.nativeToBig(u64, probe_high);
+    @memcpy(&key_buf, std.mem.asBytes(&high_key));
+    const high_outcome = classifyBTreeLookup(&verify_tree, &key_buf, probe_high);
+
+    var h = std.hash.Wyhash.init(
+        seed ^ 0xA11CE00B ^ (@as(u64, durable_flush_steps) << 16) ^
+            (@as(u64, fault_mode) << 8) ^ fault_step,
+    );
+    h.update(std.mem.asBytes(&insert_count));
+    h.update(std.mem.asBytes(&tree.root_page_id));
+    h.update(std.mem.asBytes(&target_page));
+    h.update(std.mem.asBytes(&disk.writes));
+    h.update(std.mem.asBytes(&disk.fsyncs));
+    h.update(&[_]u8{ low_outcome, mid_outcome, high_outcome });
+    return h.final();
+}
+
+fn runBTreeSplitProtocolCrashMatrix(seed: u64) !ScenarioOutcome {
+    var h = std.hash.Wyhash.init(seed ^ 0xA11CE00C);
+
+    var clean_step: u8 = 0;
+    while (clean_step <= 3) : (clean_step += 1) {
+        const sig = try runBTreeSplitProtocolCutScenario(
+            seed,
+            clean_step,
+            3, // clean crash cut after N durable flushes
+            @min(clean_step, 2),
+        );
+        h.update(std.mem.asBytes(&sig));
+    }
+
+    var fault_mode: u8 = 1;
+    while (fault_mode <= 2) : (fault_mode += 1) {
+        var step: u8 = 0;
+        while (step < 3) : (step += 1) {
+            const sig = try runBTreeSplitProtocolCutScenario(
+                seed,
+                step,
+                fault_mode,
+                step,
+            );
+            h.update(std.mem.asBytes(&sig));
+        }
+    }
+
+    return .{ .signature = h.final() };
+}
+
 fn runExtendedWalBufferPoolCycles(seed: u64) !ScenarioOutcome {
     var prng = std.Random.DefaultPrng.init(seed);
     const rand = prng.random();
@@ -823,6 +976,14 @@ test "seeded schedule: btree split flush crash interleaving remains replay-deter
     }
 }
 
+test "seeded schedule: btree split protocol crash matrix is replay-deterministic" {
+    for (seed_set) |seed| {
+        const first = try runBTreeSplitProtocolCrashMatrix(seed);
+        const second = try runBTreeSplitProtocolCrashMatrix(seed);
+        try std.testing.expectEqual(first.signature, second.signature);
+    }
+}
+
 test "ci seed sweep: extended deterministic replay coverage for short schedules" {
     std.debug.assert(ci_short_seed_set.len == ci_short_seed_budget);
     try expectReplayDeterministicAcrossSeeds(
@@ -859,6 +1020,11 @@ test "ci seed sweep: extended deterministic replay coverage for short schedules"
         "btree_split_flush_crash_interleaving",
         ci_short_seed_set[0..],
         runBTreeSplitFlushCrashInterleaving,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "btree_split_protocol_crash_matrix",
+        ci_short_seed_set[0..],
+        runBTreeSplitProtocolCrashMatrix,
     );
 }
 

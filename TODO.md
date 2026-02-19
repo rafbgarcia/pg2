@@ -30,7 +30,7 @@ Remaining follow-up items from the code review that we should still address.
   - Why: guard against accidental format drift.
   - Targets: `src/storage/row.zig`, `src/storage/wal.zig`, and any other persistent format modules.
 
-- [ ] B-tree split crash-consistency matrix expansion.
+- [x] B-tree split crash-consistency matrix expansion.
   - Why: current fault-matrix coverage is useful but not exhaustive per write protocol step.
   - Files: `src/simulator/fault_matrix.zig`, `src/storage/btree.zig`.
 
