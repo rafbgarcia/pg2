@@ -93,7 +93,8 @@ For any PR touching core DB code, complete the mandatory checklist in `docs/TIGE
   - [x] Schema / catalog management (catalog metadata store, schema loader)
   - [x] Executor: scan, filter, mutations — `src/executor/`
   - [ ] Executor: sort, aggregation, joins
-- [ ] **Phase 4: Server**
+- [ ] **Phase 4: Server** *(Linux-only target; use Docker for dev/test on macOS)*
+  - [x] Session request path (tokenize → parse → execute → serialize, no network I/O)
   - [ ] Connection handling (custom wire protocol)
   - [ ] Runtime statistics + introspection
 - [ ] **Phase 5: Replication**
