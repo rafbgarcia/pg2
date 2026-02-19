@@ -15,7 +15,7 @@ const TokenizeResult = tokenizer_mod.TokenizeResult;
 const max_operator_stack = 64;
 /// Maximum depth of output stack for shunting-yard.
 const max_output_stack = 128;
-/// Maximum recursive expression nesting for list/function/aggregate arguments.
+/// Maximum nested list/function/aggregate container depth.
 const max_expression_nesting = 32;
 
 pub const ExprError = error{
@@ -46,10 +46,20 @@ fn isRightAssociative(tok_type: TokenType) bool {
 
 fn isOperator(tok_type: TokenType) bool {
     return switch (tok_type) {
-        .plus, .minus, .star, .slash,
-        .equal, .not_equal, .less_than, .greater_than,
-        .less_equal, .greater_equal,
-        .kw_and, .kw_or, .kw_not, .kw_in,
+        .plus,
+        .minus,
+        .star,
+        .slash,
+        .equal,
+        .not_equal,
+        .less_than,
+        .greater_than,
+        .less_equal,
+        .greater_equal,
+        .kw_and,
+        .kw_or,
+        .kw_not,
+        .kw_in,
         => true,
         else => false,
     };
@@ -79,11 +89,29 @@ const OpEntry = struct {
     tok_type: TokenType,
     tok_index: u16,
     is_unary: bool,
+    is_not_in: bool,
 };
 
 const ParseExpressionResult = struct {
     node: NodeIndex,
     pos: u16,
+};
+
+const ContainerKind = enum {
+    list,
+    function_call,
+    aggregate_call,
+};
+
+const ContainerFrame = struct {
+    kind: ContainerKind,
+    token_index: u16,
+    base_op_count: u16,
+    base_output_count: u16,
+    first: NodeIndex = null_node,
+    last: NodeIndex = null_node,
+    item_count: u16 = 0,
+    saw_star: bool = false,
 };
 
 /// Parse an expression starting at `pos`, writing nodes into `ast`.
@@ -93,20 +121,12 @@ pub fn parseExpression(
     tokens: *const TokenizeResult,
     start_pos: u16,
 ) ExprError!ParseExpressionResult {
-    return parseExpressionWithNesting(ast, tokens, start_pos, 0);
-}
-
-fn parseExpressionWithNesting(
-    ast: *Ast,
-    tokens: *const TokenizeResult,
-    start_pos: u16,
-    nesting: u8,
-) ExprError!ParseExpressionResult {
-    if (nesting >= max_expression_nesting) return error.StackOverflow;
     var op_stack: [max_operator_stack]OpEntry = undefined;
     var op_count: u16 = 0;
     var output_stack: [max_output_stack]NodeIndex = undefined;
     var output_count: u16 = 0;
+    var container_stack: [max_expression_nesting]ContainerFrame = undefined;
+    var container_count: u16 = 0;
 
     var pos = start_pos;
     var expect_operand = true;
@@ -114,96 +134,106 @@ fn parseExpressionWithNesting(
     while (pos < tokens.count) {
         const tok = tokens.tokens[pos];
 
-        // End of expression check.
-        if (isEndOfExpression(tok.token_type) and !expect_operand) break;
-        // Special: "not in" two-word operator.
-        if (tok.token_type == .kw_not and pos + 1 < tokens.count and
-            tokens.tokens[pos + 1].token_type == .kw_in)
-        {
-            // Pop higher-precedence operators.
-            try flushOperators(&op_stack, &op_count, &output_stack, &output_count, ast, 5);
-            if (op_count >= max_operator_stack) return error.StackOverflow;
-            op_stack[op_count] = .{
-                .tok_type = .kw_in, // We'll mark it differently via tag
-                .tok_index = pos,
-                .is_unary = false,
-            };
-            op_count += 1;
-            // Mark as "not in" by using tok_index = pos (which points to "not")
-            // We'll check when popping: if tok_index points to "not", emit expr_not_in.
-            pos += 2;
-            expect_operand = true;
-            continue;
-        }
-
-        // Unary prefix operators.
-        if (expect_operand and isUnaryPrefix(tok.token_type)) {
-            if (op_count >= max_operator_stack) return error.StackOverflow;
-            op_stack[op_count] = .{
-                .tok_type = tok.token_type,
-                .tok_index = pos,
-                .is_unary = true,
-            };
-            op_count += 1;
-            pos += 1;
-            continue;
-        }
-
-        // Operand: literal, column ref, function call, aggregate, list, sub-expression.
         if (expect_operand) {
-            if (tok.token_type == .left_paren) {
-                // Sub-expression in parentheses.
+            if (isUnaryPrefix(tok.token_type)) {
                 if (op_count >= max_operator_stack) return error.StackOverflow;
                 op_stack[op_count] = .{
-                    .tok_type = .left_paren,
+                    .tok_type = tok.token_type,
                     .tok_index = pos,
-                    .is_unary = false,
+                    .is_unary = true,
+                    .is_not_in = false,
                 };
                 op_count += 1;
                 pos += 1;
                 continue;
             }
 
+            if (container_count > 0) {
+                const top = &container_stack[container_count - 1];
+                if (isContainerClose(top.kind, tok.token_type)) {
+                    if (top.item_count > 0 and !top.saw_star) return error.UnexpectedToken;
+                    try closeContainer(
+                        ast,
+                        top.*,
+                        &op_stack,
+                        &op_count,
+                        &output_stack,
+                        &output_count,
+                        &container_count,
+                    );
+                    pos += 1;
+                    expect_operand = false;
+                    continue;
+                }
+                if (tok.token_type == .star and top.kind == .aggregate_call) {
+                    if (top.saw_star or top.item_count > 0) return error.UnexpectedToken;
+                    if (output_count != top.base_output_count) return error.UnexpectedToken;
+                    top.saw_star = true;
+                    top.item_count = 1;
+                    pos += 1;
+                    expect_operand = false;
+                    continue;
+                }
+            }
+
             if (tok.token_type == .left_bracket) {
-                // List literal [a, b, c].
-                const list_result = try parseList(ast, tokens, pos, nesting + 1);
-                if (output_count >= max_output_stack) return error.StackOverflow;
-                output_stack[output_count] = list_result.node;
-                output_count += 1;
-                pos = list_result.pos;
-                expect_operand = false;
+                if (container_count >= max_expression_nesting) return error.StackOverflow;
+                container_stack[container_count] = .{
+                    .kind = .list,
+                    .token_index = pos,
+                    .base_op_count = op_count,
+                    .base_output_count = output_count,
+                };
+                container_count += 1;
+                pos += 1;
                 continue;
             }
 
-            // Function call: fn_name(args).
             if (isFunctionToken(tok.token_type) and
                 pos + 1 < tokens.count and
                 tokens.tokens[pos + 1].token_type == .left_paren)
             {
-                const fn_result = try parseFunctionCall(ast, tokens, pos, nesting + 1);
-                if (output_count >= max_output_stack) return error.StackOverflow;
-                output_stack[output_count] = fn_result.node;
-                output_count += 1;
-                pos = fn_result.pos;
-                expect_operand = false;
+                if (container_count >= max_expression_nesting) return error.StackOverflow;
+                container_stack[container_count] = .{
+                    .kind = .function_call,
+                    .token_index = pos,
+                    .base_op_count = op_count,
+                    .base_output_count = output_count,
+                };
+                container_count += 1;
+                pos += 2;
                 continue;
             }
 
-            // Aggregate call: count(*), sum(field), etc.
             if (isAggregateToken(tok.token_type) and
                 pos + 1 < tokens.count and
                 tokens.tokens[pos + 1].token_type == .left_paren)
             {
-                const agg_result = try parseAggregateCall(ast, tokens, pos, nesting + 1);
-                if (output_count >= max_output_stack) return error.StackOverflow;
-                output_stack[output_count] = agg_result.node;
-                output_count += 1;
-                pos = agg_result.pos;
-                expect_operand = false;
+                if (container_count >= max_expression_nesting) return error.StackOverflow;
+                container_stack[container_count] = .{
+                    .kind = .aggregate_call,
+                    .token_index = pos,
+                    .base_op_count = op_count,
+                    .base_output_count = output_count,
+                };
+                container_count += 1;
+                pos += 2;
                 continue;
             }
 
-            // Literal values.
+            if (tok.token_type == .left_paren) {
+                if (op_count >= max_operator_stack) return error.StackOverflow;
+                op_stack[op_count] = .{
+                    .tok_type = .left_paren,
+                    .tok_index = pos,
+                    .is_unary = false,
+                    .is_not_in = false,
+                };
+                op_count += 1;
+                pos += 1;
+                continue;
+            }
+
             if (isLiteral(tok.token_type)) {
                 const node = try ast.addNode(.expr_literal, .{ .token = pos });
                 if (output_count >= max_output_stack) return error.StackOverflow;
@@ -214,7 +244,6 @@ fn parseExpressionWithNesting(
                 continue;
             }
 
-            // Column reference or parameter.
             if (tok.token_type == .identifier or tok.token_type == .model_name) {
                 const node = try ast.addNode(.expr_column_ref, .{ .token = pos });
                 if (output_count >= max_output_stack) return error.StackOverflow;
@@ -235,7 +264,6 @@ fn parseExpressionWithNesting(
                 continue;
             }
 
-            // Star (for count(*) context or as wildcard).
             if (tok.token_type == .star) {
                 const node = try ast.addNode(.expr_literal, .{ .token = pos });
                 if (output_count >= max_output_stack) return error.StackOverflow;
@@ -246,21 +274,70 @@ fn parseExpressionWithNesting(
                 continue;
             }
 
-            // Nothing valid as operand — end of expression or error.
             break;
         }
 
-        // Operator position (between operands).
+        if (container_count > 0) {
+            const top = &container_stack[container_count - 1];
+            if (tok.token_type == .comma) {
+                if (top.kind == .aggregate_call) return error.UnexpectedToken;
+                try flushToBase(
+                    &op_stack,
+                    &op_count,
+                    &output_stack,
+                    &output_count,
+                    ast,
+                    top.base_op_count,
+                );
+                try captureContainerItem(ast, top, &output_stack, &output_count);
+                pos += 1;
+                expect_operand = true;
+                continue;
+            }
+            if (isContainerClose(top.kind, tok.token_type)) {
+                try closeContainer(
+                    ast,
+                    top.*,
+                    &op_stack,
+                    &op_count,
+                    &output_stack,
+                    &output_count,
+                    &container_count,
+                );
+                pos += 1;
+                expect_operand = false;
+                continue;
+            }
+        }
+
+        if (isEndOfExpression(tok.token_type) and !expect_operand) break;
+
+        if (tok.token_type == .kw_not and
+            pos + 1 < tokens.count and
+            tokens.tokens[pos + 1].token_type == .kw_in)
+        {
+            try flushOperators(&op_stack, &op_count, &output_stack, &output_count, ast, precedence(.kw_in));
+            if (op_count >= max_operator_stack) return error.StackOverflow;
+            op_stack[op_count] = .{
+                .tok_type = .kw_in,
+                .tok_index = pos,
+                .is_unary = false,
+                .is_not_in = true,
+            };
+            op_count += 1;
+            pos += 2;
+            expect_operand = true;
+            continue;
+        }
+
         if (tok.token_type == .right_paren) {
-            // Pop until matching left paren.
             while (op_count > 0 and op_stack[op_count - 1].tok_type != .left_paren) {
                 try popOperator(&op_stack, &op_count, &output_stack, &output_count, ast);
             }
             if (op_count == 0) {
-                // Unmatched ) — end of expression (caller's paren).
                 break;
             }
-            op_count -= 1; // discard left_paren
+            op_count -= 1;
             pos += 1;
             continue;
         }
@@ -270,11 +347,11 @@ fn parseExpressionWithNesting(
             try flushOperators(&op_stack, &op_count, &output_stack, &output_count, ast, prec);
 
             if (op_count >= max_operator_stack) return error.StackOverflow;
-            // Special handling for "in": the next token should be a list or subexpr.
             op_stack[op_count] = .{
                 .tok_type = tok.token_type,
                 .tok_index = pos,
                 .is_unary = false,
+                .is_not_in = false,
             };
             op_count += 1;
             pos += 1;
@@ -282,11 +359,11 @@ fn parseExpressionWithNesting(
             continue;
         }
 
-        // Not an operator we recognize in this position — end of expression.
         break;
     }
 
-    // Pop remaining operators.
+    if (container_count != 0) return error.MismatchedParentheses;
+
     while (op_count > 0) {
         if (op_stack[op_count - 1].tok_type == .left_paren) {
             return error.MismatchedParentheses;
@@ -295,7 +372,101 @@ fn parseExpressionWithNesting(
     }
 
     if (output_count == 0) return error.UnexpectedToken;
+    if (output_count != 1) return error.UnexpectedToken;
     return .{ .node = output_stack[output_count - 1], .pos = pos };
+}
+
+fn isContainerClose(kind: ContainerKind, tok_type: TokenType) bool {
+    return switch (kind) {
+        .list => tok_type == .right_bracket,
+        .function_call, .aggregate_call => tok_type == .right_paren,
+    };
+}
+
+fn flushToBase(
+    op_stack: *[max_operator_stack]OpEntry,
+    op_count: *u16,
+    output_stack: *[max_output_stack]NodeIndex,
+    output_count: *u16,
+    ast: *Ast,
+    base_op_count: u16,
+) ExprError!void {
+    while (op_count.* > base_op_count) {
+        if (op_stack[op_count.* - 1].tok_type == .left_paren) return error.MismatchedParentheses;
+        try popOperator(op_stack, op_count, output_stack, output_count, ast);
+    }
+}
+
+fn captureContainerItem(
+    ast: *Ast,
+    frame: *ContainerFrame,
+    output_stack: *[max_output_stack]NodeIndex,
+    output_count: *u16,
+) ExprError!void {
+    if (output_count.* <= frame.base_output_count) return error.UnexpectedToken;
+    if (output_count.* != frame.base_output_count + 1) return error.UnexpectedToken;
+    output_count.* -= 1;
+    const item = output_stack[output_count.*];
+
+    if (frame.first == null_node) {
+        frame.first = item;
+        frame.last = item;
+    } else {
+        ast.setNext(frame.last, item);
+        frame.last = item;
+    }
+    frame.item_count += 1;
+}
+
+fn closeContainer(
+    ast: *Ast,
+    frame_value: ContainerFrame,
+    op_stack: *[max_operator_stack]OpEntry,
+    op_count: *u16,
+    output_stack: *[max_output_stack]NodeIndex,
+    output_count: *u16,
+    container_count: *u16,
+) ExprError!void {
+    var frame = frame_value;
+    try flushToBase(op_stack, op_count, output_stack, output_count, ast, frame.base_op_count);
+
+    if (frame.saw_star) {
+        if (frame.kind != .aggregate_call) return error.UnexpectedToken;
+        if (output_count.* != frame.base_output_count) return error.UnexpectedToken;
+    } else if (output_count.* > frame.base_output_count) {
+        try captureContainerItem(ast, &frame, output_stack, output_count);
+    }
+
+    if (frame.kind == .aggregate_call and frame.item_count > 1) return error.UnexpectedToken;
+
+    const node = switch (frame.kind) {
+        .list => ast.addNode(.expr_list, .{ .unary = frame.first }) catch return error.AstFull,
+        .function_call => ast.addNodeFull(
+            .expr_function_call,
+            .{ .unary = frame.first },
+            frame.token_index,
+            null_node,
+        ) catch return error.AstFull,
+        .aggregate_call => blk: {
+            const arg: NodeIndex = if (frame.saw_star or frame.item_count == 0)
+                null_node
+            else
+                frame.first;
+            break :blk ast.addNodeFull(
+                .expr_aggregate,
+                .{ .unary = arg },
+                frame.token_index,
+                null_node,
+            ) catch return error.AstFull;
+        },
+    };
+
+    if (output_count.* >= max_output_stack) return error.StackOverflow;
+    output_stack[output_count.*] = node;
+    output_count.* += 1;
+
+    if (container_count.* == 0) return error.StackUnderflow;
+    container_count.* -= 1;
 }
 
 fn flushOperators(
@@ -337,38 +508,13 @@ fn popOperator(
         output_stack[output_count.*] = node;
         output_count.* += 1;
     } else if (op.tok_type == .kw_in) {
-        // Binary: lhs IN rhs.
         if (output_count.* < 2) return error.StackUnderflow;
         output_count.* -= 1;
         const rhs = output_stack[output_count.*];
         output_count.* -= 1;
         const lhs = output_stack[output_count.*];
-        // Determine if "not in": check if the token at tok_index is "not".
-        const tag: NodeTag = if (op.tok_index > 0 and op.tok_index < max_output_stack)
-            .expr_in
-        else
-            .expr_in;
-        // Actually we need a different approach for not_in detection.
-        // We handle it at parse time — if we see "not in", we set a flag.
-        // For now, all "in" through this path are expr_in. not_in is handled
-        // by the special two-word token case which sets tok_index to point to "not".
-        _ = tag;
-        // Check if this was from the "not in" path.
-        // The "not in" path uses tok_index pointing to the "not" token.
-        // Regular "in" uses tok_index pointing to the "in" token.
-        // We can distinguish by checking if the token at tok_index is .kw_not.
-        const actual_tag: NodeTag = blk: {
-            if (op.tok_index < max_output_stack) {
-                // This is a bit of a hack but works: check if we stored a
-                // not_in flag. We repurpose the is_unary field... but we already
-                // used is_unary=false. Let's just check the token type.
-                // If tokens[tok_index] is .kw_not, it's "not in".
-                // But we don't have access to tokens here. Let's use a different approach.
-                break :blk .expr_in;
-            }
-            break :blk .expr_in;
-        };
-        const node = ast.addNode(actual_tag, .{ .binary = .{ .lhs = lhs, .rhs = rhs } }) catch
+        const tag: NodeTag = if (op.is_not_in) .expr_not_in else .expr_in;
+        const node = ast.addNode(tag, .{ .binary = .{ .lhs = lhs, .rhs = rhs } }) catch
             return error.AstFull;
         if (output_count.* >= max_output_stack) return error.StackOverflow;
         output_stack[output_count.*] = node;
@@ -392,115 +538,17 @@ fn popOperator(
     }
 }
 
-fn parseList(
-    ast: *Ast,
-    tokens: *const TokenizeResult,
-    start_pos: u16,
-    nesting: u8,
-) ExprError!ParseExpressionResult {
-    var pos = start_pos + 1; // skip [
-    var first: NodeIndex = null_node;
-    var last: NodeIndex = null_node;
-
-    while (pos < tokens.count and tokens.tokens[pos].token_type != .right_bracket) {
-        if (first != null_node) {
-            // Expect comma.
-            if (tokens.tokens[pos].token_type != .comma) return error.UnexpectedToken;
-            pos += 1;
-        }
-        const elem = try parseExpressionWithNesting(ast, tokens, pos, nesting);
-        if (first == null_node) {
-            first = elem.node;
-            last = elem.node;
-        } else {
-            ast.setNext(last, elem.node);
-            last = elem.node;
-        }
-        pos = elem.pos;
-    }
-    if (pos < tokens.count) pos += 1; // skip ]
-
-    const node = ast.addNode(.expr_list, .{ .unary = first }) catch return error.AstFull;
-    return .{ .node = node, .pos = pos };
-}
-
-fn parseFunctionCall(
-    ast: *Ast,
-    tokens: *const TokenizeResult,
-    start_pos: u16,
-    nesting: u8,
-) ExprError!ParseExpressionResult {
-    const fn_tok = start_pos;
-    var pos = start_pos + 2; // skip fn_name and (
-
-    var first_arg: NodeIndex = null_node;
-    var last_arg: NodeIndex = null_node;
-
-    if (tokens.tokens[pos].token_type != .right_paren) {
-        // Parse arguments.
-        while (pos < tokens.count) {
-            if (first_arg != null_node) {
-                if (tokens.tokens[pos].token_type != .comma) break;
-                pos += 1;
-            }
-            const arg = try parseExpressionWithNesting(ast, tokens, pos, nesting);
-            if (first_arg == null_node) {
-                first_arg = arg.node;
-                last_arg = arg.node;
-            } else {
-                ast.setNext(last_arg, arg.node);
-                last_arg = arg.node;
-            }
-            pos = arg.pos;
-            if (tokens.tokens[pos].token_type == .right_paren) break;
-        }
-    }
-    if (pos < tokens.count and tokens.tokens[pos].token_type == .right_paren) pos += 1;
-
-    const node = ast.addNodeFull(
-        .expr_function_call,
-        .{ .unary = first_arg },
-        fn_tok,
-        null_node,
-    ) catch return error.AstFull;
-    // Store fn name token in data.token field... but we used unary for first_arg.
-    // Use extra field for fn name token.
-    return .{ .node = node, .pos = pos };
-}
-
-fn parseAggregateCall(
-    ast: *Ast,
-    tokens: *const TokenizeResult,
-    start_pos: u16,
-    nesting: u8,
-) ExprError!ParseExpressionResult {
-    const agg_tok = start_pos;
-    var pos = start_pos + 2; // skip agg_name and (
-
-    var arg: NodeIndex = null_node;
-    if (tokens.tokens[pos].token_type == .star) {
-        // count(*)
-        pos += 1;
-    } else if (tokens.tokens[pos].token_type != .right_paren) {
-        const result = try parseExpressionWithNesting(ast, tokens, pos, nesting);
-        arg = result.node;
-        pos = result.pos;
-    }
-    if (pos < tokens.count and tokens.tokens[pos].token_type == .right_paren) pos += 1;
-
-    const node = ast.addNodeFull(
-        .expr_aggregate,
-        .{ .unary = arg },
-        agg_tok,
-        null_node,
-    ) catch return error.AstFull;
-    return .{ .node = node, .pos = pos };
-}
-
 fn isFunctionToken(tok_type: TokenType) bool {
     return switch (tok_type) {
-        .fn_now, .fn_lower, .fn_upper, .fn_trim, .fn_length,
-        .fn_abs, .fn_sqrt, .fn_round, .fn_coalesce,
+        .fn_now,
+        .fn_lower,
+        .fn_upper,
+        .fn_trim,
+        .fn_length,
+        .fn_abs,
+        .fn_sqrt,
+        .fn_round,
+        .fn_coalesce,
         => true,
         else => false,
     };
@@ -515,8 +563,12 @@ fn isAggregateToken(tok_type: TokenType) bool {
 
 fn isLiteral(tok_type: TokenType) bool {
     return switch (tok_type) {
-        .integer_literal, .float_literal, .string_literal,
-        .true_literal, .false_literal, .null_literal,
+        .integer_literal,
+        .float_literal,
+        .string_literal,
+        .true_literal,
+        .false_literal,
+        .null_literal,
         => true,
         else => false,
     };
@@ -690,6 +742,14 @@ test "in operator with list" {
     try testing.expectEqual(NodeTag.expr_in, node.tag);
 }
 
+test "not in operator with list" {
+    var ast = Ast{};
+    const tokens = tokenizer_mod.tokenize("status not in [1, 2, 3]");
+    const result = try parseExpression(&ast, &tokens, 0);
+    const node = ast.getNode(result.node);
+    try testing.expectEqual(NodeTag.expr_not_in, node.tag);
+}
+
 test "multi-arg function" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("coalesce(a, b)");
@@ -697,5 +757,14 @@ test "multi-arg function" {
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_function_call, node.tag);
     // Should have 2 args linked by next.
+    try testing.expectEqual(@as(u16, 2), ast.listLen(node.data.unary));
+}
+
+test "nested containers parse iteratively" {
+    var ast = Ast{};
+    const tokens = tokenizer_mod.tokenize("coalesce(lower(a), [1, 2, 3])");
+    const result = try parseExpression(&ast, &tokens, 0);
+    const node = ast.getNode(result.node);
+    try testing.expectEqual(NodeTag.expr_function_call, node.tag);
     try testing.expectEqual(@as(u16, 2), ast.listLen(node.data.unary));
 }

@@ -8,7 +8,7 @@ Remaining follow-up items from the code review that we should still address.
   - Why: avoid silently accepting zeroed corruption for previously allocated pages.
   - Files: `src/storage/buffer_pool.zig`, likely allocator/freelist metadata owner.
 
-- [ ] Expression parser: remove recursion fully (convert list/function/aggregate paths to iterative stack-based parsing).
+- [x] Expression parser: remove recursion fully (convert list/function/aggregate paths to iterative stack-based parsing).
   - Why: Tiger Style requires no recursion (current depth cap is only a partial mitigation).
   - Files: `src/parser/expression.zig`.
 
