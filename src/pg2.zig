@@ -47,6 +47,7 @@ pub const runtime = struct {
 
 pub const server = struct {
     pub const session = @import("server/session.zig");
+    pub const pool = @import("server/pool.zig");
     pub const transport = @import("server/transport.zig");
     pub const tcp_transport = @import("server/tcp_transport.zig");
     pub const io_uring_transport = @import("server/io_uring_transport.zig");
@@ -86,6 +87,7 @@ comptime {
     _ = runtime.config;
     _ = runtime.request;
     _ = server.session;
+    _ = server.pool;
     _ = server.transport;
     _ = server.tcp_transport;
     _ = server.io_uring_transport;
