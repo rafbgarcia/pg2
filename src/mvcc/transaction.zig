@@ -68,6 +68,7 @@ pub const TxManager = struct {
 
     pub fn begin(self: *TxManager) TxManagerError!TxId {
         std.debug.assert(self.active_count <= max_active_transactions);
+        std.debug.assert(self.base_tx_id <= self.next_tx_id);
 
         if (self.active_count >= max_active_transactions) {
             return error.TooManyActiveTransactions;
@@ -81,6 +82,7 @@ pub const TxManager = struct {
         self.next_tx_id += 1;
         self.active_list[self.active_count] = tx_id;
         self.active_count += 1;
+        std.debug.assert(self.active_count <= max_active_transactions);
 
         const idx = self.stateSlot(tx_id);
         self.states[idx] = .active;
@@ -129,6 +131,8 @@ pub const TxManager = struct {
     /// Caller is responsible for invoking undo truncation after commit/abort,
     /// using `getOldestActive()`.
     pub fn commit(self: *TxManager, tx_id: TxId) TxManagerError!void {
+        std.debug.assert(tx_id > 0);
+        std.debug.assert(self.active_count <= max_active_transactions);
         const state = self.getState(tx_id) orelse return error.TransactionNotActive;
         if (state != .active) {
             @panic("commit requires active transaction");
@@ -141,6 +145,7 @@ pub const TxManager = struct {
         self.removeActiveAt(idx);
         self.states[self.stateSlot(tx_id)] = .committed;
         self.updateOldestActive();
+        std.debug.assert(self.getState(tx_id) == .committed);
     }
 
     /// Abort a transaction.
@@ -148,6 +153,8 @@ pub const TxManager = struct {
     /// Caller is responsible for invoking undo truncation after commit/abort,
     /// using `getOldestActive()`.
     pub fn abort(self: *TxManager, tx_id: TxId) TxManagerError!void {
+        std.debug.assert(tx_id > 0);
+        std.debug.assert(self.active_count <= max_active_transactions);
         const state = self.getState(tx_id) orelse return error.TransactionNotActive;
         if (state != .active) {
             @panic("abort requires active transaction");
@@ -160,6 +167,7 @@ pub const TxManager = struct {
         self.removeActiveAt(idx);
         self.states[self.stateSlot(tx_id)] = .aborted;
         self.updateOldestActive();
+        std.debug.assert(self.getState(tx_id) == .aborted);
     }
 
     pub fn getState(self: *const TxManager, tx_id: TxId) ?TxState {
@@ -205,6 +213,8 @@ pub const TxManager = struct {
     }
 
     fn updateOldestActive(self: *TxManager) void {
+        std.debug.assert(self.active_count <= max_active_transactions);
+        std.debug.assert(self.base_tx_id <= self.next_tx_id);
         if (self.active_count == 0) {
             self.oldest_active = self.next_tx_id;
             return;
@@ -216,6 +226,7 @@ pub const TxManager = struct {
             if (self.active_list[i] < min) min = self.active_list[i];
         }
         self.oldest_active = min;
+        std.debug.assert(self.oldest_active < self.next_tx_id);
     }
 };
 

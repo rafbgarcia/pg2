@@ -39,6 +39,8 @@ pub fn loadSchema(
     tokens: *const TokenizeResult,
     source: []const u8,
 ) LoadError!void {
+    std.debug.assert(tokens.count <= tokens.tokens.len);
+    std.debug.assert(tree.root < ast_mod.max_ast_nodes or tree.root == null_node);
     if (tree.root == null_node) return;
 
     const root = tree.getNode(tree.root);
@@ -119,6 +121,9 @@ fn loadField(
     model_id: ModelId,
     node: *const ast_mod.AstNode,
 ) LoadError!void {
+    const max_constraint_scan_tokens: usize = 64;
+    std.debug.assert(model_id < catalog.model_count);
+    std.debug.assert(node.extra < tokens.count);
     // node.data.token = field name token index, node.extra = type token index.
     const name = tokens.getText(node.data.token, source);
     const type_tok = tokens.tokens[node.extra];
@@ -135,7 +140,8 @@ fn loadField(
     var nullable = true;
     var is_primary_key = false;
     var scan = type_tok_idx + 1;
-    while (scan < tokens.count) {
+    var scanned_tokens: usize = 0;
+    while (scan < tokens.count and scanned_tokens < max_constraint_scan_tokens) : (scanned_tokens += 1) {
         const tt = tokens.tokens[scan].token_type;
         if (tt == .comma) {
             scan += 1;
@@ -154,6 +160,9 @@ fn loadField(
         } else {
             break;
         }
+    }
+    if (scan < tokens.count and scanned_tokens == max_constraint_scan_tokens) {
+        return error.InvalidSchema;
     }
 
     // Primary key implies not null.
@@ -290,6 +299,7 @@ fn loadIndex(
     node: *const ast_mod.AstNode,
     is_unique: bool,
 ) LoadError!void {
+    std.debug.assert(model_id < catalog.model_count);
     // node.data.unary = first column ref node (linked by next).
     var col_ids: [16]catalog_mod.ColumnId = undefined;
     var col_count: u8 = 0;
@@ -312,6 +322,7 @@ fn loadIndex(
 
     var col_ref = node.data.unary;
     while (col_ref != null_node and col_count < 16) {
+        std.debug.assert(col_count < col_ids.len);
         const col_node = tree.getNode(col_ref);
         const col_name = tokens.getText(col_node.data.token, source);
         const col_id = catalog.findColumn(model_id, col_name) orelse

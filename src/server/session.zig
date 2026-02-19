@@ -52,6 +52,9 @@ pub const Session = struct {
         source: []const u8,
         out: []u8,
     ) SessionError!SessionResponse {
+        std.debug.assert(source.len > 0);
+        std.debug.assert(out.len > 0);
+        std.debug.assert(snapshot.tx_id == tx_id);
         var stream = std.io.fixedBufferStream(out);
         const writer = stream.writer();
 
@@ -106,6 +109,8 @@ pub const Session = struct {
         request_buf: []u8,
         response_buf: []u8,
     ) ServeError!void {
+        std.debug.assert(request_buf.len > 0);
+        std.debug.assert(response_buf.len > 0);
         while (true) {
             const request_opt = try connection.readRequest(request_buf);
             const request = request_opt orelse break;
@@ -180,6 +185,7 @@ fn serializeQueryResult(
     writer: anytype,
     result: *const exec_mod.QueryResult,
 ) error{ResponseTooLarge}!void {
+    std.debug.assert(result.row_count <= result.rows.len);
     if (result.getError()) |message| {
         writer.print("ERR query: {s}\n", .{message}) catch
             return error.ResponseTooLarge;

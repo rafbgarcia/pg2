@@ -140,6 +140,8 @@ pub const Catalog = struct {
     /// Store a name in the shared name buffer. Returns offset and length.
     fn storeName(self: *Catalog, name: []const u8) CatalogError!struct { offset: u32, len: u16 } {
         if (self.sealed) return error.CatalogSealed;
+        std.debug.assert(name.len <= std.math.maxInt(u16));
+        std.debug.assert(self.name_buffer_len <= max_name_bytes);
         const name_u16: u16 = @intCast(name.len);
         if (self.name_buffer_len + name.len > max_name_bytes) return error.NameBufferFull;
         const offset = self.name_buffer_len;
@@ -183,6 +185,8 @@ pub const Catalog = struct {
         if (self.sealed) return error.CatalogSealed;
         std.debug.assert(model_id < self.model_count);
         var model = &self.models[model_id];
+        std.debug.assert(model.column_count <= max_columns_per_model);
+        std.debug.assert(model.row_schema.column_count == model.column_count);
         if (model.column_count >= max_columns_per_model) return error.TooManyColumns;
 
         // Check duplicate column name within model.
@@ -205,6 +209,7 @@ pub const Catalog = struct {
                 error.NameBufferFull => error.NameBufferFull,
             };
         };
+        std.debug.assert(model.row_schema.column_count == model.column_count);
 
         return col_id;
     }
@@ -219,6 +224,8 @@ pub const Catalog = struct {
         if (self.sealed) return error.CatalogSealed;
         std.debug.assert(model_id < self.model_count);
         var model = &self.models[model_id];
+        std.debug.assert(model.index_count <= max_indexes_per_model);
+        std.debug.assert(column_ids.len <= 16);
         if (model.index_count >= max_indexes_per_model) return error.TooManyIndexes;
 
         const stored = try self.storeName(name);
@@ -230,6 +237,7 @@ pub const Catalog = struct {
         };
         const copy_count = @min(column_ids.len, 16);
         for (0..copy_count) |i| {
+            std.debug.assert(column_ids[i] < model.column_count);
             info.column_ids[i] = column_ids[i];
         }
         info.column_count = @intCast(copy_count);
@@ -364,6 +372,8 @@ pub const Catalog = struct {
     // --- Lookup functions ---
 
     pub fn findModel(self: *const Catalog, name: []const u8) ?ModelId {
+        std.debug.assert(self.model_count <= max_models);
+        std.debug.assert(self.name_buffer_len <= max_name_bytes);
         for (0..self.model_count) |i| {
             const m = &self.models[i];
             if (std.mem.eql(u8, self.getName(m.name_offset, m.name_len), name)) {
@@ -376,6 +386,7 @@ pub const Catalog = struct {
     pub fn findColumn(self: *const Catalog, model_id: ModelId, name: []const u8) ?ColumnId {
         std.debug.assert(model_id < self.model_count);
         const model = &self.models[model_id];
+        std.debug.assert(model.column_count <= max_columns_per_model);
         for (0..model.column_count) |i| {
             const col = &model.columns[i];
             if (std.mem.eql(u8, self.getName(col.name_offset, col.name_len), name)) {
@@ -467,17 +478,22 @@ pub const Catalog = struct {
     /// Resolve association target model IDs by name.
     /// Call after all models are added, before sealing.
     pub fn resolveAssociations(self: *Catalog) CatalogError!void {
+        std.debug.assert(self.model_count <= max_models);
+        std.debug.assert(!self.sealed);
         for (0..self.model_count) |mi| {
             const model = &self.models[mi];
+            std.debug.assert(model.association_count <= max_associations_per_model);
             for (0..model.association_count) |ai| {
                 const assoc = &model.associations[ai];
                 const target_name = self.getName(
                     assoc.target_model_name_offset,
                     assoc.target_model_name_len,
                 );
+                std.debug.assert(target_name.len > 0);
                 const target_id = self.findModel(target_name) orelse
                     return error.ModelNotFound;
                 assoc.target_model_id = target_id;
+                std.debug.assert(assoc.target_model_id < self.model_count);
 
                 if (assoc.local_column_id == null_column) {
                     if (assoc.local_key_name_len > 0) {
