@@ -74,6 +74,33 @@ pub const MutationError = error{
     UnsupportedReferentialAction,
 };
 
+const PinnedMutationPage = struct {
+    pool: *BufferPool,
+    page_id: u64,
+    page: *Page,
+    dirty: bool = false,
+    active: bool = true,
+
+    fn pin(pool: *BufferPool, page_id: u64) MutationError!PinnedMutationPage {
+        const page = pool.pin(page_id) catch |e| return mapPoolError(e);
+        return .{
+            .pool = pool,
+            .page_id = page_id,
+            .page = page,
+        };
+    }
+
+    fn markDirty(self: *PinnedMutationPage) void {
+        self.dirty = true;
+    }
+
+    fn release(self: *PinnedMutationPage) void {
+        if (!self.active) return;
+        self.pool.unpin(self.page_id, self.dirty);
+        self.active = false;
+    }
+};
+
 /// Execute an INSERT operation.
 ///
 /// Walks the assignment linked list to build a Value array, encodes the row,
@@ -99,7 +126,12 @@ pub fn executeInsert(
     var values: [max_assignments]Value =
         [_]Value{.{ .null_value = {} }} ** max_assignments;
     try buildRowFromAssignments(
-        tree, tokens, source, schema, first_assignment_node, &values,
+        tree,
+        tokens,
+        source,
+        schema,
+        first_assignment_node,
+        &values,
     );
     try enforceOutgoingReferentialIntegrity(
         catalog,
@@ -111,34 +143,39 @@ pub fn executeInsert(
     // Encode row.
     var row_buf: [max_row_buf_size]u8 = undefined;
     const row_len = row_mod.encodeRow(
-        schema, values[0..schema.column_count], &row_buf,
+        schema,
+        values[0..schema.column_count],
+        &row_buf,
     ) catch |e| return mapEncodeError(e);
     std.debug.assert(row_len > 0);
 
     // Find a page with space.
     const page_id = try findPageWithSpace(
-        pool, model.heap_first_page_id, model.total_pages, row_len,
+        pool,
+        model.heap_first_page_id,
+        model.total_pages,
+        row_len,
     );
 
     // Insert into heap page.
-    const page = pool.pin(page_id) catch |e| return mapPoolError(e);
-    if (page.header.page_type == .free) {
-        HeapPage.init(page);
+    var pinned = try PinnedMutationPage.pin(pool, page_id);
+    defer pinned.release();
+
+    if (pinned.page.header.page_type == .free) {
+        HeapPage.init(pinned.page);
     }
-    const slot = HeapPage.insert(page, row_buf[0..row_len]) catch |e| {
-        pool.unpin(page_id, false);
+    const slot = HeapPage.insert(pinned.page, row_buf[0..row_len]) catch |e|
         return mapHeapError(e);
-    };
+    pinned.markDirty();
 
     // WAL append.
     const lsn = wal.append(
-        tx_id, .insert, page_id, row_buf[0..row_len],
-    ) catch |e| {
-        pool.unpin(page_id, true);
-        return mapWalAppendError(e);
-    };
-    page.header.lsn = lsn;
-    pool.unpin(page_id, true);
+        tx_id,
+        .insert,
+        page_id,
+        row_buf[0..row_len],
+    ) catch |e| return mapWalAppendError(e);
+    pinned.page.header.lsn = lsn;
 
     // Update catalog stats.
     catalog.incrementRowCount(model_id, 1);
@@ -194,7 +231,12 @@ pub fn executeUpdate(
         while (slot_idx < slot_count) : (slot_idx += 1) {
             const row_data = HeapPage.read(page, slot_idx) catch continue;
             const data_to_decode = resolveVisibleVersion(
-                undo_log, page_id, slot_idx, snapshot, tx_manager, row_data,
+                undo_log,
+                page_id,
+                slot_idx,
+                snapshot,
+                tx_manager,
+                row_data,
             );
 
             var row = scan_mod.ResultRow.init();
@@ -206,8 +248,12 @@ pub fn executeUpdate(
             // Apply predicate filter.
             if (predicate_node != null_node) {
                 const matches = filter_mod.evaluatePredicate(
-                    tree, tokens, source, predicate_node,
-                    row.values[0..row.column_count], schema,
+                    tree,
+                    tokens,
+                    source,
+                    predicate_node,
+                    row.values[0..row.column_count],
+                    schema,
                 ) catch continue;
                 if (!matches) continue;
             }
@@ -298,7 +344,12 @@ pub fn executeDelete(
         while (slot_idx < slot_count) : (slot_idx += 1) {
             const row_data = HeapPage.read(page, slot_idx) catch continue;
             const data_to_decode = resolveVisibleVersion(
-                undo_log, page_id, slot_idx, snapshot, tx_manager, row_data,
+                undo_log,
+                page_id,
+                slot_idx,
+                snapshot,
+                tx_manager,
+                row_data,
             );
 
             var row = scan_mod.ResultRow.init();
@@ -310,8 +361,12 @@ pub fn executeDelete(
             // Apply predicate filter.
             if (predicate_node != null_node) {
                 const matches = filter_mod.evaluatePredicate(
-                    tree, tokens, source, predicate_node,
-                    row.values[0..row.column_count], schema,
+                    tree,
+                    tokens,
+                    source,
+                    predicate_node,
+                    row.values[0..row.column_count],
+                    schema,
                 ) catch continue;
                 if (!matches) continue;
             }
@@ -345,37 +400,32 @@ fn deleteSingleRow(
     tx_id: TxId,
     row_id: RowId,
 ) MutationError!void {
-    const page = pool.pin(row_id.page_id) catch |e|
-        return mapPoolError(e);
+    var pinned = try PinnedMutationPage.pin(pool, row_id.page_id);
+    defer pinned.release();
 
     // Read old data for undo.
-    const old_data = HeapPage.read(page, row_id.slot) catch {
-        pool.unpin(row_id.page_id, false);
+    const old_data = HeapPage.read(pinned.page, row_id.slot) catch
         return error.StorageRead;
-    };
 
     _ = undo_log.push(
-        tx_id, row_id.page_id, row_id.slot, old_data,
-    ) catch {
-        pool.unpin(row_id.page_id, false);
-        return error.UndoLogFull;
-    };
+        tx_id,
+        row_id.page_id,
+        row_id.slot,
+        old_data,
+    ) catch return error.UndoLogFull;
 
     // Tombstone the slot.
-    HeapPage.delete(page, row_id.slot) catch {
-        pool.unpin(row_id.page_id, false);
-        return error.StorageRead;
-    };
+    HeapPage.delete(pinned.page, row_id.slot) catch return error.StorageRead;
+    pinned.markDirty();
 
     // WAL append.
     const lsn = wal.append(
-        tx_id, .delete, row_id.page_id, &.{},
-    ) catch |e| {
-        pool.unpin(row_id.page_id, true);
-        return mapWalAppendError(e);
-    };
-    page.header.lsn = lsn;
-    pool.unpin(row_id.page_id, true);
+        tx_id,
+        .delete,
+        row_id.page_id,
+        &.{},
+    ) catch |e| return mapWalAppendError(e);
+    pinned.page.header.lsn = lsn;
 }
 
 fn updateRowWithValues(
@@ -387,34 +437,24 @@ fn updateRowWithValues(
     row_id: RowId,
     new_values: []const Value,
 ) MutationError!void {
-    const page = pool.pin(row_id.page_id) catch |e|
-        return mapPoolError(e);
+    var pinned = try PinnedMutationPage.pin(pool, row_id.page_id);
+    defer pinned.release();
 
-    const old_data = HeapPage.read(page, row_id.slot) catch {
-        pool.unpin(row_id.page_id, false);
+    const old_data = HeapPage.read(pinned.page, row_id.slot) catch
         return error.StorageRead;
-    };
-    _ = undo_log.push(tx_id, row_id.page_id, row_id.slot, old_data) catch {
-        pool.unpin(row_id.page_id, false);
+    _ = undo_log.push(tx_id, row_id.page_id, row_id.slot, old_data) catch
         return error.UndoLogFull;
-    };
 
     var row_buf: [max_row_buf_size]u8 = undefined;
-    const row_len = row_mod.encodeRow(schema, new_values, &row_buf) catch |e| {
-        pool.unpin(row_id.page_id, false);
+    const row_len = row_mod.encodeRow(schema, new_values, &row_buf) catch |e|
         return mapEncodeError(e);
-    };
-    HeapPage.update(page, row_id.slot, row_buf[0..row_len]) catch |e| {
-        pool.unpin(row_id.page_id, false);
+    HeapPage.update(pinned.page, row_id.slot, row_buf[0..row_len]) catch |e|
         return mapHeapError(e);
-    };
+    pinned.markDirty();
 
-    const lsn = wal.append(tx_id, .update, row_id.page_id, row_buf[0..row_len]) catch |e| {
-        pool.unpin(row_id.page_id, true);
+    const lsn = wal.append(tx_id, .update, row_id.page_id, row_buf[0..row_len]) catch |e|
         return mapWalAppendError(e);
-    };
-    page.header.lsn = lsn;
-    pool.unpin(row_id.page_id, true);
+    pinned.page.header.lsn = lsn;
 }
 
 fn enforceOutgoingReferentialIntegrity(
@@ -770,7 +810,10 @@ fn resolveVisibleVersion(
     const head = undo_log.getHead(page_id, slot_idx);
     if (head == null) return heap_data;
     const vis = undo_log.findVisible(
-        page_id, slot_idx, snapshot, tx_manager,
+        page_id,
+        slot_idx,
+        snapshot,
+        tx_manager,
     );
     return vis orelse heap_data;
 }
@@ -801,7 +844,12 @@ pub fn buildRowFromAssignments(
 
         const expr_node = node.data.unary;
         const val = filter_mod.evaluateExpression(
-            tree, tokens, source, expr_node, &.{}, schema,
+            tree,
+            tokens,
+            source,
+            expr_node,
+            &.{},
+            schema,
         ) catch |e| return mapFilterError(e);
 
         out_values[col_idx] = val;
@@ -832,7 +880,12 @@ fn applyAssignments(
         // Evaluate expression with current row values for context.
         const expr_node = node.data.unary;
         const val = filter_mod.evaluateExpression(
-            tree, tokens, source, expr_node, values, schema,
+            tree,
+            tokens,
+            source,
+            expr_node,
+            values,
+            schema,
         ) catch |e| return mapFilterError(e);
 
         values[col_idx] = val;
@@ -959,7 +1012,9 @@ const TestEnv = struct {
     fn init(self: *TestEnv) !void {
         self.disk = disk_mod.SimulatedDisk.init(testing.allocator);
         self.pool = try BufferPool.init(
-            testing.allocator, self.disk.storage(), 16,
+            testing.allocator,
+            self.disk.storage(),
+            16,
         );
         self.wal = Wal.init(testing.allocator, self.disk.storage());
         self.tm = TxManager.init(testing.allocator);
@@ -969,7 +1024,10 @@ const TestEnv = struct {
         self.model_id = try self.catalog.addModel("User");
         _ = try self.catalog.addColumn(self.model_id, "id", .bigint, false);
         _ = try self.catalog.addColumn(
-            self.model_id, "name", .string, true,
+            self.model_id,
+            "name",
+            .string,
+            true,
         );
         self.catalog.models[self.model_id].heap_first_page_id = 100;
         self.catalog.models[self.model_id].total_pages = 0;
@@ -1008,26 +1066,41 @@ test "insert and scan back" {
     const insert_op = parsed.ast.getNode(pipeline.data.binary.rhs);
 
     const row_id = try executeInsert(
-        &env.catalog, &env.pool, &env.wal, tx, env.model_id,
-        &parsed.ast, &tok, src, insert_op.data.unary,
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx,
+        env.model_id,
+        &parsed.ast,
+        &tok,
+        src,
+        insert_op.data.unary,
     );
 
     try testing.expectEqual(@as(u64, 100), row_id.page_id);
     try testing.expectEqual(@as(u16, 0), row_id.slot);
     try testing.expectEqual(
-        @as(u64, 1), env.catalog.models[env.model_id].row_count,
+        @as(u64, 1),
+        env.catalog.models[env.model_id].row_count,
     );
 
     var result = try scan_mod.tableScan(
-        &env.catalog, &env.pool, &env.undo_log,
-        &snap, &env.tm, env.model_id, testing.allocator,
+        &env.catalog,
+        &env.pool,
+        &env.undo_log,
+        &snap,
+        &env.tm,
+        env.model_id,
+        testing.allocator,
     );
     defer result.deinit();
 
     try testing.expectEqual(@as(u16, 1), result.row_count);
     try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].bigint);
     try testing.expectEqualSlices(
-        u8, "Alice", result.rows[0].values[1].string,
+        u8,
+        "Alice",
+        result.rows[0].values[1].string,
     );
 }
 
@@ -1046,12 +1119,20 @@ test "insert updates catalog stats" {
     const insert_op = parsed.ast.getNode(pipeline.data.binary.rhs);
 
     _ = try executeInsert(
-        &env.catalog, &env.pool, &env.wal, tx, env.model_id,
-        &parsed.ast, &tok, src, insert_op.data.unary,
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx,
+        env.model_id,
+        &parsed.ast,
+        &tok,
+        src,
+        insert_op.data.unary,
     );
 
     try testing.expectEqual(
-        @as(u64, 1), env.catalog.models[env.model_id].row_count,
+        @as(u64, 1),
+        env.catalog.models[env.model_id].row_count,
     );
     try testing.expect(env.catalog.models[env.model_id].total_pages >= 1);
 }
@@ -1072,8 +1153,15 @@ test "delete removes row" {
     const pipe1 = p1.ast.getNode(r1.data.unary);
     const ins = p1.ast.getNode(pipe1.data.binary.rhs);
     _ = try executeInsert(
-        &env.catalog, &env.pool, &env.wal, tx, env.model_id,
-        &p1.ast, &tok1, src1, ins.data.unary,
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx,
+        env.model_id,
+        &p1.ast,
+        &tok1,
+        src1,
+        ins.data.unary,
     );
 
     const src2 = "User |> where(id = 1) |> delete";
@@ -1085,14 +1173,25 @@ test "delete removes row" {
     const predicate = where_op.data.unary;
 
     const deleted = try executeDelete(
-        &env.catalog, &env.pool, &env.wal, &env.undo_log, tx,
-        &snap, &env.tm, env.model_id,
-        &p2.ast, &tok2, src2, predicate, testing.allocator,
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        &env.undo_log,
+        tx,
+        &snap,
+        &env.tm,
+        env.model_id,
+        &p2.ast,
+        &tok2,
+        src2,
+        predicate,
+        testing.allocator,
     );
 
     try testing.expectEqual(@as(u32, 1), deleted);
     try testing.expectEqual(
-        @as(u64, 0), env.catalog.models[env.model_id].row_count,
+        @as(u64, 0),
+        env.catalog.models[env.model_id].row_count,
     );
 }
 
@@ -1112,8 +1211,15 @@ test "delete updates catalog stats" {
     const pipe1 = p1.ast.getNode(r1.data.unary);
     const ins1 = p1.ast.getNode(pipe1.data.binary.rhs);
     _ = try executeInsert(
-        &env.catalog, &env.pool, &env.wal, tx, env.model_id,
-        &p1.ast, &tok1, src1, ins1.data.unary,
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx,
+        env.model_id,
+        &p1.ast,
+        &tok1,
+        src1,
+        ins1.data.unary,
     );
 
     const src2 = "User |> insert(id = 2, name = \"B\")";
@@ -1123,12 +1229,20 @@ test "delete updates catalog stats" {
     const pipe2 = p2.ast.getNode(r2.data.unary);
     const ins2 = p2.ast.getNode(pipe2.data.binary.rhs);
     _ = try executeInsert(
-        &env.catalog, &env.pool, &env.wal, tx, env.model_id,
-        &p2.ast, &tok2, src2, ins2.data.unary,
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx,
+        env.model_id,
+        &p2.ast,
+        &tok2,
+        src2,
+        ins2.data.unary,
     );
 
     try testing.expectEqual(
-        @as(u64, 2), env.catalog.models[env.model_id].row_count,
+        @as(u64, 2),
+        env.catalog.models[env.model_id].row_count,
     );
 
     const src3 = "User |> where(id = 1) |> delete";
@@ -1140,13 +1254,24 @@ test "delete updates catalog stats" {
     const pred3 = where3.data.unary;
 
     _ = try executeDelete(
-        &env.catalog, &env.pool, &env.wal, &env.undo_log, tx,
-        &snap, &env.tm, env.model_id,
-        &p3.ast, &tok3, src3, pred3, testing.allocator,
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        &env.undo_log,
+        tx,
+        &snap,
+        &env.tm,
+        env.model_id,
+        &p3.ast,
+        &tok3,
+        src3,
+        pred3,
+        testing.allocator,
     );
 
     try testing.expectEqual(
-        @as(u64, 1), env.catalog.models[env.model_id].row_count,
+        @as(u64, 1),
+        env.catalog.models[env.model_id].row_count,
     );
 }
 
@@ -1166,8 +1291,15 @@ test "update modifies row" {
     const pipe1 = p1.ast.getNode(r1.data.unary);
     const ins1 = p1.ast.getNode(pipe1.data.binary.rhs);
     _ = try executeInsert(
-        &env.catalog, &env.pool, &env.wal, tx, env.model_id,
-        &p1.ast, &tok1, src1, ins1.data.unary,
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx,
+        env.model_id,
+        &p1.ast,
+        &tok1,
+        src1,
+        ins1.data.unary,
     );
 
     const src2 = "User |> where(id = 1) |> update(name = \"Bob\")";
@@ -1179,23 +1311,40 @@ test "update modifies row" {
     const update_op = p2.ast.getNode(where_op.next);
 
     const updated = try executeUpdate(
-        &env.catalog, &env.pool, &env.wal, &env.undo_log, tx,
-        &snap, &env.tm, env.model_id,
-        &p2.ast, &tok2, src2,
-        where_op.data.unary, update_op.data.unary, testing.allocator,
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        &env.undo_log,
+        tx,
+        &snap,
+        &env.tm,
+        env.model_id,
+        &p2.ast,
+        &tok2,
+        src2,
+        where_op.data.unary,
+        update_op.data.unary,
+        testing.allocator,
     );
 
     try testing.expectEqual(@as(u32, 1), updated);
 
     var result = try scan_mod.tableScan(
-        &env.catalog, &env.pool, &env.undo_log,
-        &snap, &env.tm, env.model_id, testing.allocator,
+        &env.catalog,
+        &env.pool,
+        &env.undo_log,
+        &snap,
+        &env.tm,
+        env.model_id,
+        testing.allocator,
     );
     defer result.deinit();
 
     try testing.expectEqual(@as(u16, 1), result.row_count);
     try testing.expectEqualSlices(
-        u8, "Bob", result.rows[0].values[1].string,
+        u8,
+        "Bob",
+        result.rows[0].values[1].string,
     );
 }
 
@@ -1215,8 +1364,15 @@ test "update pushes undo entry" {
     const pipe1 = p1.ast.getNode(r1.data.unary);
     const ins1 = p1.ast.getNode(pipe1.data.binary.rhs);
     _ = try executeInsert(
-        &env.catalog, &env.pool, &env.wal, tx, env.model_id,
-        &p1.ast, &tok1, src1, ins1.data.unary,
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx,
+        env.model_id,
+        &p1.ast,
+        &tok1,
+        src1,
+        ins1.data.unary,
     );
 
     try testing.expectEqual(@as(usize, 0), env.undo_log.len());
@@ -1230,10 +1386,20 @@ test "update pushes undo entry" {
     const update_op = p2.ast.getNode(where_op.next);
 
     _ = try executeUpdate(
-        &env.catalog, &env.pool, &env.wal, &env.undo_log, tx,
-        &snap, &env.tm, env.model_id,
-        &p2.ast, &tok2, src2,
-        where_op.data.unary, update_op.data.unary, testing.allocator,
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        &env.undo_log,
+        tx,
+        &snap,
+        &env.tm,
+        env.model_id,
+        &p2.ast,
+        &tok2,
+        src2,
+        where_op.data.unary,
+        update_op.data.unary,
+        testing.allocator,
     );
 
     try testing.expectEqual(@as(usize, 1), env.undo_log.len());

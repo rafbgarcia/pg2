@@ -40,6 +40,6 @@ Remaining follow-up items from the code review that we should still address.
   - Why: simplify maintenance and reduce divergence risk.
   - Files: `src/storage/btree.zig`.
 
-- [ ] Introduce scoped pin/unpin helper in mutation paths.
+- [x] Introduce scoped pin/unpin helper in mutation paths.
   - Why: reduce repetitive unpin error paths and improve reliability/readability.
   - Files: `src/executor/mutation.zig`.
