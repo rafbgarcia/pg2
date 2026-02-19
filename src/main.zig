@@ -1,6 +1,10 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const runtime_config = @import("pg2").runtime.config;
 const runtime_bootstrap = @import("pg2").runtime.bootstrap;
+const session_mod = @import("pg2").server.session;
+const tcp_transport_mod = @import("pg2").server.tcp_transport;
+const catalog_mod = @import("pg2").catalog.meta;
 const disk_mod = @import("pg2").simulator.disk;
 
 pub fn main() !void {
@@ -11,6 +15,7 @@ pub fn main() !void {
     _ = args.skip(); // program name
 
     var memory_bytes: usize = runtime_config.default_memory_bytes;
+    var listen_addr: ?[]const u8 = null;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--memory")) {
@@ -22,10 +27,17 @@ pub fn main() !void {
                 try stdout.writeAll("invalid --memory value\n");
                 return;
             };
+        } else if (std.mem.eql(u8, arg, "--listen")) {
+            const raw = args.next() orelse {
+                try stdout.writeAll("missing value for --listen\n");
+                return;
+            };
+            listen_addr = raw;
         } else if (std.mem.eql(u8, arg, "--help")) {
             try stdout.writeAll(
-                \\Usage: pg2 [--memory <bytes|MiB|GiB>]
+                \\Usage: pg2 [--memory <bytes|MiB|GiB>] [--listen <host:port>]
                 \\  --memory   Startup memory budget (default: 512MiB)
+                \\  --listen   Start server accept loop (Linux-only target)
                 \\
             );
             return;
@@ -76,4 +88,60 @@ pub fn main() !void {
         return;
     };
     try stdout.writeAll(msg);
+
+    if (listen_addr) |raw_listen_addr| {
+        if (builtin.os.tag != .linux) {
+            try stdout.writeAll(
+                "server mode is Linux-only; use Docker to run dev/test on macOS\n",
+            );
+            return;
+        }
+
+        const listen_address = std.net.Address.parseIpAndPort(raw_listen_addr) catch {
+            try stdout.writeAll("invalid --listen address (expected host:port)\n");
+            return;
+        };
+
+        var tcp_acceptor = tcp_transport_mod.TcpAcceptor.listen(
+            listen_address,
+            .{ .reuse_address = true },
+        ) catch {
+            try stdout.writeAll("startup failed: could not listen on requested address\n");
+            return;
+        };
+        defer tcp_acceptor.deinit();
+
+        var catalog = catalog_mod.Catalog{};
+        var session = session_mod.Session.init(&runtime, &catalog);
+        const tx_id = runtime.tx_manager.begin() catch {
+            try stdout.writeAll("startup failed: could not open session transaction\n");
+            return;
+        };
+        var snapshot = runtime.tx_manager.snapshot(tx_id) catch {
+            try stdout.writeAll("startup failed: could not create session snapshot\n");
+            return;
+        };
+        defer snapshot.deinit();
+
+        var request_buf: [4096]u8 = undefined;
+        var response_buf: [4096]u8 = undefined;
+        try stdout.writeAll("server accept loop started\n");
+
+        while (true) {
+            const connection = tcp_acceptor.acceptor().accept() catch {
+                try stdout.writeAll("accept loop error: accept failed\n");
+                continue;
+            } orelse continue;
+
+            session.serveConnection(
+                connection,
+                tx_id,
+                &snapshot,
+                request_buf[0..],
+                response_buf[0..],
+            ) catch {
+                try stdout.writeAll("connection error: request handling failed\n");
+            };
+        }
+    }
 }

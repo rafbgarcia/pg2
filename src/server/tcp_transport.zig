@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const transport_mod = @import("transport.zig");
 
 const Acceptor = transport_mod.Acceptor;
@@ -125,6 +126,8 @@ fn trimLineEnding(line: []const u8) []const u8 {
 }
 
 test "tcp transport accepts and reads newline-delimited request" {
+    if (builtin.os.tag != .linux) return error.SkipZigTest;
+
     var listener = try TcpAcceptor.listen(
         try std.net.Address.parseIp("127.0.0.1", 0),
         .{ .reuse_address = true },
