@@ -12,7 +12,7 @@ pub const PoolError = tx_mod.TxManagerError ||
     bootstrap_mod.QueryBufferError ||
     error{
         PoolExhausted,
-        QueuePolicyNotImplemented,
+        QueueTimeout,
         InvalidPoolConn,
         PoolConnPinned,
     };
@@ -24,6 +24,7 @@ pub const OverloadPolicy = enum {
 
 pub const ConnectionPoolConfig = struct {
     overload_policy: OverloadPolicy = .reject,
+    queue_wait_spins: u32 = 1024,
 };
 
 pub const PoolStats = struct {
@@ -74,28 +75,12 @@ pub const ConnectionPool = struct {
                 self.pool_exhausted_total += 1;
                 return switch (self.config.overload_policy) {
                     .reject => error.PoolExhausted,
-                    .queue => error.QueuePolicyNotImplemented,
+                    .queue => self.checkoutQueued(),
                 };
             }
             return err;
         };
-        errdefer releaseQuerySlotSafely(self.runtime, query_buffers.slot_index);
-
-        const tx_id = try self.runtime.tx_manager.begin();
-        errdefer self.runtime.tx_manager.abort(tx_id) catch {};
-
-        const snapshot = try self.runtime.tx_manager.snapshot(tx_id);
-        std.debug.assert(self.checked_out_count < self.runtime.max_query_slots);
-        self.checked_out_count += 1;
-
-        return .{
-            .slot_index = query_buffers.slot_index,
-            .query_buffers = query_buffers,
-            .tx_id = tx_id,
-            .snapshot = snapshot,
-            .pinned = false,
-            .checked_out = true,
-        };
+        return self.makePoolConn(query_buffers);
     }
 
     pub fn checkin(self: *ConnectionPool, conn: *PoolConn) PoolError!void {
@@ -135,6 +120,44 @@ pub const ConnectionPool = struct {
             .checked_out = self.checked_out_count,
             .pinned = self.pinned_count,
             .pool_exhausted_total = self.pool_exhausted_total,
+        };
+    }
+
+    fn checkoutQueued(self: *ConnectionPool) PoolError!PoolConn {
+        var spins: u32 = 0;
+        while (spins < self.config.queue_wait_spins) : (spins += 1) {
+            const query_buffers = self.runtime.acquireQueryBuffers() catch |err| {
+                if (err == error.NoQuerySlotAvailable) {
+                    std.Thread.yield() catch {};
+                    continue;
+                }
+                return err;
+            };
+            return try self.makePoolConn(query_buffers);
+        }
+        return error.QueueTimeout;
+    }
+
+    fn makePoolConn(
+        self: *ConnectionPool,
+        query_buffers: QueryBuffers,
+    ) PoolError!PoolConn {
+        errdefer releaseQuerySlotSafely(self.runtime, query_buffers.slot_index);
+
+        const tx_id = try self.runtime.tx_manager.begin();
+        errdefer self.runtime.tx_manager.abort(tx_id) catch {};
+
+        const snapshot = try self.runtime.tx_manager.snapshot(tx_id);
+        std.debug.assert(self.checked_out_count < self.runtime.max_query_slots);
+        self.checked_out_count += 1;
+
+        return .{
+            .slot_index = query_buffers.slot_index,
+            .query_buffers = query_buffers,
+            .tx_id = tx_id,
+            .snapshot = snapshot,
+            .pinned = false,
+            .checked_out = true,
         };
     }
 };
@@ -230,7 +253,7 @@ test "checkout returns PoolExhausted when all slots are occupied" {
     try std.testing.expectEqual(@as(u64, 1), pool.pool_exhausted_total);
 }
 
-test "queue overload policy fails closed when pool is exhausted" {
+test "queue overload policy waits then times out when pool stays exhausted" {
     var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
     defer disk.deinit();
 
@@ -249,12 +272,13 @@ test "queue overload policy fails closed when pool is exhausted" {
 
     var pool = ConnectionPool.initWithConfig(&runtime, .{
         .overload_policy = .queue,
+        .queue_wait_spins = 8,
     });
     var held = try pool.checkout();
     defer pool.checkin(&held) catch {};
 
     try std.testing.expectError(
-        error.QueuePolicyNotImplemented,
+        error.QueueTimeout,
         pool.checkout(),
     );
     try std.testing.expectEqual(@as(u64, 1), pool.pool_exhausted_total);

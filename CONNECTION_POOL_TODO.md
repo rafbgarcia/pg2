@@ -5,8 +5,7 @@
 - [x] Milestone 1: `PoolConn` and `ConnectionPool`
 - [x] Milestone 2: Refactor `Session` to use `ConnectionPool`
 - [x] Milestone 3: Refactor `main.zig`
-- [x] Milestone 4 (partial): explicit overload policy (`reject` default, `queue` fail-closed) + `pool_exhausted_total`
-- [ ] Milestone 4 (remaining): actual queued overload behavior (deferred)
+- [x] Milestone 4: explicit overload policy (`reject` default, `queue` bounded wait) + `pool_exhausted_total`
 
 Implemented in commits:
 - `3df28ed` — adds `src/server/pool.zig` and pool tests
@@ -53,19 +52,19 @@ Notes:
 - Server accept loop now passes `&pool` into `session.serveConnection(...)`.
 
 ### Milestone 4: Overload Behavior
-Status: [~] In progress (reject mode complete; queue deferred)
+Status: [x] Done
 
 Add configurable overload policy to `ConnectionPool`:
 
 - **Reject** (default): `checkout()` returns `PoolExhausted` immediately. Session writes an error response and continues to the next request. This already works — it's the current `NoQuerySlotAvailable` behavior with a new name.
-- **Queue** (deferred): Not needed yet. The reject path is sufficient for single-threaded io_uring. Queuing only matters with concurrent request dispatch, which requires the event loop work in Phase 4 to be further along.
+- **Queue**: `checkout()` performs a bounded wait loop (cooperative queue behavior) and returns `QueueTimeout` if capacity does not free within configured spin budget.
 
 Add a `pool_exhausted_total: u64` counter to `ConnectionPool` for monitoring.
 
 Current implementation note:
-- `ConnectionPoolConfig.overload_policy` is now explicit.
+- `ConnectionPoolConfig.overload_policy` is explicit.
 - `.reject` returns `PoolExhausted`.
-- `.queue` currently returns `QueuePolicyNotImplemented` to fail closed until queue semantics are implemented.
+- `.queue` waits up to `queue_wait_spins` and then returns `QueueTimeout` if still exhausted.
 
 ---
 
@@ -77,7 +76,7 @@ These are mentioned in `docs/CONNECTION_POOL.md` but should **not** be part of t
 - **Prepared statement cache** — No prepared statement support in the parser or executor. Placeholder field in `PoolConn` is not useful.
 - **Temp table references** — No temp table support exists.
 - **Transaction pinning for multi-statement txns** — The parser does not support `BEGIN`/`COMMIT`/`ROLLBACK` as explicit statements. Each request is auto-commit. `ConnectionPool.pin()` / `unpin()` exist, but session does not call them yet.
-- **Queued overload policy** — Reject-on-exhaustion is the right default. Queuing adds complexity that isn't needed until concurrent dispatch exists.
+- **Advanced queued overload policy** — Current queue mode is bounded wait and timeout. A future concurrent-dispatch queue can replace this with true FIFO waiter management if needed.
 
 ---
 
