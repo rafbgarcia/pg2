@@ -1126,6 +1126,7 @@ fn addMany(parts: []const usize) ?usize {
 fn mapPoolError(err: buffer_pool_mod.BufferPoolError) BTreeError {
     return switch (err) {
         error.AllFramesPinned => error.AllFramesPinned,
+        error.OutOfMemory => error.OutOfMemory,
         error.ChecksumMismatch => error.ChecksumMismatch,
         error.StorageRead => error.StorageRead,
         error.StorageWrite => error.StorageWrite,
@@ -1347,6 +1348,21 @@ test "internal: child routing" {
     // key >= "t" -> right child of "t" (30)
     try testing.expectEqual(@as(u64, 30), InternalNode.findChild(&page.content, "t"));
     try testing.expectEqual(@as(u64, 30), InternalNode.findChild(&page.content, "z"));
+}
+
+test "internal: child index routing boundaries" {
+    var page = Page.init(0, .free);
+    InternalNode.init(&page);
+    InternalNode.setLeftChild(&page.content, 10);
+
+    try InternalNode.insert(&page.content, "m", 20);
+    try InternalNode.insert(&page.content, "t", 30);
+
+    try testing.expectEqual(@as(u16, 0), InternalNode.findChildIndex(&page.content, "a"));
+    try testing.expectEqual(@as(u16, 1), InternalNode.findChildIndex(&page.content, "m"));
+    try testing.expectEqual(@as(u16, 1), InternalNode.findChildIndex(&page.content, "s"));
+    try testing.expectEqual(@as(u16, 2), InternalNode.findChildIndex(&page.content, "t"));
+    try testing.expectEqual(@as(u16, 2), InternalNode.findChildIndex(&page.content, "z"));
 }
 
 test "internal: page full returns error" {

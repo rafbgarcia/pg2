@@ -2,10 +2,14 @@ const std = @import("std");
 const disk_mod = @import("disk.zig");
 const wal_mod = @import("../storage/wal.zig");
 const buffer_pool_mod = @import("../storage/buffer_pool.zig");
+const btree_mod = @import("../storage/btree.zig");
+const heap_mod = @import("../storage/heap.zig");
 
 const SimulatedDisk = disk_mod.SimulatedDisk;
 const Wal = wal_mod.Wal;
 const BufferPool = buffer_pool_mod.BufferPool;
+const BTree = btree_mod.BTree;
+const RowId = heap_mod.RowId;
 
 const ScenarioOutcome = struct {
     signature: u64,
@@ -543,6 +547,79 @@ fn runBufferPoolIoFaultInterleaving(seed: u64) !ScenarioOutcome {
     return .{ .signature = h.final() };
 }
 
+fn runBTreeSplitFlushCrashInterleaving(seed: u64) !ScenarioOutcome {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rand = prng.random();
+
+    var disk = SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 64);
+    defer pool.deinit();
+
+    var tree = try BTree.init(&pool, null, 0);
+
+    var key_buf: [8]u8 = undefined;
+    const insert_count: u64 = 420 + rand.uintLessThan(u64, 16);
+    var i: u64 = 0;
+    while (i < insert_count) : (i += 1) {
+        const key_val = std.mem.nativeToBig(u64, i);
+        @memcpy(&key_buf, std.mem.asBytes(&key_val));
+        try tree.insert(&key_buf, RowId{ .page_id = i, .slot = 0 });
+    }
+    std.debug.assert(tree.root_page_id >= 2);
+
+    const fail_target = rand.uintLessThan(u8, 3);
+    const flush_page_id: u64 = switch (fail_target) {
+        0 => 0, // left split page
+        1 => 1, // right split page
+        else => tree.root_page_id, // promoted/new root path
+    };
+
+    disk.failWriteAt(disk.writes + 1);
+    try std.testing.expectError(error.StorageWrite, pool.flush(flush_page_id));
+
+    // Best-effort flush for remaining pages before crash.
+    _ = pool.flushAll() catch {};
+    disk.crash();
+
+    var verify_pool = try BufferPool.init(std.testing.allocator, disk.storage(), 64);
+    defer verify_pool.deinit();
+    var verify_tree = BTree{
+        .root_page_id = tree.root_page_id,
+        .next_page_id = tree.next_page_id,
+        .pool = &verify_pool,
+        .wal = null,
+    };
+
+    const probe = rand.uintLessThan(u64, insert_count);
+    const probe_key_val = std.mem.nativeToBig(u64, probe);
+    @memcpy(&key_buf, std.mem.asBytes(&probe_key_val));
+    const lookup_outcome: u8 = blk: {
+        const found = verify_tree.find(&key_buf) catch |err| {
+            break :blk switch (err) {
+                error.Corruption => 1,
+                error.StorageRead => 2,
+                error.InvalidPage => 3,
+                else => 4,
+            };
+        };
+        if (found) |row_id| {
+            break :blk if (row_id.page_id == probe) 5 else 6;
+        }
+        break :blk 0;
+    };
+
+    var h = std.hash.Wyhash.init(seed ^ 0xA11CE00A);
+    h.update(std.mem.asBytes(&insert_count));
+    h.update(std.mem.asBytes(&flush_page_id));
+    h.update(std.mem.asBytes(&disk.writes));
+    h.update(std.mem.asBytes(&disk.fsyncs));
+    h.update(std.mem.asBytes(&probe));
+    h.update(&[_]u8{lookup_outcome});
+    return .{ .signature = h.final() };
+}
+
 fn runExtendedWalBufferPoolCycles(seed: u64) !ScenarioOutcome {
     var prng = std.Random.DefaultPrng.init(seed);
     const rand = prng.random();
@@ -738,6 +815,14 @@ test "seeded schedule: extended WAL + buffer-pool cycles remain replay-determini
     }
 }
 
+test "seeded schedule: btree split flush crash interleaving remains replay-deterministic" {
+    for (seed_set) |seed| {
+        const first = try runBTreeSplitFlushCrashInterleaving(seed);
+        const second = try runBTreeSplitFlushCrashInterleaving(seed);
+        try std.testing.expectEqual(first.signature, second.signature);
+    }
+}
+
 test "ci seed sweep: extended deterministic replay coverage for short schedules" {
     std.debug.assert(ci_short_seed_set.len == ci_short_seed_budget);
     try expectReplayDeterministicAcrossSeeds(
@@ -769,6 +854,11 @@ test "ci seed sweep: extended deterministic replay coverage for short schedules"
         "buffer_pool_io_fault_interleaving",
         ci_short_seed_set[0..],
         runBufferPoolIoFaultInterleaving,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "btree_split_flush_crash_interleaving",
+        ci_short_seed_set[0..],
+        runBTreeSplitFlushCrashInterleaving,
     );
 }
 
