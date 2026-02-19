@@ -16,7 +16,7 @@ Remaining follow-up items from the code review that we should still address.
   - Why: current panic strings are low-diagnostic during field failures.
   - Files: `src/storage/btree.zig`.
 
-- [ ] Error taxonomy enforcement at all public boundaries.
+- [x] Error taxonomy enforcement at all public boundaries.
   - Why: taxonomy exists but is not consistently enforced at return boundaries.
   - Files: `src/tiger/error_taxonomy.zig`, plus module boundary call sites in executor/server/storage.
 

@@ -11,6 +11,7 @@ const filter_mod = @import("filter.zig");
 const scan_mod = @import("scan.zig");
 const mutation_mod = @import("mutation.zig");
 const capacity_mod = @import("capacity.zig");
+const tiger_errors = @import("../tiger/error_taxonomy.zig");
 
 const Allocator = std.mem.Allocator;
 const Ast = ast_mod.Ast;
@@ -247,8 +248,13 @@ fn executeReadPipeline(
         ctx.tx_manager,
         model_id,
         result.rows[0..scan_mod.max_result_rows],
-    ) catch {
-        setError(result, "table scan failed");
+    ) catch |err| {
+        setBoundaryError(
+            result,
+            "table scan failed",
+            tiger_errors.classifyScan(err),
+            err,
+        );
         return;
     };
     result.stats.pages_read = scan_result.pages_read;
@@ -407,8 +413,13 @@ fn applySingleNestedSelectionJoin(
         ctx.tx_manager,
         target_model_id,
         right_result.rows[0..scan_mod.max_result_rows],
-    ) catch {
-        setError(result, "nested relation scan failed");
+    ) catch |err| {
+        setBoundaryError(
+            result,
+            "nested relation scan failed",
+            tiger_errors.classifyScan(err),
+            err,
+        );
         return false;
     };
     right_result.row_count = right_scan.row_count;
@@ -1550,8 +1561,13 @@ fn executeMutation(
                 ctx.tokens,
                 ctx.source,
                 node.data.unary,
-            ) catch {
-                setError(result, "insert failed");
+            ) catch |err| {
+                setBoundaryError(
+                    result,
+                    "insert failed",
+                    tiger_errors.classifyMutation(err),
+                    err,
+                );
                 return;
             };
             result.stats.rows_inserted = 1;
@@ -1575,8 +1591,13 @@ fn executeMutation(
                 predicate,
                 node.data.unary,
                 ctx.allocator,
-            ) catch {
-                setError(result, "update failed");
+            ) catch |err| {
+                setBoundaryError(
+                    result,
+                    "update failed",
+                    tiger_errors.classifyMutation(err),
+                    err,
+                );
                 return;
             };
             result.stats.rows_updated = count;
@@ -1597,8 +1618,13 @@ fn executeMutation(
                 ctx.source,
                 predicate,
                 ctx.allocator,
-            ) catch {
-                setError(result, "delete failed");
+            ) catch |err| {
+                setBoundaryError(
+                    result,
+                    "delete failed",
+                    tiger_errors.classifyMutation(err),
+                    err,
+                );
                 return;
             };
             result.stats.rows_deleted = count;
@@ -1684,8 +1710,26 @@ fn findPredicate(
 
 fn setError(result: *QueryResult, msg: []const u8) void {
     result.has_error = true;
+    @memset(&result.error_message, 0);
     const copy_len = @min(msg.len, result.error_message.len);
     @memcpy(result.error_message[0..copy_len], msg[0..copy_len]);
+}
+
+fn setBoundaryError(
+    result: *QueryResult,
+    summary: []const u8,
+    class: tiger_errors.ErrorClass,
+    err: anyerror,
+) void {
+    result.has_error = true;
+    @memset(&result.error_message, 0);
+    _ = std.fmt.bufPrint(
+        result.error_message[0..],
+        "{s}; class={s}; code={s}",
+        .{ summary, @tagName(class), @errorName(err) },
+    ) catch {
+        setError(result, summary);
+    };
 }
 
 // --- Tests ---

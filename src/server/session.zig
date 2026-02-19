@@ -170,7 +170,7 @@ fn fixedMessage(message: []const u8) []const u8 {
 fn serializeBoundaryError(
     out: []u8,
     class: tiger_errors.ErrorClass,
-    err: anyerror,
+    err: tiger_errors.SessionBoundaryError,
 ) error{ResponseTooLarge}![]const u8 {
     var stream = std.io.fixedBufferStream(out);
     const writer = stream.writer();

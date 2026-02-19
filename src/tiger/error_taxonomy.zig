@@ -70,6 +70,8 @@ pub fn classifyMutation(err: mutation_mod.MutationError) ErrorClass {
         error.WalFsyncError => .retryable,
         error.OutOfMemory => .resource_exhausted,
         error.UndoLogFull => .resource_exhausted,
+        error.ReferentialIntegrityViolation => .fatal,
+        error.UnsupportedReferentialAction => .fatal,
     };
 }
 
