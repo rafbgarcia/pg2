@@ -2,82 +2,39 @@ const std = @import("std");
 const bootstrap_mod = @import("bootstrap.zig");
 const exec_mod = @import("../executor/executor.zig");
 const catalog_mod = @import("../catalog/catalog.zig");
-const tx_mod = @import("../mvcc/transaction.zig");
+const pool_mod = @import("../server/pool.zig");
 const parser_mod = @import("../parser/parser.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
 const disk_mod = @import("../simulator/disk.zig");
 
 const BootstrappedRuntime = bootstrap_mod.BootstrappedRuntime;
-const QueryBuffers = bootstrap_mod.QueryBuffers;
 const Catalog = catalog_mod.Catalog;
-const TxId = tx_mod.TxId;
-const Snapshot = tx_mod.Snapshot;
+const PoolConn = pool_mod.PoolConn;
+const ConnectionPool = pool_mod.ConnectionPool;
 const Ast = @import("../parser/ast.zig").Ast;
 const TokenizeResult = tokenizer_mod.TokenizeResult;
 
-pub const RequestError = bootstrap_mod.QueryBufferError || error{OutOfMemory};
+pub const RequestError = pool_mod.PoolError || error{OutOfMemory};
 
 pub const ExecuteRequest = struct {
     catalog: *Catalog,
-    tx_id: TxId,
-    snapshot: *const Snapshot,
+    pool_conn: *const PoolConn,
     ast: *const Ast,
     tokens: *const TokenizeResult,
     source: []const u8,
 };
 
-/// Holds a leased runtime query slot and the query result backed by that slot.
-/// Call deinit() after the caller finishes consuming result rows.
-pub const LeasedExecution = struct {
-    runtime: *BootstrappedRuntime,
-    slot_index: u16,
-    result: exec_mod.QueryResult,
-
-    pub fn deinit(self: *LeasedExecution) void {
-        self.result.deinit();
-        releaseQuerySlotSafely(self.runtime, self.slot_index);
-        self.* = undefined;
-    }
-};
-
-pub fn executeWithLeasedQueryBuffers(
+pub fn executeWithPoolConn(
     runtime: *BootstrappedRuntime,
     request: ExecuteRequest,
-) RequestError!LeasedExecution {
-    const buffers = try runtime.acquireQueryBuffers();
-    errdefer {
-        releaseQuerySlotSafely(runtime, buffers.slot_index);
-    }
-
-    const ctx = makeExecContext(runtime, request, buffers);
-    const result = try exec_mod.execute(&ctx);
-
-    return .{
-        .runtime = runtime,
-        .slot_index = buffers.slot_index,
-        .result = result,
-    };
-}
-
-fn releaseQuerySlotSafely(
-    runtime: *BootstrappedRuntime,
-    slot_index: u16,
-) void {
-    runtime.releaseQueryBuffers(slot_index) catch |err| {
-        std.log.err(
-            "query slot release failed: slot={d} err={s}",
-            .{ slot_index, @errorName(err) },
-        );
-        if (slot_index < runtime.max_query_slots) {
-            runtime.query_slot_in_use[slot_index] = false;
-        }
-    };
+) RequestError!exec_mod.QueryResult {
+    const ctx = makeExecContext(runtime, request);
+    return exec_mod.execute(&ctx);
 }
 
 fn makeExecContext(
     runtime: *BootstrappedRuntime,
     request: ExecuteRequest,
-    buffers: QueryBuffers,
 ) exec_mod.ExecContext {
     return .{
         .catalog = request.catalog,
@@ -85,19 +42,19 @@ fn makeExecContext(
         .wal = &runtime.wal,
         .tx_manager = &runtime.tx_manager,
         .undo_log = &runtime.undo_log,
-        .tx_id = request.tx_id,
-        .snapshot = request.snapshot,
+        .tx_id = request.pool_conn.tx_id,
+        .snapshot = &request.pool_conn.snapshot,
         .ast = request.ast,
         .tokens = request.tokens,
         .source = request.source,
         .allocator = runtime.static_allocator.allocator(),
-        .result_rows = buffers.result_rows,
-        .scratch_rows_a = buffers.scratch_rows_a,
-        .scratch_rows_b = buffers.scratch_rows_b,
+        .result_rows = request.pool_conn.query_buffers.result_rows,
+        .scratch_rows_a = request.pool_conn.query_buffers.scratch_rows_a,
+        .scratch_rows_b = request.pool_conn.query_buffers.scratch_rows_b,
     };
 }
 
-test "executeWithLeasedQueryBuffers holds slot until deinit" {
+test "executeWithPoolConn uses pool lease and caller controls release" {
     var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
     defer disk.deinit();
 
@@ -115,37 +72,34 @@ test "executeWithLeasedQueryBuffers holds slot until deinit" {
     defer runtime.deinit();
 
     var catalog = Catalog{};
-
-    const tx_id = try runtime.tx_manager.begin();
-    var snapshot = try runtime.tx_manager.snapshot(tx_id);
-    defer snapshot.deinit();
+    var pool = ConnectionPool.init(&runtime);
+    var conn = try pool.checkout();
 
     const source = "User";
     const tokens = tokenizer_mod.tokenize(source);
     const parsed = parser_mod.parse(&tokens, source);
     try std.testing.expect(!parsed.has_error);
 
-    var execution = try executeWithLeasedQueryBuffers(
+    var result = try executeWithPoolConn(
         &runtime,
         .{
             .catalog = &catalog,
-            .tx_id = tx_id,
-            .snapshot = &snapshot,
+            .pool_conn = &conn,
             .ast = &parsed.ast,
             .tokens = &tokens,
             .source = source,
         },
     );
+    defer result.deinit();
 
-    try std.testing.expect(execution.result.has_error);
+    try std.testing.expect(result.has_error);
     try std.testing.expectError(
-        error.NoQuerySlotAvailable,
-        runtime.acquireQueryBuffers(),
+        error.PoolExhausted,
+        pool.checkout(),
     );
 
-    execution.deinit();
-
-    const reused = try runtime.acquireQueryBuffers();
+    try pool.checkin(&conn);
+    var reused = try pool.checkout();
     try std.testing.expectEqual(@as(u16, 0), reused.slot_index);
-    try runtime.releaseQueryBuffers(reused.slot_index);
+    try pool.checkin(&reused);
 }

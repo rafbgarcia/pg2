@@ -100,10 +100,16 @@ pub fn classifyWal(err: wal_mod.WalError) ErrorClass {
 
 pub fn classifySessionBoundary(err: SessionBoundaryError) ErrorClass {
     return switch (err) {
+        error.PoolExhausted => .resource_exhausted,
         error.NoQuerySlotAvailable => .resource_exhausted,
+        error.InvalidPoolConn => .fatal,
+        error.PoolConnPinned => .fatal,
         error.InvalidQuerySlot => .fatal,
         error.OutOfMemory => .resource_exhausted,
         error.ResponseTooLarge => .resource_exhausted,
+        error.TooManyActiveTransactions => .resource_exhausted,
+        error.TxStateWindowFull => .resource_exhausted,
+        error.TransactionNotActive => .fatal,
     };
 }
 
@@ -117,6 +123,6 @@ test "scan corruption class mapping" {
 test "session boundary slot exhaustion maps to resource_exhausted" {
     try @import("std").testing.expectEqual(
         ErrorClass.resource_exhausted,
-        classifySessionBoundary(error.NoQuerySlotAvailable),
+        classifySessionBoundary(error.PoolExhausted),
     );
 }

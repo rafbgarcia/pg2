@@ -1,6 +1,7 @@
 const std = @import("std");
 const bootstrap_mod = @import("../runtime/bootstrap.zig");
 const request_mod = @import("../runtime/request.zig");
+const pool_mod = @import("pool.zig");
 const parser_mod = @import("../parser/parser.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
 const exec_mod = @import("../executor/executor.zig");
@@ -8,14 +9,13 @@ const transport_mod = @import("transport.zig");
 const tiger_errors = @import("../tiger/error_taxonomy.zig");
 const row_mod = @import("../storage/row.zig");
 const catalog_mod = @import("../catalog/catalog.zig");
-const tx_mod = @import("../mvcc/transaction.zig");
 const heap_mod = @import("../storage/heap.zig");
 const disk_mod = @import("../simulator/disk.zig");
 
 const BootstrappedRuntime = bootstrap_mod.BootstrappedRuntime;
 const Catalog = catalog_mod.Catalog;
-const TxId = tx_mod.TxId;
-const Snapshot = tx_mod.Snapshot;
+const ConnectionPool = pool_mod.ConnectionPool;
+const PoolConn = pool_mod.PoolConn;
 const Value = row_mod.Value;
 const Acceptor = transport_mod.Acceptor;
 const Connection = transport_mod.Connection;
@@ -32,8 +32,8 @@ pub const SessionResponse = struct {
 
 /// Deterministic request/session boundary used by server-side handlers.
 ///
-/// This path tokenizes/parses a query string, executes through runtime-leased
-/// buffers, serializes response bytes, and only then releases the leased slot.
+/// This path tokenizes/parses a query string, executes through a checked-out
+/// pool connection, then serializes response bytes.
 pub const Session = struct {
     runtime: *BootstrappedRuntime,
     catalog: *Catalog,
@@ -48,14 +48,13 @@ pub const Session = struct {
 
     pub fn handleRequest(
         self: *Session,
-        tx_id: TxId,
-        snapshot: *const Snapshot,
+        pool_conn: *const PoolConn,
         source: []const u8,
         out: []u8,
     ) SessionError!SessionResponse {
         std.debug.assert(source.len > 0);
         std.debug.assert(out.len > 0);
-        std.debug.assert(snapshot.tx_id == tx_id);
+        std.debug.assert(pool_conn.checked_out);
         std.debug.assert(self.runtime.static_allocator.isSealed());
         var stream = std.io.fixedBufferStream(out);
         const writer = stream.writer();
@@ -82,23 +81,22 @@ pub const Session = struct {
             };
         }
 
-        var execution = try request_mod.executeWithLeasedQueryBuffers(
+        var result = try request_mod.executeWithPoolConn(
             self.runtime,
             .{
                 .catalog = self.catalog,
-                .tx_id = tx_id,
-                .snapshot = snapshot,
+                .pool_conn = pool_conn,
                 .ast = &parsed.ast,
                 .tokens = &tokens,
                 .source = source,
             },
         );
-        defer execution.deinit();
+        defer result.deinit();
 
-        try serializeQueryResult(writer, &execution.result);
+        try serializeQueryResult(writer, &result);
         return .{
             .bytes_written = stream.pos,
-            .is_query_error = execution.result.has_error,
+            .is_query_error = result.has_error,
         };
     }
 
@@ -106,22 +104,37 @@ pub const Session = struct {
     pub fn serveConnection(
         self: *Session,
         connection: Connection,
-        tx_id: TxId,
-        snapshot: *const Snapshot,
+        pool: *ConnectionPool,
         request_buf: []u8,
         response_buf: []u8,
     ) ServeError!void {
         std.debug.assert(request_buf.len > 0);
         std.debug.assert(response_buf.len > 0);
-        std.debug.assert(snapshot.tx_id == tx_id);
         while (true) {
             const request_opt = try connection.readRequest(request_buf);
             const request = request_opt orelse break;
             if (request.len > request_buf.len) return error.RequestTooLarge;
 
+            var pool_conn = pool.checkout() catch |err| {
+                const class = tiger_errors.classifySessionBoundary(err);
+                const boundary_msg = try serializeBoundaryError(
+                    response_buf,
+                    class,
+                    err,
+                );
+                try connection.writeResponse(boundary_msg);
+                continue;
+            };
+            defer pool.checkin(&pool_conn) catch |err| {
+                std.log.err(
+                    "pool checkin failed: slot={d} err={s}",
+                    .{ pool_conn.slot_index, @errorName(err) },
+                );
+                @panic("pool checkin failed");
+            };
+
             const response = self.handleRequest(
-                tx_id,
-                snapshot,
+                &pool_conn,
                 request,
                 response_buf,
             ) catch |err| {
@@ -145,8 +158,7 @@ pub const Session = struct {
     pub fn serveAcceptedConnections(
         self: *Session,
         acceptor: Acceptor,
-        tx_id: TxId,
-        snapshot: *const Snapshot,
+        pool: *ConnectionPool,
         request_buf: []u8,
         response_buf: []u8,
     ) ServeError!usize {
@@ -155,8 +167,7 @@ pub const Session = struct {
             const connection = (try acceptor.accept()) orelse break;
             try self.serveConnection(
                 connection,
-                tx_id,
-                snapshot,
+                pool,
                 request_buf,
                 response_buf,
             );
@@ -269,31 +280,30 @@ test "session request path releases leased query slot after serialization" {
     var catalog = Catalog{};
     try initUserModel(&catalog, &runtime);
 
-    const tx_id = try runtime.tx_manager.begin();
-    var snapshot = try runtime.tx_manager.snapshot(tx_id);
-    defer snapshot.deinit();
-
     var session = Session.init(&runtime, &catalog);
+    var pool = ConnectionPool.init(&runtime);
     var response_buf: [1024]u8 = undefined;
 
+    var first_conn = try pool.checkout();
     const first = try session.handleRequest(
-        tx_id,
-        &snapshot,
+        &first_conn,
         "User",
         response_buf[0..],
     );
+    try pool.checkin(&first_conn);
     try std.testing.expect(!first.is_query_error);
     try std.testing.expectEqualStrings(
         "OK rows=0\n",
         response_buf[0..first.bytes_written],
     );
 
+    var second_conn = try pool.checkout();
     const second = try session.handleRequest(
-        tx_id,
-        &snapshot,
+        &second_conn,
         "User",
         response_buf[0..],
     );
+    try pool.checkin(&second_conn);
     try std.testing.expect(!second.is_query_error);
     try std.testing.expectEqualStrings(
         "OK rows=0\n",
@@ -320,26 +330,25 @@ test "session request path serializes query results" {
     var catalog = Catalog{};
     try initUserModel(&catalog, &runtime);
 
-    const tx_id = try runtime.tx_manager.begin();
-    var snapshot = try runtime.tx_manager.snapshot(tx_id);
-    defer snapshot.deinit();
-
     var session = Session.init(&runtime, &catalog);
+    var pool = ConnectionPool.init(&runtime);
     var response_buf: [1024]u8 = undefined;
 
+    var insert_conn = try pool.checkout();
     _ = try session.handleRequest(
-        tx_id,
-        &snapshot,
+        &insert_conn,
         "User |> insert(id = 1, name = \"Alice\", active = true)",
         response_buf[0..],
     );
+    try pool.checkin(&insert_conn);
 
+    var read_conn = try pool.checkout();
     const result = try session.handleRequest(
-        tx_id,
-        &snapshot,
+        &read_conn,
         "User",
         response_buf[0..],
     );
+    try pool.checkin(&read_conn);
     try std.testing.expect(!result.is_query_error);
     try std.testing.expectEqualStrings(
         "OK rows=1\n1,Alice,true\n",
@@ -439,10 +448,6 @@ test "session accept loop routes multiple connections through handleRequest" {
     var catalog = Catalog{};
     try initUserModel(&catalog, &runtime);
 
-    const tx_id = try runtime.tx_manager.begin();
-    var snapshot = try runtime.tx_manager.snapshot(tx_id);
-    defer snapshot.deinit();
-
     var conn_a = TestConnection{
         .requests = &[_][]const u8{
             "User |> insert(id = 1, name = \"Alice\", active = true)",
@@ -464,13 +469,13 @@ test "session accept loop routes multiple connections through handleRequest" {
     };
 
     var session = Session.init(&runtime, &catalog);
+    var pool = ConnectionPool.init(&runtime);
     var request_buf: [256]u8 = undefined;
     var response_buf: [256]u8 = undefined;
 
     const served = try session.serveAcceptedConnections(
         acceptor_state.acceptor(),
-        tx_id,
-        &snapshot,
+        &pool,
         request_buf[0..],
         response_buf[0..],
     );
@@ -490,7 +495,7 @@ test "session accept loop routes multiple connections through handleRequest" {
     );
 }
 
-test "session accept loop emits classified boundary error on query-slot exhaustion" {
+test "session accept loop emits classified boundary error on pool exhaustion" {
     const TestConnection = struct {
         request: []const u8,
         response_log: [2][128]u8 = undefined,
@@ -557,35 +562,30 @@ test "session accept loop emits classified boundary error on query-slot exhausti
     var catalog = Catalog{};
     try initUserModel(&catalog, &runtime);
 
-    const tx_id = try runtime.tx_manager.begin();
-    var snapshot = try runtime.tx_manager.snapshot(tx_id);
-    defer snapshot.deinit();
-
-    // Exhaust the only slot to force a runtime boundary error.
-    const occupied_slot = try runtime.acquireQueryBuffers();
-    defer runtime.releaseQueryBuffers(occupied_slot.slot_index) catch {
-        @panic("occupied slot release failed");
-    };
-
     var conn = TestConnection{
         .request = "User",
     };
 
     var session = Session.init(&runtime, &catalog);
+    var pool = ConnectionPool.init(&runtime);
+    var held_conn = try pool.checkout();
+    defer pool.checkin(&held_conn) catch {
+        @panic("held pool conn release failed");
+    };
+
     var request_buf: [64]u8 = undefined;
     var response_buf: [128]u8 = undefined;
 
     try session.serveConnection(
         conn.connection(),
-        tx_id,
-        &snapshot,
+        &pool,
         request_buf[0..],
         response_buf[0..],
     );
 
     try std.testing.expectEqual(@as(usize, 1), conn.write_index);
     try std.testing.expectEqualStrings(
-        "ERR class=resource_exhausted code=NoQuerySlotAvailable\n",
+        "ERR class=resource_exhausted code=PoolExhausted\n",
         conn.response_log[0][0..conn.response_lens[0]],
     );
 }

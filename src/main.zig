@@ -3,6 +3,7 @@ const builtin = @import("builtin");
 const runtime_config = @import("pg2").runtime.config;
 const runtime_bootstrap = @import("pg2").runtime.bootstrap;
 const session_mod = @import("pg2").server.session;
+const pool_mod = @import("pg2").server.pool;
 const io_uring_transport_mod = @import("pg2").server.io_uring_transport;
 const catalog_mod = @import("pg2").catalog.meta;
 const disk_mod = @import("pg2").simulator.disk;
@@ -104,15 +105,7 @@ pub fn main() !void {
 
         var catalog = catalog_mod.Catalog{};
         var session = session_mod.Session.init(&runtime, &catalog);
-        const tx_id = runtime.tx_manager.begin() catch {
-            try stdout.writeAll("startup failed: could not open session transaction\n");
-            return;
-        };
-        var snapshot = runtime.tx_manager.snapshot(tx_id) catch {
-            try stdout.writeAll("startup failed: could not create session snapshot\n");
-            return;
-        };
-        defer snapshot.deinit();
+        var pool = pool_mod.ConnectionPool.init(&runtime);
 
         var request_buf: [4096]u8 = undefined;
         var response_buf: [4096]u8 = undefined;
@@ -146,8 +139,7 @@ pub fn main() !void {
 
             session.serveConnection(
                 connection,
-                tx_id,
-                &snapshot,
+                &pool,
                 request_buf[0..],
                 response_buf[0..],
             ) catch {
