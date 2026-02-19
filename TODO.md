@@ -1,7 +1,6 @@
 # TODO
 
 1. Add a concrete server transport implementation.
-   - Implement real accept/read/write wiring (TCP/socket-backed) against `src/server/transport.zig`.
    - Hook the concrete accept loop into runtime/server startup flow.
    - Keep bounded request/response behavior and fail closed on overflow.
 
