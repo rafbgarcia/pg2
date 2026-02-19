@@ -18,6 +18,7 @@ On macOS development machines, run server-path tests inside Docker.
 - `src/server/io_uring_transport.zig` provides a Linux `io_uring` acceptor implementation.
 - `src/main.zig` supports `--listen <host:port>` to enter accept-loop mode.
 - Linux `--listen` requires `io_uring`; startup fails closed if unavailable.
+- Linux `io_uring` transport path now drives accept + recv + send operations.
 - Non-Linux `--listen` exits with an explicit Linux-only message.
 
 ## macOS Dev/Test Path

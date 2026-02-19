@@ -99,6 +99,7 @@ pub const IoUringAcceptor = struct {
         const accepted_fd: std.posix.fd_t = @intCast(cqe.res);
         self.active_connection = .{
             .stream = .{ .handle = accepted_fd },
+            .ring = &self.ring,
         };
         return self.active_connection.?.connection();
     }
@@ -106,7 +107,11 @@ pub const IoUringAcceptor = struct {
 
 const IoUringConnection = struct {
     stream: std.net.Stream,
+    ring: *std.os.linux.IoUring,
     closed: bool = false,
+    recv_buf: [1024]u8 = undefined,
+    recv_start: usize = 0,
+    recv_end: usize = 0,
 
     fn connection(self: *IoUringConnection) Connection {
         return .{
@@ -128,22 +133,22 @@ const IoUringConnection = struct {
         if (self.closed) return null;
 
         var used: usize = 0;
-        var byte_buf: [1]u8 = undefined;
-
         while (true) {
-            const n = self.stream.read(byte_buf[0..]) catch return error.ReadFailed;
-            if (n == 0) {
-                self.stream.close();
-                self.closed = true;
-                if (used == 0) return null;
-                return trimLineEnding(out[0..used]);
+            if (self.recv_start == self.recv_end) {
+                const n = try recvIntoPending(self);
+                if (n == 0) {
+                    self.stream.close();
+                    self.closed = true;
+                    if (used == 0) return null;
+                    return trimLineEnding(out[0..used]);
+                }
             }
 
-            const byte = byte_buf[0];
+            const byte = self.recv_buf[self.recv_start];
+            self.recv_start += 1;
             if (byte == '\n') {
                 return trimLineEnding(out[0..used]);
             }
-
             if (used >= out.len) return error.RequestTooLarge;
             out[used] = byte;
             used += 1;
@@ -156,7 +161,47 @@ const IoUringConnection = struct {
     ) ConnectionError!void {
         const self: *IoUringConnection = @ptrCast(@alignCast(ptr));
         if (self.closed) return error.WriteFailed;
-        self.stream.writeAll(data) catch return error.WriteFailed;
+
+        var sent: usize = 0;
+        while (sent < data.len) {
+            const chunk_sent = try sendFrom(self, data[sent..]);
+            if (chunk_sent == 0) return error.WriteFailed;
+            sent += chunk_sent;
+        }
+    }
+
+    fn recvIntoPending(self: *IoUringConnection) ConnectionError!usize {
+        _ = self.ring.recv(
+            0xA11CE5700002,
+            self.stream.handle,
+            .{ .buffer = self.recv_buf[0..] },
+            0,
+        ) catch return error.ReadFailed;
+        _ = self.ring.submit_and_wait(1) catch return error.ReadFailed;
+        const cqe = self.ring.copy_cqe() catch return error.ReadFailed;
+        if (cqe.user_data != 0xA11CE5700002) return error.ReadFailed;
+        if (cqe.err() != .SUCCESS) return error.ReadFailed;
+        if (cqe.res < 0) return error.ReadFailed;
+
+        const bytes_read: usize = @intCast(cqe.res);
+        self.recv_start = 0;
+        self.recv_end = bytes_read;
+        return bytes_read;
+    }
+
+    fn sendFrom(self: *IoUringConnection, data: []const u8) ConnectionError!usize {
+        _ = self.ring.send(
+            0xA11CE5700003,
+            self.stream.handle,
+            data,
+            0,
+        ) catch return error.WriteFailed;
+        _ = self.ring.submit_and_wait(1) catch return error.WriteFailed;
+        const cqe = self.ring.copy_cqe() catch return error.WriteFailed;
+        if (cqe.user_data != 0xA11CE5700003) return error.WriteFailed;
+        if (cqe.err() != .SUCCESS) return error.WriteFailed;
+        if (cqe.res < 0) return error.WriteFailed;
+        return @intCast(cqe.res);
     }
 };
 
@@ -186,6 +231,18 @@ test "io_uring transport accepts and reads newline-delimited request" {
             const stream = try std.net.tcpConnectToAddress(addr);
             defer stream.close();
             try stream.writeAll("User\r\n");
+
+            var response_buf: [64]u8 = undefined;
+            var used: usize = 0;
+            while (used < response_buf.len) {
+                const n = try stream.read(response_buf[used..]);
+                if (n == 0) break;
+                used += n;
+                if (std.mem.indexOfScalar(u8, response_buf[0..used], '\n') != null) {
+                    break;
+                }
+            }
+            try std.testing.expectEqualStrings("OK\n", response_buf[0..used]);
         }
     };
 
@@ -196,5 +253,6 @@ test "io_uring transport accepts and reads newline-delimited request" {
     var request_buf: [64]u8 = undefined;
     const request = (try conn.readRequest(request_buf[0..])).?;
     try std.testing.expectEqualStrings("User", request);
+    try conn.writeResponse("OK\n");
     try std.testing.expect((try conn.readRequest(request_buf[0..])) == null);
 }
