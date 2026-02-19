@@ -48,7 +48,6 @@ Do not use recursion. Use explicit fixed-capacity stacks allocated at startup.
 
 ## Function and Code Structure
 
-- 70-line hard limit per function.
 - Declare variables in the smallest possible scope.
 - One statement per line.
 - Keep related control flow centralized.
