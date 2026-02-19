@@ -1,129 +1,59 @@
 # Connection Pool — Implementation Plan
 
+## Status
+
+- [x] Milestone 1: `PoolConn` and `ConnectionPool`
+- [x] Milestone 2: Refactor `Session` to use `ConnectionPool`
+- [x] Milestone 3: Refactor `main.zig`
+- [x] Milestone 4 (partial): reject-on-exhaustion + `pool_exhausted_total`
+- [ ] Milestone 4 (remaining): queued overload policy (deferred)
+
+Implemented in commits:
+- `3df28ed` — adds `src/server/pool.zig` and pool tests
+- `020a5e9` — session/request/main refactor to pooled execution flow
+
 ## Current State
 
-The runtime already has a proto-pool: query slots in `src/runtime/bootstrap.zig`.
-
-- `QueryBuffers` — per-slot result + scratch row buffers (`bootstrap.zig:38`)
-- `query_slot_in_use` bool array — free-list equivalent (`bootstrap.zig:53`)
-- `acquireQueryBuffers()` / `releaseQueryBuffers()` — checkout/return (`bootstrap.zig:130-170`)
-- `LeasedExecution` — holds a slot until the caller finishes consuming results (`src/runtime/request.zig:31`)
-
-The session layer (`src/server/session.zig`) receives `tx_id` and `snapshot` from the **caller** — it does not own transaction lifecycle. In `main.zig:107-114`, a single global transaction and snapshot are shared across all connections.
-
-Transport abstractions exist (`src/server/transport.zig`): `Connection` (read/write) and `Acceptor` (accept loop), with TCP and io_uring backends.
+- `src/server/pool.zig` defines:
+  - `PoolConn` with `tx_id`, `snapshot`, query buffers, and pin state
+  - `ConnectionPool` with `checkout()`, `checkin()`, `pin()`, `unpin()`
+  - `pool_exhausted_total` counter
+- `src/server/session.zig` now checks out a pool connection per request and checks it back in after response serialization.
+- `src/runtime/request.zig` now consumes `PoolConn` directly (`executeWithPoolConn`) and no longer owns slot leasing.
+- `src/main.zig` now creates one `ConnectionPool` and passes it into `session.serveConnection(...)`.
+- `src/tiger/error_taxonomy.zig` classifies `PoolExhausted` as `resource_exhausted`.
 
 The target design is in `docs/CONNECTION_POOL.md`.
 
 ---
 
-## What to Build
+## Milestones
 
 ### Milestone 1: `PoolConn` and `ConnectionPool`
+Status: [x] Done
 
-Create `src/server/pool.zig`.
-
-**`PoolConn`** wraps existing `QueryBuffers` and adds per-connection transaction state:
-
-```
-PoolConn {
-    slot_index: u16,
-    query_buffers: QueryBuffers,     // existing — result_rows, scratch_rows_a/b
-    tx_id: TxId,                     // owned, not passed in
-    snapshot: Snapshot,              // owned, not passed in
-    pinned: bool,                   // false = auto-commit mode, true = in explicit txn
-}
-```
-
-**`ConnectionPool`** is a fixed-capacity free list of `PoolConn`:
-
-```
-ConnectionPool {
-    conns: []PoolConn,               // pre-allocated array (max pool_size)
-    free_bitmap: []bool,             // mirrors current query_slot_in_use pattern
-    pool_size: u16,                  // configurable, default from BootstrapConfig
-    tx_manager: *TxManager,          // reference, used to begin/commit/abort per checkout
-    runtime: *BootstrappedRuntime,   // reference, used to map slot → query buffers
-}
-```
-
-Methods:
-
-- `checkout() -> error{PoolExhausted}!*PoolConn` — finds a free slot, calls `tx_manager.begin()`, takes a snapshot, marks slot in-use, returns the PoolConn.
-- `checkin(conn: *PoolConn) -> void` — if `conn.pinned`, this is a bug (assert). Otherwise: commits or aborts the transaction, marks slot free.
-- `pin(conn: *PoolConn) -> void` — marks the conn as pinned (for future multi-statement txn support).
-- `unpin(conn: *PoolConn) -> void` — commits/aborts and returns to pool.
-
-**Pre-allocation**: All `PoolConn` structs are allocated during `BootstrappedRuntime.init`, before the static allocator is sealed. No heap allocation at runtime.
-
-**Tests** (inline in `pool.zig`):
-
-- Checkout returns a PoolConn with a valid tx_id and snapshot.
-- Checkin makes the slot reusable.
-- Checkout when pool is exhausted returns `PoolExhausted`.
-- Double-checkin is an invariant violation (assert or error).
-- Pool size matches configured `max_query_slots`.
+Notes:
+- Built on top of `BootstrappedRuntime.acquireQueryBuffers()` / `releaseQueryBuffers()`.
+- Exposes pool-level errors (`PoolExhausted`, `InvalidPoolConn`, `PoolConnPinned`).
+- Includes inline tests in `src/server/pool.zig`.
 
 ### Milestone 2: Refactor `Session` to Use `ConnectionPool`
+Status: [x] Done
 
-Modify `src/server/session.zig`.
-
-**Before** (current):
-```zig
-pub fn handleRequest(self, tx_id, snapshot, source, out) -> ...
-pub fn serveConnection(self, connection, tx_id, snapshot, req_buf, resp_buf) -> ...
-```
-
-**After**:
-```zig
-pub fn handleRequest(self, pool_conn: *PoolConn, source, out) -> ...
-pub fn serveConnection(self, connection, pool: *ConnectionPool, req_buf, resp_buf) -> ...
-```
-
-`serveConnection` does checkout/checkin per request:
-
-```
-while (request = connection.readRequest()) {
-    pool_conn = pool.checkout()  // or write PoolExhausted error and continue
-    response = handleRequest(pool_conn, request, response_buf)
-    connection.writeResponse(response)
-    pool.checkin(pool_conn)
-}
-```
-
-The session no longer receives `tx_id`/`snapshot` — those live inside the `PoolConn`.
-
-**Refactor `request.zig`**: `ExecuteRequest` drops `tx_id` and `snapshot` fields. Instead, `executeWithLeasedQueryBuffers` takes them from the `PoolConn`. Or simpler: delete `LeasedExecution` and the slot-management code from `request.zig` entirely — the pool now owns slot lifecycle. `request.zig` becomes a thin adapter that builds an `ExecContext` from a `PoolConn`.
-
-**Update tests**: All 4 existing session tests need to create a `ConnectionPool` instead of passing tx_id/snapshot directly.
+Notes:
+- `Session.handleRequest(...)` now takes `*PoolConn`.
+- `Session.serveConnection(...)` now takes `*ConnectionPool` and does checkout/checkin per request.
+- Session tests now allocate/use `ConnectionPool` and validate `PoolExhausted` boundary behavior.
 
 ### Milestone 3: Refactor `main.zig`
+Status: [x] Done
 
-Remove the global `tx_id`/`snapshot` from `main.zig:107-114`.
-
-**Before**:
-```zig
-const tx_id = runtime.tx_manager.begin();
-var snapshot = runtime.tx_manager.snapshot(tx_id);
-// ... passed to every serveConnection call
-```
-
-**After**:
-```zig
-var pool = ConnectionPool.init(&runtime);
-// ... passed to session, which does per-request checkout
-```
-
-The accept loop becomes:
-
-```zig
-while (true) {
-    const connection = acceptor.accept() orelse continue;
-    session.serveConnection(connection, &pool, request_buf, response_buf);
-}
-```
+Notes:
+- Removed global shared `tx_id`/`snapshot`.
+- Server accept loop now passes `&pool` into `session.serveConnection(...)`.
 
 ### Milestone 4: Overload Behavior
+Status: [~] In progress (reject mode complete; queue deferred)
 
 Add configurable overload policy to `ConnectionPool`:
 
@@ -141,7 +71,7 @@ These are mentioned in `docs/CONNECTION_POOL.md` but should **not** be part of t
 - **`auth_context` / `ClientSession`** — No authentication system exists. The `ClientSession` struct from the design doc is the right shape but has no backing implementation. Build it when auth is implemented.
 - **Prepared statement cache** — No prepared statement support in the parser or executor. Placeholder field in `PoolConn` is not useful.
 - **Temp table references** — No temp table support exists.
-- **Transaction pinning for multi-statement txns** — The parser does not support `BEGIN`/`COMMIT`/`ROLLBACK` as explicit statements. Each request is auto-commit. The `pin`/`unpin` methods on `ConnectionPool` should exist as stubs (assert-guarded) so the interface is ready, but the session layer should not call them yet.
+- **Transaction pinning for multi-statement txns** — The parser does not support `BEGIN`/`COMMIT`/`ROLLBACK` as explicit statements. Each request is auto-commit. `ConnectionPool.pin()` / `unpin()` exist, but session does not call them yet.
 - **Queued overload policy** — Reject-on-exhaustion is the right default. Queuing adds complexity that isn't needed until concurrent dispatch exists.
 
 ---
@@ -162,6 +92,9 @@ Milestone 4 (overload counter)
 ```
 
 Each milestone should end with `zig build test` passing. Milestone 3 additionally requires `zig build` to verify the server entry point compiles.
+
+Progress note:
+- `zig build test` and `zig build` pass after Milestones 1-3 and Milestone 4 reject-path updates.
 
 ## Files Touched
 
