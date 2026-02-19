@@ -1,0 +1,1 @@
+- Columnar storage: user defines which columns

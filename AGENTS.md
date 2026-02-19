@@ -2,12 +2,9 @@
 
 A database built from scratch in Zig, focused on developer experience and transparency.
 
-pg2's mission is to make the database the complete data system:
+pg2's mission is to make the database the complete data system without leaking data responsibilities to the application layer (e.g. pg2 handles online data and schema migrations, partitions, etc.).
 
-- applications declare business intent, and pg2 owns schema, queries, integrity, and data access so application code does not need ORMs or database glue layers.
-- applications declare the state they want the data and pg2 handles it. e.g. data migrations, partitions, sharding, etc. always online. Changes are derived automatically via some command like `pg2 apply` (called e.g. during an application deployment) and applied as needed.
-
-## Project Philosophy
+## Project Principles
 
 - **One obvious way for common tasks.** Prefer a single clear default path for schema design, querying, and operations; advanced controls are explicit opt-ins.
 - **Low cognitive load by default.** Keep syntax, errors, and operational workflows simple; minimize required tuning knobs and hidden behavior.
@@ -73,40 +70,3 @@ For any PR touching core DB code, complete the mandatory checklist in `docs/TIGE
 - Persistent format/protocol impact.
 - Deterministic crash/fault tests.
 - Performance baseline/threshold impact.
-
-## Progress
-
-- [x] **Phase 1: Foundation**
-  - [x] I/O abstraction interfaces (`Storage`, `Clock`, `Network`) — `src/storage/io.zig`
-  - [x] Deterministic simulation harness (`SimulatedDisk`, `SimulatedClock`) — `src/simulator/`
-  - [x] Page struct with CRC-32C checksums — `src/storage/page.zig`
-  - [x] Buffer pool with clock-sweep eviction — `src/storage/buffer_pool.zig`
-  - [x] Build system (`zig build`, `zig build test`, `zig build sim`)
-- [x] **Phase 2: Storage Engine**
-  - [x] Write-ahead log (WAL) — `src/storage/wal.zig`
-  - [x] B-tree indexes — `src/storage/btree.zig`
-  - [x] Heap storage (slotted pages, in-place update) — `src/storage/heap.zig`
-  - [x] Undo-log MVCC + transaction manager — `src/mvcc/`
-  - [x] Buffer pool enforces WAL protocol (page LSN must be flushed before page flush)
-- [x] **Phase 3: Query Layer**
-  - [x] pg2 query language parser (tokenizer, AST, expression parser, statement parser)
-  - [x] Schema / catalog management (catalog metadata store, schema loader)
-  - [x] Executor: scan, filter, mutations — `src/executor/`
-  - [x] Executor: sort, aggregation, joins — integrated in `src/executor/executor.zig`
-- [ ] **Phase 4: Server** *(Linux-only target; use Docker for dev/test on macOS)*
-  - [x] Session request path (tokenize → parse → execute → serialize, no network I/O)
-  - [x] Transport abstractions + TCP and io_uring backends — `src/server/`
-  - [x] Connection pooling (two-layer: client connections + pool connections)
-  - [x] Runtime statistics exposure + query introspection (`inspect`)
-- [ ] **Phase 5: Replication**
-  - [ ] WAL streaming to replicas
-  - [ ] Replica read path
-  - [ ] Promotion / failover
-
-# Future ideas
-
-- Columnar storage: user defines which columns
-- Built-in online migrations
-- Use in browser (builtin online migrations could be useful)
-- **Built-in connection pool**: Two-layer architecture separating client connections from pool connections. Client connections (TCP sockets) are long-lived and cheap — just a socket fd + auth context. Pool connections are internal execution contexts (txn state, scratch buffers) with a fixed pool size. Clients borrow a pool connection per query; pool connection is returned after the query completes. During multi-statement transactions, the pool connection is pinned to the client until COMMIT/ROLLBACK. Subscription handles are separate from query connections and don't count toward the pool limit.
-- Built in AI assistant. e.g. `pg2 extract the user logs from the Log table into a new UserLog table`

@@ -1,0 +1,1 @@
+- Built in AI assistant. e.g. `pg2 extract the user logs from the Log table into a new UserLog table`
