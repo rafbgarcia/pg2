@@ -4,7 +4,6 @@ const runtime_config = @import("pg2").runtime.config;
 const runtime_bootstrap = @import("pg2").runtime.bootstrap;
 const session_mod = @import("pg2").server.session;
 const io_uring_transport_mod = @import("pg2").server.io_uring_transport;
-const tcp_transport_mod = @import("pg2").server.tcp_transport;
 const catalog_mod = @import("pg2").catalog.meta;
 const disk_mod = @import("pg2").simulator.disk;
 
@@ -123,34 +122,9 @@ pub fn main() !void {
         ) catch |err| switch (err) {
             error.IoUringUnavailable => {
                 try stdout.writeAll(
-                    "io_uring unavailable; falling back to blocking TCP accept loop\n",
+                    "startup failed: io_uring unavailable on this Linux runtime\n",
                 );
-                var tcp_acceptor = tcp_transport_mod.TcpAcceptor.listen(
-                    listen_address,
-                    .{ .reuse_address = true },
-                ) catch {
-                    try stdout.writeAll("startup failed: could not listen on requested address\n");
-                    return;
-                };
-                defer tcp_acceptor.deinit();
-
-                try stdout.writeAll("server accept loop started (tcp-fallback)\n");
-                while (true) {
-                    const connection = tcp_acceptor.acceptor().accept() catch {
-                        try stdout.writeAll("accept loop error: accept failed\n");
-                        continue;
-                    } orelse continue;
-
-                    session.serveConnection(
-                        connection,
-                        tx_id,
-                        &snapshot,
-                        request_buf[0..],
-                        response_buf[0..],
-                    ) catch {
-                        try stdout.writeAll("connection error: request handling failed\n");
-                    };
-                }
+                return;
             },
             error.ListenFailed => {
                 try stdout.writeAll("startup failed: could not listen on requested address\n");

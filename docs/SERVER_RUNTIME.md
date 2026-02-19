@@ -17,7 +17,7 @@ On macOS development machines, run server-path tests inside Docker.
 - `src/server/tcp_transport.zig` provides a concrete blocking TCP implementation.
 - `src/server/io_uring_transport.zig` provides a Linux `io_uring` acceptor implementation.
 - `src/main.zig` supports `--listen <host:port>` to enter accept-loop mode.
-- Linux `--listen` prefers `io_uring` accept; if unavailable, it falls back to blocking TCP accept.
+- Linux `--listen` requires `io_uring`; startup fails closed if unavailable.
 - Non-Linux `--listen` exits with an explicit Linux-only message.
 
 ## macOS Dev/Test Path
