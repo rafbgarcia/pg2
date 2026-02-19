@@ -61,7 +61,12 @@ pub const BootstrappedRuntime = struct {
         storage: Storage,
         config: BootstrapConfig,
     ) BootstrapError!BootstrappedRuntime {
+        std.debug.assert(memory_region.len > 0);
         if (config.max_query_slots == 0) return error.InvalidConfig;
+        if (config.wal_buffer_capacity_bytes == 0) return error.InvalidConfig;
+        if (config.buffer_pool_frames == 0) return error.InvalidConfig;
+        if (config.undo_max_entries == 0) return error.InvalidConfig;
+        if (config.undo_max_data_bytes == 0) return error.InvalidConfig;
         try validateMemoryBudget(memory_region, storage, config);
 
         var runtime: BootstrappedRuntime = undefined;
@@ -88,8 +93,11 @@ pub const BootstrappedRuntime = struct {
         errdefer runtime.undo_log.deinit();
 
         runtime.max_query_slots = config.max_query_slots;
-        const total_rows = @as(usize, config.max_query_slots) *
-            max_result_rows;
+        const total_rows = std.math.mul(
+            usize,
+            @as(usize, config.max_query_slots),
+            max_result_rows,
+        ) catch return error.InvalidConfig;
         runtime.query_slot_in_use = allocator.alloc(
             bool,
             config.max_query_slots,
@@ -122,6 +130,7 @@ pub const BootstrappedRuntime = struct {
     pub fn acquireQueryBuffers(
         self: *BootstrappedRuntime,
     ) QueryBufferError!QueryBuffers {
+        std.debug.assert(self.query_slot_in_use.len == self.max_query_slots);
         var slot_index: u16 = 0;
         while (slot_index < self.max_query_slots) : (slot_index += 1) {
             if (!self.query_slot_in_use[slot_index]) {
@@ -150,6 +159,7 @@ pub const BootstrappedRuntime = struct {
         self: *BootstrappedRuntime,
         slot_index: u16,
     ) QueryBufferError!void {
+        std.debug.assert(self.query_slot_in_use.len == self.max_query_slots);
         if (slot_index >= self.max_query_slots) {
             return error.InvalidQuerySlot;
         }
@@ -190,6 +200,13 @@ fn validateMemoryBudget(
     storage: Storage,
     config: BootstrapConfig,
 ) BootstrapError!void {
+    std.debug.assert(memory_region.len > 0);
+    if (config.max_query_slots == 0) return error.InvalidConfig;
+    if (config.wal_buffer_capacity_bytes == 0) return error.InvalidConfig;
+    if (config.buffer_pool_frames == 0) return error.InvalidConfig;
+    if (config.undo_max_entries == 0) return error.InvalidConfig;
+    if (config.undo_max_data_bytes == 0) return error.InvalidConfig;
+
     var preflight = StaticAllocator.init(memory_region);
     const allocator = preflight.allocator();
 
@@ -209,8 +226,11 @@ fn validateMemoryBudget(
         config.undo_max_data_bytes,
     ) catch return error.InsufficientMemoryBudget;
 
-    const total_rows = @as(usize, config.max_query_slots) *
-        max_result_rows;
+    const total_rows = std.math.mul(
+        usize,
+        @as(usize, config.max_query_slots),
+        max_result_rows,
+    ) catch return error.InvalidConfig;
     _ = allocator.alloc(bool, config.max_query_slots) catch
         return error.InsufficientMemoryBudget;
     _ = allocator.alloc(ResultRow, total_rows) catch

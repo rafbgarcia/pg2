@@ -51,12 +51,14 @@ pub const UndoLog = struct {
         var row_heads = std.AutoHashMap(RowKey, u64).init(allocator);
         try row_heads.ensureTotalCapacity(max_entries);
 
-        return .{
+        const log: UndoLog = .{
             .entries = entries,
             .data_buffer = data_buffer,
             .row_heads = row_heads,
             .allocator = allocator,
         };
+        log.assertInvariants();
+        return log;
     }
 
     pub fn deinit(self: *UndoLog) void {
@@ -73,10 +75,11 @@ pub const UndoLog = struct {
         slot: u16,
         old_data: []const u8,
     ) error{UndoLogFull}!u64 {
+        std.debug.assert(tx_id > 0);
         std.debug.assert(old_data.len > 0);
         std.debug.assert(old_data.len <= max_row_size_bytes);
         std.debug.assert(old_data.len <= std.math.maxInt(u16));
-        std.debug.assert(self.count <= self.entries.len);
+        self.assertInvariants();
 
         if (self.count >= self.entries.len) return error.UndoLogFull;
 
@@ -109,7 +112,7 @@ pub const UndoLog = struct {
         self.row_heads.put(key, logical_idx) catch {
             @panic("row_heads capacity exceeded");
         };
-        std.debug.assert(self.count <= self.entries.len);
+        self.assertInvariants();
         return logical_idx;
     }
 
@@ -160,10 +163,12 @@ pub const UndoLog = struct {
     }
 
     pub fn truncate(self: *UndoLog, oldest_needed_tx_id: TxId) void {
+        self.assertInvariants();
         while (self.count > 0) {
             const entry = &self.entries[self.tail];
             if (entry.tx_id >= oldest_needed_tx_id) break;
 
+            std.debug.assert(self.data_used >= entry.data_length);
             self.data_used -= entry.data_length;
             self.tail = self.nextEntryPos(self.tail);
             self.count -= 1;
@@ -180,8 +185,7 @@ pub const UndoLog = struct {
             }
         }
 
-        std.debug.assert(self.count <= self.entries.len);
-        std.debug.assert(self.data_used <= self.data_buffer.len);
+        self.assertInvariants();
     }
 
     pub fn len(self: *const UndoLog) u32 {
@@ -189,6 +193,8 @@ pub const UndoLog = struct {
     }
 
     fn reserveData(self: *UndoLog, length: u16) error{UndoLogFull}!u32 {
+        std.debug.assert(length > 0);
+        self.assertInvariants();
         const len32: u32 = length;
         const cap: u32 = @intCast(self.data_buffer.len);
 
@@ -220,12 +226,15 @@ pub const UndoLog = struct {
 
     fn nextEntryPos(self: *const UndoLog, pos: u32) u32 {
         const cap: u32 = @intCast(self.entries.len);
+        std.debug.assert(cap > 0);
+        std.debug.assert(pos < cap);
         const next = pos + 1;
         if (next == cap) return 0;
         return next;
     }
 
     fn logicalToPhysical(self: *const UndoLog, idx: u64) ?u32 {
+        self.assertInvariants();
         if (idx < self.base_index) return null;
 
         const relative = idx - self.base_index;
@@ -241,6 +250,21 @@ pub const UndoLog = struct {
         const data_len: usize = entry.data_length;
         std.debug.assert(start + data_len <= self.data_buffer.len);
         return self.data_buffer[start .. start + data_len];
+    }
+
+    fn assertInvariants(self: *const UndoLog) void {
+        std.debug.assert(self.entries.len > 0);
+        std.debug.assert(self.data_buffer.len > 0);
+        std.debug.assert(self.count <= self.entries.len);
+        std.debug.assert(self.data_used <= self.data_buffer.len);
+
+        const entries_cap: u32 = @intCast(self.entries.len);
+        std.debug.assert(self.head < entries_cap);
+        std.debug.assert(self.tail < entries_cap);
+
+        const data_cap: u32 = @intCast(self.data_buffer.len);
+        std.debug.assert(self.data_head < data_cap);
+        std.debug.assert(self.data_tail < data_cap);
     }
 };
 

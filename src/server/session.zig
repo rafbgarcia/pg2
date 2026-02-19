@@ -42,6 +42,7 @@ pub const Session = struct {
         runtime: *BootstrappedRuntime,
         catalog: *Catalog,
     ) Session {
+        std.debug.assert(runtime.static_allocator.isSealed());
         return .{ .runtime = runtime, .catalog = catalog };
     }
 
@@ -55,6 +56,7 @@ pub const Session = struct {
         std.debug.assert(source.len > 0);
         std.debug.assert(out.len > 0);
         std.debug.assert(snapshot.tx_id == tx_id);
+        std.debug.assert(self.runtime.static_allocator.isSealed());
         var stream = std.io.fixedBufferStream(out);
         const writer = stream.writer();
 
@@ -111,6 +113,7 @@ pub const Session = struct {
     ) ServeError!void {
         std.debug.assert(request_buf.len > 0);
         std.debug.assert(response_buf.len > 0);
+        std.debug.assert(snapshot.tx_id == tx_id);
         while (true) {
             const request_opt = try connection.readRequest(request_buf);
             const request = request_opt orelse break;
@@ -131,6 +134,7 @@ pub const Session = struct {
                 try connection.writeResponse(boundary_msg);
                 continue;
             };
+            std.debug.assert(response.bytes_written <= response_buf.len);
             try connection.writeResponse(
                 response_buf[0..response.bytes_written],
             );
@@ -198,6 +202,7 @@ fn serializeQueryResult(
     var row_index: usize = 0;
     while (row_index < result.row_count) : (row_index += 1) {
         const row = result.rows[row_index];
+        std.debug.assert(row.column_count <= row.values.len);
         var column_index: usize = 0;
         while (column_index < row.column_count) : (column_index += 1) {
             if (column_index > 0) {

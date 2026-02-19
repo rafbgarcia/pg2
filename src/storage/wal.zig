@@ -41,11 +41,13 @@ pub const Record = struct {
 
     /// Total serialized size of this record.
     pub fn serializedSize(self: *const Record) usize {
+        std.debug.assert(self.payload.len <= max_payload_size);
         return header_size + self.payload.len + crc_size;
     }
 
     /// Serialize into a caller-provided buffer. Returns the slice written.
     pub fn serialize(self: *const Record, buf: []u8) []u8 {
+        std.debug.assert(self.payload.len <= max_payload_size);
         const total = self.serializedSize();
         std.debug.assert(buf.len >= total);
 
@@ -108,6 +110,7 @@ pub const Record = struct {
         offset += 2;
 
         const total = header_size + @as(usize, payload_len) + crc_size;
+        std.debug.assert(total <= header_size + max_payload_size + crc_size);
         if (buf.len < total) return error.Truncated;
 
         const payload = buf[offset..][0..payload_len];
@@ -118,6 +121,7 @@ pub const Record = struct {
         const computed_crc = std.hash.crc.Crc32Iscsi.hash(buf[0..offset]);
         if (stored_crc != computed_crc) return error.ChecksumMismatch;
         offset += 4;
+        std.debug.assert(offset == total);
 
         return .{
             .record = .{
@@ -291,6 +295,7 @@ pub const Wal = struct {
     /// Reserve WAL buffer bytes during startup and lock append growth to this
     /// ceiling. Useful with sealed allocators where runtime growth is forbidden.
     pub fn reserveBufferCapacity(self: *Wal, capacity_bytes: usize) WalError!void {
+        std.debug.assert(capacity_bytes > 0);
         self.ensureInlineBufferBound();
         if (self.buffer_owned) return error.OutOfMemory;
         if (capacity_bytes <= self.inline_buffer.len) {
@@ -347,6 +352,7 @@ pub const Wal = struct {
         if (self.buffer_len == 0) return;
 
         const page_size = io.page_size;
+        std.debug.assert(self.wal_byte_offset < page_size);
         var buf_offset: usize = 0;
 
         while (buf_offset < self.buffer_len) {
@@ -373,6 +379,7 @@ pub const Wal = struct {
                 self.wal_page_offset += 1;
             }
         }
+        std.debug.assert(self.wal_byte_offset < page_size);
 
         self.storage.fsync() catch return error.WalFsyncError;
 
@@ -392,6 +399,7 @@ pub const Wal = struct {
         out_records: []Record,
         payload_buf: []u8,
     ) WalError!ReadIntoResult {
+        std.debug.assert(from_lsn > 0);
         const total_pages = self.wal_page_offset + @as(u64, if (self.wal_byte_offset > 0) 1 else 0);
         if (total_pages == 0) return .{ .records_len = 0, .payload_bytes_used = 0 };
 
@@ -474,6 +482,8 @@ pub const Wal = struct {
         if (isAllZero(&page_buf)) return;
 
         const envelope = try RecoveryEnvelope.deserialize(page_buf[0..RecoveryEnvelope.size]);
+        std.debug.assert(envelope.wal_byte_offset < io.page_size);
+        std.debug.assert(envelope.flushed_lsn < envelope.next_lsn);
         self.wal_page_offset = envelope.wal_page_offset;
         self.wal_byte_offset = @intCast(envelope.wal_byte_offset);
         self.next_lsn = envelope.next_lsn;
@@ -499,6 +509,7 @@ pub const Wal = struct {
     }
 
     fn persistEnvelope(self: *Wal) WalError!void {
+        std.debug.assert(RecoveryEnvelope.size <= io.page_size);
         var page_buf: [io.page_size]u8 = std.mem.zeroes([io.page_size]u8);
         const envelope = RecoveryEnvelope.init(self);
         var env_bytes: [RecoveryEnvelope.size]u8 = undefined;
@@ -513,6 +524,7 @@ pub const Wal = struct {
     fn ensureInlineBufferBound(self: *Wal) void {
         if (!self.buffer_owned and self.buffer.len == 0) {
             self.buffer = self.inline_buffer[0..];
+            std.debug.assert(self.buffer.len == io.page_size);
         }
     }
 
@@ -535,6 +547,7 @@ pub const Wal = struct {
 fn serializedRecordLen(prefix: []const u8) ?usize {
     if (prefix.len < Record.header_size) return null;
     const payload_len = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, prefix[25..27]).*);
+    std.debug.assert(payload_len <= max_payload_size);
     return Record.header_size + @as(usize, payload_len) + Record.crc_size;
 }
 

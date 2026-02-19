@@ -22,7 +22,7 @@ Remaining follow-up items from the code review that we should still address.
 
 ## Medium Priority
 
-- [ ] Assertion-density systematic pass for remaining modules.
+- [x] Assertion-density systematic pass for remaining modules.
   - Why: we improved several modules, but coverage is still uneven.
   - Targets: `src/mvcc/undo.zig`, `src/runtime/bootstrap.zig`, remaining `src/server/session.zig` paths, broader `src/storage/wal.zig`.
 
