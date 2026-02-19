@@ -4,6 +4,7 @@ const request_mod = @import("../runtime/request.zig");
 const parser_mod = @import("../parser/parser.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
 const exec_mod = @import("../executor/executor.zig");
+const transport_mod = @import("transport.zig");
 const row_mod = @import("../storage/row.zig");
 const catalog_mod = @import("../catalog/catalog.zig");
 const tx_mod = @import("../mvcc/transaction.zig");
@@ -15,8 +16,13 @@ const Catalog = catalog_mod.Catalog;
 const TxId = tx_mod.TxId;
 const Snapshot = tx_mod.Snapshot;
 const Value = row_mod.Value;
+const Acceptor = transport_mod.Acceptor;
+const Connection = transport_mod.Connection;
 
 pub const SessionError = request_mod.RequestError || error{ResponseTooLarge};
+pub const ServeError = SessionError ||
+    transport_mod.AcceptError ||
+    transport_mod.ConnectionError;
 
 pub const SessionResponse = struct {
     bytes_written: usize,
@@ -88,6 +94,56 @@ pub const Session = struct {
             .bytes_written = stream.pos,
             .is_query_error = execution.result.has_error,
         };
+    }
+
+    /// Serve all requests from one accepted connection using bounded buffers.
+    pub fn serveConnection(
+        self: *Session,
+        connection: Connection,
+        tx_id: TxId,
+        snapshot: *const Snapshot,
+        request_buf: []u8,
+        response_buf: []u8,
+    ) ServeError!void {
+        while (true) {
+            const request_opt = try connection.readRequest(request_buf);
+            const request = request_opt orelse break;
+            if (request.len > request_buf.len) return error.RequestTooLarge;
+
+            const response = try self.handleRequest(
+                tx_id,
+                snapshot,
+                request,
+                response_buf,
+            );
+            try connection.writeResponse(
+                response_buf[0..response.bytes_written],
+            );
+        }
+    }
+
+    /// Accept and serve all currently pending connections.
+    pub fn serveAcceptedConnections(
+        self: *Session,
+        acceptor: Acceptor,
+        tx_id: TxId,
+        snapshot: *const Snapshot,
+        request_buf: []u8,
+        response_buf: []u8,
+    ) ServeError!usize {
+        var served_connections: usize = 0;
+        while (true) {
+            const connection = (try acceptor.accept()) orelse break;
+            try self.serveConnection(
+                connection,
+                tx_id,
+                snapshot,
+                request_buf,
+                response_buf,
+            );
+            served_connections += 1;
+        }
+        return served_connections;
     }
 };
 
@@ -253,5 +309,148 @@ test "session request path serializes query results" {
     try std.testing.expectEqualStrings(
         "OK rows=1\n1,Alice,true\n",
         response_buf[0..result.bytes_written],
+    );
+}
+
+test "session accept loop routes multiple connections through handleRequest" {
+    const TestConnection = struct {
+        requests: []const []const u8,
+        response_log: [4][128]u8 = undefined,
+        response_lens: [4]usize = [_]usize{0} ** 4,
+        read_index: usize = 0,
+        write_index: usize = 0,
+
+        fn connection(self: *@This()) Connection {
+            return .{
+                .ptr = @ptrCast(self),
+                .vtable = &vtable,
+            };
+        }
+
+        const vtable = Connection.VTable{
+            .readRequest = &readRequest,
+            .writeResponse = &writeResponse,
+        };
+
+        fn readRequest(
+            ptr: *anyopaque,
+            out: []u8,
+        ) transport_mod.ConnectionError!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.read_index >= self.requests.len) return null;
+            const req = self.requests[self.read_index];
+            if (req.len > out.len) return error.RequestTooLarge;
+            @memcpy(out[0..req.len], req);
+            self.read_index += 1;
+            return out[0..req.len];
+        }
+
+        fn writeResponse(
+            ptr: *anyopaque,
+            data: []const u8,
+        ) transport_mod.ConnectionError!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.write_index >= self.response_log.len) {
+                return error.WriteFailed;
+            }
+            if (data.len > self.response_log[self.write_index].len) {
+                return error.ResponseTooLarge;
+            }
+            @memcpy(self.response_log[self.write_index][0..data.len], data);
+            self.response_lens[self.write_index] = data.len;
+            self.write_index += 1;
+        }
+    };
+
+    const TestAcceptor = struct {
+        connections: []*TestConnection,
+        accept_index: usize = 0,
+
+        fn acceptor(self: *@This()) Acceptor {
+            return .{
+                .ptr = @ptrCast(self),
+                .vtable = &vtable,
+            };
+        }
+
+        const vtable = Acceptor.VTable{
+            .accept = &accept,
+        };
+
+        fn accept(ptr: *anyopaque) transport_mod.AcceptError!?Connection {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.accept_index >= self.connections.len) return null;
+            const conn = self.connections[self.accept_index];
+            self.accept_index += 1;
+            return conn.connection();
+        }
+    };
+
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    const backing_memory = try std.testing.allocator.alloc(
+        u8,
+        256 * 1024 * 1024,
+    );
+    defer std.testing.allocator.free(backing_memory);
+
+    var runtime = try BootstrappedRuntime.init(
+        backing_memory,
+        disk.storage(),
+        .{ .max_query_slots = 1 },
+    );
+
+    var catalog = Catalog{};
+    try initUserModel(&catalog, &runtime);
+
+    const tx_id = try runtime.tx_manager.begin();
+    var snapshot = try runtime.tx_manager.snapshot(tx_id);
+    defer snapshot.deinit();
+
+    var conn_a = TestConnection{
+        .requests = &[_][]const u8{
+            "User |> insert(id = 1, name = \"Alice\", active = true)",
+            "User",
+        },
+    };
+    var conn_b = TestConnection{
+        .requests = &[_][]const u8{
+            "User",
+        },
+    };
+
+    var connection_ptrs = [_]*TestConnection{
+        &conn_a,
+        &conn_b,
+    };
+    var acceptor_state = TestAcceptor{
+        .connections = connection_ptrs[0..],
+    };
+
+    var session = Session.init(&runtime, &catalog);
+    var request_buf: [256]u8 = undefined;
+    var response_buf: [256]u8 = undefined;
+
+    const served = try session.serveAcceptedConnections(
+        acceptor_state.acceptor(),
+        tx_id,
+        &snapshot,
+        request_buf[0..],
+        response_buf[0..],
+    );
+    try std.testing.expectEqual(@as(usize, 2), served);
+
+    try std.testing.expectEqualStrings(
+        "OK rows=0\n",
+        conn_a.response_log[0][0..conn_a.response_lens[0]],
+    );
+    try std.testing.expectEqualStrings(
+        "OK rows=1\n1,Alice,true\n",
+        conn_a.response_log[1][0..conn_a.response_lens[1]],
+    );
+    try std.testing.expectEqualStrings(
+        "OK rows=1\n1,Alice,true\n",
+        conn_b.response_log[0][0..conn_b.response_lens[0]],
     );
 }

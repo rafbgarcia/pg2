@@ -1,8 +1,11 @@
 const std = @import("std");
 const runtime_config = @import("pg2").runtime.config;
+const runtime_bootstrap = @import("pg2").runtime.bootstrap;
+const disk_mod = @import("pg2").simulator.disk;
 
 pub fn main() !void {
     const stdout = std.fs.File.stdout();
+    const allocator = std.heap.page_allocator;
 
     var args = std.process.args();
     _ = args.skip(); // program name
@@ -32,10 +35,41 @@ pub fn main() !void {
         }
     }
 
-    var buf: [128]u8 = undefined;
+    const memory_region = allocator.alloc(u8, memory_bytes) catch {
+        try stdout.writeAll("startup failed: could not allocate memory region\n");
+        return;
+    };
+    defer allocator.free(memory_region);
+
+    var disk = disk_mod.SimulatedDisk.init(allocator);
+    defer disk.deinit();
+
+    var runtime = runtime_bootstrap.BootstrappedRuntime.init(
+        memory_region,
+        disk.storage(),
+        .{},
+    ) catch |err| switch (err) {
+        error.InsufficientMemoryBudget => {
+            try stdout.writeAll(
+                "startup failed: insufficient memory budget for runtime bootstrap\n",
+            );
+            return;
+        },
+        error.InvalidConfig => {
+            try stdout.writeAll("startup failed: invalid runtime configuration\n");
+            return;
+        },
+        error.OutOfMemory => {
+            try stdout.writeAll("startup failed: bootstrap allocation failed\n");
+            return;
+        },
+    };
+    defer runtime.deinit();
+
+    var buf: [160]u8 = undefined;
     const msg = std.fmt.bufPrint(
         &buf,
-        "pg2 — experimental database (memory: {d} bytes)\n",
+        "pg2 — runtime bootstrapped (memory: {d} bytes)\n",
         .{memory_bytes},
     ) catch {
         try stdout.writeAll("startup banner format overflow\n");
