@@ -18,6 +18,22 @@ pub const BufferPoolError = error{
     WalNotFlushed,
 };
 
+/// Optional metadata hook used to determine whether a page_id is expected
+/// to be allocated. When present, all-zero pages for allocated page_ids are
+/// treated as corruption (fail-closed).
+pub const AllocationMetadata = struct {
+    ptr: *anyopaque,
+    vtable: *const VTable,
+
+    pub const VTable = struct {
+        is_allocated: *const fn (ptr: *anyopaque, page_id: u64) bool,
+    };
+
+    pub fn isAllocated(self: AllocationMetadata, page_id: u64) bool {
+        return self.vtable.is_allocated(self.ptr, page_id);
+    }
+};
+
 /// A frame in the buffer pool holds one page in memory.
 const Frame = struct {
     page: Page,
@@ -42,6 +58,7 @@ pub const BufferPool = struct {
     /// protocol: a dirty page cannot be flushed to disk until its LSN has
     /// been durably flushed to the WAL.
     wal: ?*Wal = null,
+    allocation_metadata: ?AllocationMetadata = null,
     clock_hand: usize,
     allocator: std.mem.Allocator,
 
@@ -82,6 +99,10 @@ pub const BufferPool = struct {
         self.allocator.free(self.frames);
     }
 
+    pub fn setAllocationMetadata(self: *BufferPool, allocation_metadata: AllocationMetadata) void {
+        self.allocation_metadata = allocation_metadata;
+    }
+
     /// Pin a page: load it into the buffer pool if not present, increment
     /// its pin count, and return a pointer to it. The page stays in memory
     /// (cannot be evicted) until unpinned.
@@ -114,12 +135,12 @@ pub const BufferPool = struct {
         self.storage.read(page_id, &raw) catch return error.StorageRead;
         frame.page = Page.deserialize(&raw) catch blk: {
             // If deserialize validation fails, the page might be new (all zeroes).
-            // All-zero pages are valid — they're just uninitialized.
-            const all_zero = for (raw) |b| {
-                if (b != 0) break false;
-            } else true;
+            const all_zero = isAllZeroPage(&raw);
 
             if (!all_zero) return error.ChecksumMismatch;
+            if (self.allocation_metadata) |meta| {
+                if (meta.isAllocated(page_id)) return error.ChecksumMismatch;
+            }
             break :blk Page.init(page_id, .free);
         };
 
@@ -211,6 +232,13 @@ pub const BufferPool = struct {
         return error.AllFramesPinned;
     }
 };
+
+fn isAllZeroPage(raw: *const [page_size]u8) bool {
+    for (raw) |b| {
+        if (b != 0) return false;
+    }
+    return true;
+}
 
 // --- Tests ---
 
@@ -473,4 +501,75 @@ test "flushAll returns StorageFsync on deterministic disk fsync failure" {
 
     disk.failFsyncAt(1);
     try std.testing.expectError(error.StorageFsync, pool.flushAll());
+}
+
+test "all-zero page is rejected when allocation metadata marks it allocated" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    const TestAllocationMetadata = struct {
+        allocated_page_id: u64,
+
+        fn metadata(self: *@This()) AllocationMetadata {
+            return .{
+                .ptr = @ptrCast(self),
+                .vtable = &vtable,
+            };
+        }
+
+        const vtable = AllocationMetadata.VTable{
+            .is_allocated = &isAllocatedImpl,
+        };
+
+        fn isAllocatedImpl(ptr: *anyopaque, page_id: u64) bool {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return page_id == self.allocated_page_id;
+        }
+    };
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 2);
+    defer pool.deinit();
+
+    var metadata = TestAllocationMetadata{ .allocated_page_id = 7 };
+    pool.setAllocationMetadata(metadata.metadata());
+
+    try std.testing.expectError(error.ChecksumMismatch, pool.pin(7));
+}
+
+test "all-zero page is accepted when allocation metadata marks it unallocated" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    const TestAllocationMetadata = struct {
+        allocated_page_id: u64,
+
+        fn metadata(self: *@This()) AllocationMetadata {
+            return .{
+                .ptr = @ptrCast(self),
+                .vtable = &vtable,
+            };
+        }
+
+        const vtable = AllocationMetadata.VTable{
+            .is_allocated = &isAllocatedImpl,
+        };
+
+        fn isAllocatedImpl(ptr: *anyopaque, page_id: u64) bool {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            return page_id == self.allocated_page_id;
+        }
+    };
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 2);
+    defer pool.deinit();
+
+    var metadata = TestAllocationMetadata{ .allocated_page_id = 11 };
+    pool.setAllocationMetadata(metadata.metadata());
+
+    const page = try pool.pin(12);
+    try std.testing.expectEqual(@as(u64, 12), page.header.page_id);
+    try std.testing.expectEqual(page_mod.PageType.free, page.header.page_type);
+    pool.unpin(12, false);
 }
