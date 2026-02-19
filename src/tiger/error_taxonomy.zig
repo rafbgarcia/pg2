@@ -101,6 +101,7 @@ pub fn classifyWal(err: wal_mod.WalError) ErrorClass {
 pub fn classifySessionBoundary(err: SessionBoundaryError) ErrorClass {
     return switch (err) {
         error.PoolExhausted => .resource_exhausted,
+        error.QueuePolicyNotImplemented => .fatal,
         error.NoQuerySlotAvailable => .resource_exhausted,
         error.InvalidPoolConn => .fatal,
         error.PoolConnPinned => .fatal,

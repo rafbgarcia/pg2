@@ -5,8 +5,8 @@
 - [x] Milestone 1: `PoolConn` and `ConnectionPool`
 - [x] Milestone 2: Refactor `Session` to use `ConnectionPool`
 - [x] Milestone 3: Refactor `main.zig`
-- [x] Milestone 4 (partial): reject-on-exhaustion + `pool_exhausted_total`
-- [ ] Milestone 4 (remaining): queued overload policy (deferred)
+- [x] Milestone 4 (partial): explicit overload policy (`reject` default, `queue` fail-closed) + `pool_exhausted_total`
+- [ ] Milestone 4 (remaining): actual queued overload behavior (deferred)
 
 Implemented in commits:
 - `3df28ed` — adds `src/server/pool.zig` and pool tests
@@ -61,6 +61,11 @@ Add configurable overload policy to `ConnectionPool`:
 - **Queue** (deferred): Not needed yet. The reject path is sufficient for single-threaded io_uring. Queuing only matters with concurrent request dispatch, which requires the event loop work in Phase 4 to be further along.
 
 Add a `pool_exhausted_total: u64` counter to `ConnectionPool` for monitoring.
+
+Current implementation note:
+- `ConnectionPoolConfig.overload_policy` is now explicit.
+- `.reject` returns `PoolExhausted`.
+- `.queue` currently returns `QueuePolicyNotImplemented` to fail closed until queue semantics are implemented.
 
 ---
 

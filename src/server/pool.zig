@@ -12,9 +12,19 @@ pub const PoolError = tx_mod.TxManagerError ||
     bootstrap_mod.QueryBufferError ||
     error{
         PoolExhausted,
+        QueuePolicyNotImplemented,
         InvalidPoolConn,
         PoolConnPinned,
     };
+
+pub const OverloadPolicy = enum {
+    reject,
+    queue,
+};
+
+pub const ConnectionPoolConfig = struct {
+    overload_policy: OverloadPolicy = .reject,
+};
 
 pub const PoolConn = struct {
     slot_index: u16,
@@ -27,12 +37,21 @@ pub const PoolConn = struct {
 
 pub const ConnectionPool = struct {
     runtime: *BootstrappedRuntime,
+    config: ConnectionPoolConfig,
     pool_exhausted_total: u64,
 
     pub fn init(runtime: *BootstrappedRuntime) ConnectionPool {
+        return initWithConfig(runtime, .{});
+    }
+
+    pub fn initWithConfig(
+        runtime: *BootstrappedRuntime,
+        config: ConnectionPoolConfig,
+    ) ConnectionPool {
         std.debug.assert(runtime.static_allocator.isSealed());
         return .{
             .runtime = runtime,
+            .config = config,
             .pool_exhausted_total = 0,
         };
     }
@@ -41,7 +60,10 @@ pub const ConnectionPool = struct {
         const query_buffers = self.runtime.acquireQueryBuffers() catch |err| {
             if (err == error.NoQuerySlotAvailable) {
                 self.pool_exhausted_total += 1;
-                return error.PoolExhausted;
+                return switch (self.config.overload_policy) {
+                    .reject => error.PoolExhausted,
+                    .queue => error.QueuePolicyNotImplemented,
+                };
             }
             return err;
         };
@@ -175,6 +197,36 @@ test "checkout returns PoolExhausted when all slots are occupied" {
     defer pool.checkin(&held) catch {};
 
     try std.testing.expectError(error.PoolExhausted, pool.checkout());
+    try std.testing.expectEqual(@as(u64, 1), pool.pool_exhausted_total);
+}
+
+test "queue overload policy fails closed when pool is exhausted" {
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    const backing_memory = try std.testing.allocator.alloc(
+        u8,
+        256 * 1024 * 1024,
+    );
+    defer std.testing.allocator.free(backing_memory);
+
+    var runtime = try BootstrappedRuntime.init(
+        backing_memory,
+        disk.storage(),
+        .{ .max_query_slots = 1 },
+    );
+    defer runtime.deinit();
+
+    var pool = ConnectionPool.initWithConfig(&runtime, .{
+        .overload_policy = .queue,
+    });
+    var held = try pool.checkout();
+    defer pool.checkin(&held) catch {};
+
+    try std.testing.expectError(
+        error.QueuePolicyNotImplemented,
+        pool.checkout(),
+    );
     try std.testing.expectEqual(@as(u64, 1), pool.pool_exhausted_total);
 }
 
