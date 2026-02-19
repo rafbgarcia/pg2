@@ -581,6 +581,36 @@ test "record serialize/deserialize roundtrip" {
     try std.testing.expectEqualSlices(u8, payload, result.record.payload);
 }
 
+test "record encode/decode matches golden vector" {
+    const rec = Record{
+        .lsn = 17,
+        .tx_id = 9,
+        .record_type = .insert,
+        .page_id = 513,
+        .payload = "xyz",
+    };
+    const expected = [_]u8{
+        0x11, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x04, 0x01, 0x02, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x03, 0x00, 0x78, 0x79, 0x7A, 0x84, 0x25,
+        0x39, 0x1E,
+    };
+
+    var buf: [64]u8 = undefined;
+    const written = rec.serialize(&buf);
+    try std.testing.expectEqual(@as(usize, expected.len), written.len);
+    try std.testing.expectEqualSlices(u8, &expected, written);
+
+    const decoded = try Record.deserialize(&expected);
+    try std.testing.expectEqual(@as(usize, expected.len), decoded.bytes_consumed);
+    try std.testing.expectEqual(@as(u64, 17), decoded.record.lsn);
+    try std.testing.expectEqual(@as(u64, 9), decoded.record.tx_id);
+    try std.testing.expectEqual(RecordType.insert, decoded.record.record_type);
+    try std.testing.expectEqual(@as(u64, 513), decoded.record.page_id);
+    try std.testing.expectEqualSlices(u8, "xyz", decoded.record.payload);
+}
+
 test "record CRC detects corruption" {
     const rec = Record{
         .lsn = 1,

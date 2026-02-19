@@ -26,7 +26,7 @@ Remaining follow-up items from the code review that we should still address.
   - Why: we improved several modules, but coverage is still uneven.
   - Targets: `src/mvcc/undo.zig`, `src/runtime/bootstrap.zig`, remaining `src/server/session.zig` paths, broader `src/storage/wal.zig`.
 
-- [ ] Golden encode/decode vectors for on-disk formats.
+- [x] Golden encode/decode vectors for on-disk formats.
   - Why: guard against accidental format drift.
   - Targets: `src/storage/row.zig`, `src/storage/wal.zig`, and any other persistent format modules.
 

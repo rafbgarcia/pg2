@@ -470,6 +470,35 @@ test "roundtrip bigint column" {
     try testing.expectEqual(@as(i64, 42), decoded.bigint);
 }
 
+test "row encode/decode matches golden vector" {
+    var schema = RowSchema{};
+    _ = try schema.addColumn("id", .bigint, false);
+    _ = try schema.addColumn("name", .string, false);
+    _ = try schema.addColumn("active", .boolean, false);
+
+    const values = [_]Value{
+        .{ .bigint = 42 },
+        .{ .string = "Bob" },
+        .{ .boolean = true },
+    };
+    const expected = [_]u8{
+        0x32, 0x52, 0x01, 0x00, 0x2A, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x0F, 0x00, 0x01, 0x03,
+        0x00, 0x42, 0x6F, 0x62,
+    };
+
+    var buf: [256]u8 = undefined;
+    const written = try encodeRow(&schema, &values, &buf);
+    try testing.expectEqual(@as(u16, expected.len), written);
+    try testing.expectEqualSlices(u8, &expected, buf[0..written]);
+
+    var decoded: [3]Value = undefined;
+    try decodeRowChecked(&schema, &expected, &decoded);
+    try testing.expectEqual(@as(i64, 42), decoded[0].bigint);
+    try testing.expectEqualSlices(u8, "Bob", decoded[1].string);
+    try testing.expect(decoded[2].boolean);
+}
+
 test "roundtrip int column" {
     var schema = RowSchema{};
     _ = try schema.addColumn("count", .int, false);
