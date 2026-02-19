@@ -495,6 +495,54 @@ fn runLongWalPageInterleaving(seed: u64) !ScenarioOutcome {
     return .{ .signature = h.final() };
 }
 
+fn runBufferPoolIoFaultInterleaving(seed: u64) !ScenarioOutcome {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rand = prng.random();
+
+    var disk = SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 3);
+    defer pool.deinit();
+
+    const page_a = 900 + rand.uintLessThan(u64, 16);
+    const page_b = 950 + rand.uintLessThan(u64, 16);
+
+    // 1) Deterministic read failure then successful retry.
+    disk.failReadAt(disk.reads + 1);
+    try std.testing.expectError(error.StorageRead, pool.pin(page_a));
+    const page_a_ptr = try pool.pin(page_a);
+    page_a_ptr.header.page_type = .heap;
+    page_a_ptr.header.lsn = 1;
+    @memset(&page_a_ptr.content, 0x2D);
+    pool.unpin(page_a, true);
+
+    // 2) Deterministic write failure during flush, then retry.
+    disk.failWriteAt(disk.writes + 1);
+    try std.testing.expectError(error.StorageWrite, pool.flush(page_a));
+    try pool.flush(page_a);
+
+    // 3) Dirty second page and deterministically fail fsync in flushAll.
+    const page_b_ptr = try pool.pin(page_b);
+    page_b_ptr.header.page_type = .heap;
+    page_b_ptr.header.lsn = 2;
+    @memset(&page_b_ptr.content, 0x5E);
+    pool.unpin(page_b, true);
+
+    disk.failFsyncAt(disk.fsyncs + 1);
+    try std.testing.expectError(error.StorageFsync, pool.flushAll());
+    try pool.flushAll();
+
+    var h = std.hash.Wyhash.init(seed ^ 0xA11CE008);
+    h.update(std.mem.asBytes(&page_a));
+    h.update(std.mem.asBytes(&page_b));
+    h.update(std.mem.asBytes(&disk.reads));
+    h.update(std.mem.asBytes(&disk.writes));
+    h.update(std.mem.asBytes(&disk.fsyncs));
+    h.update(std.mem.asBytes(&pool.flushes));
+    return .{ .signature = h.final() };
+}
+
 const seed_set = [_]u64{
     0xC0FFEE01,
     0xC0FFEEA5,
@@ -567,6 +615,14 @@ test "seeded schedule: long WAL and page interleaving remains replay-determinist
     }
 }
 
+test "seeded schedule: buffer-pool I/O fault interleaving remains replay-deterministic" {
+    for (seed_set) |seed| {
+        const first = try runBufferPoolIoFaultInterleaving(seed);
+        const second = try runBufferPoolIoFaultInterleaving(seed);
+        try std.testing.expectEqual(first.signature, second.signature);
+    }
+}
+
 test "ci seed sweep: extended deterministic replay coverage for short schedules" {
     std.debug.assert(ci_short_seed_set.len == ci_short_seed_budget);
     try expectReplayDeterministicAcrossSeeds(
@@ -593,6 +649,11 @@ test "ci seed sweep: extended deterministic replay coverage for short schedules"
         "combined_wal_and_page_corruption",
         ci_short_seed_set[0..],
         runCombinedWalAndPageCorruption,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "buffer_pool_io_fault_interleaving",
+        ci_short_seed_set[0..],
+        runBufferPoolIoFaultInterleaving,
     );
 }
 
