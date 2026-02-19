@@ -36,7 +36,7 @@ Remaining follow-up items from the code review that we should still address.
 
 ## Lower Priority / Cleanup
 
-- [ ] Reduce split-logic duplication in B-tree (`splitAndInsert` vs `splitInternal`).
+- [x] Reduce split-logic duplication in B-tree (`splitAndInsert` vs `splitInternal`).
   - Why: simplify maintenance and reduce divergence risk.
   - Files: `src/storage/btree.zig`.
 

@@ -667,48 +667,41 @@ pub const BTree = struct {
         const old_count = LeafNode.cellCount(&leaf_page.content);
         const total: usize = @as(usize, old_count) + 1;
 
-        // First pass: compute total key bytes needed.
-        var total_key_bytes: usize = 0;
-        for (0..old_count) |idx_usize| {
-            total_key_bytes += LeafNode.getKey(&leaf_page.content, @intCast(idx_usize)).len;
-        }
-        total_key_bytes += key.len;
+        const key_plan = planSplitKeyMerge(
+            *const [content_size]u8,
+            &leaf_page.content,
+            old_count,
+            key,
+            LeafNode.getKey,
+        );
 
         // Allocate entries array and key data buffer.
         if (total > max_leaf_split_entries) return error.Corruption;
-        if (total_key_bytes > content_size) return error.Corruption;
+        if (key_plan.total_key_bytes > content_size) return error.Corruption;
         var entries: [max_leaf_split_entries]TempLeafEntry = undefined;
         var key_buf: [content_size]u8 = undefined;
+        var owned_old_keys: [max_leaf_split_entries - 1][]const u8 = undefined;
+        const buf_offset = copyOwnedExistingKeys(
+            *const [content_size]u8,
+            &leaf_page.content,
+            old_count,
+            &key_buf,
+            owned_old_keys[0..old_count],
+            LeafNode.getKey,
+        );
+        const owned_new_key = key_buf[buf_offset..][0..key.len];
+        @memcpy(owned_new_key, key);
 
-        // Second pass: copy keys into owned buffer and build entries array.
-        var buf_offset: usize = 0;
-        var inserted = false;
-        var ki: usize = 0;
-        for (0..old_count) |idx_usize| {
-            const idx: u16 = @intCast(idx_usize);
-            const existing_key = LeafNode.getKey(&leaf_page.content, idx);
-            if (!inserted) {
-                if (std.mem.order(u8, key, existing_key) == .lt) {
-                    const owned = key_buf[buf_offset..][0..key.len];
-                    @memcpy(owned, key);
-                    buf_offset += key.len;
-                    entries[ki] = .{ .key = owned, .row_id = row_id };
-                    ki += 1;
-                    inserted = true;
-                }
+        for (0..total) |entry_idx| {
+            if (entry_idx == key_plan.insert_pos) {
+                entries[entry_idx] = .{ .key = owned_new_key, .row_id = row_id };
+                continue;
             }
-            const owned = key_buf[buf_offset..][0..existing_key.len];
-            @memcpy(owned, existing_key);
-            buf_offset += existing_key.len;
-            entries[ki] = .{ .key = owned, .row_id = LeafNode.getRowId(&leaf_page.content, idx) };
-            ki += 1;
-        }
-        if (!inserted) {
-            const owned = key_buf[buf_offset..][0..key.len];
-            @memcpy(owned, key);
-            buf_offset += key.len;
-            entries[ki] = .{ .key = owned, .row_id = row_id };
-            ki += 1;
+            const old_idx: usize = if (entry_idx < key_plan.insert_pos) entry_idx else entry_idx - 1;
+            entries[entry_idx] = .{
+                .key = owned_old_keys[old_idx],
+                .row_id = LeafNode.getRowId(&leaf_page.content, @intCast(old_idx)),
+            };
         }
 
         const old_right_sibling = LeafNode.rightSibling(&leaf_page.content);
@@ -814,46 +807,39 @@ pub const BTree = struct {
 
         const total: usize = @as(usize, old_count) + 1;
         if (total > max_internal_split_entries) return error.Corruption;
-
-        // Compute total key bytes for owned copy.
-        var total_key_bytes: usize = 0;
-        for (0..old_count) |idx_usize| {
-            total_key_bytes += InternalNode.getKey(&node_page.content, @intCast(idx_usize)).len;
-        }
-        total_key_bytes += new_key.len;
-        if (total_key_bytes > content_size) return error.Corruption;
+        const key_plan = planSplitKeyMerge(
+            *const [content_size]u8,
+            &node_page.content,
+            old_count,
+            new_key,
+            InternalNode.getKey,
+        );
+        if (key_plan.total_key_bytes > content_size) return error.Corruption;
 
         var entries: [max_internal_split_entries]TempInternalEntry = undefined;
         var key_buf: [content_size]u8 = undefined;
+        var owned_old_keys: [max_internal_split_entries - 1][]const u8 = undefined;
+        const buf_offset = copyOwnedExistingKeys(
+            *const [content_size]u8,
+            &node_page.content,
+            old_count,
+            &key_buf,
+            owned_old_keys[0..old_count],
+            InternalNode.getKey,
+        );
+        const owned_new_key = key_buf[buf_offset..][0..new_key.len];
+        @memcpy(owned_new_key, new_key);
 
-        var buf_offset: usize = 0;
-        var inserted = false;
-        var ki: usize = 0;
-        for (0..old_count) |idx_usize| {
-            const idx: u16 = @intCast(idx_usize);
-            const existing_key = InternalNode.getKey(&node_page.content, idx);
-            if (!inserted) {
-                if (std.mem.order(u8, new_key, existing_key) == .lt) {
-                    const owned = key_buf[buf_offset..][0..new_key.len];
-                    @memcpy(owned, new_key);
-                    buf_offset += new_key.len;
-                    entries[ki] = .{ .key = owned, .right_child = new_right_child };
-                    ki += 1;
-                    inserted = true;
-                }
+        for (0..total) |entry_idx| {
+            if (entry_idx == key_plan.insert_pos) {
+                entries[entry_idx] = .{ .key = owned_new_key, .right_child = new_right_child };
+                continue;
             }
-            const owned = key_buf[buf_offset..][0..existing_key.len];
-            @memcpy(owned, existing_key);
-            buf_offset += existing_key.len;
-            entries[ki] = .{ .key = owned, .right_child = InternalNode.getRightChild(&node_page.content, idx) };
-            ki += 1;
-        }
-        if (!inserted) {
-            const owned = key_buf[buf_offset..][0..new_key.len];
-            @memcpy(owned, new_key);
-            buf_offset += new_key.len;
-            entries[ki] = .{ .key = owned, .right_child = new_right_child };
-            ki += 1;
+            const old_idx: usize = if (entry_idx < key_plan.insert_pos) entry_idx else entry_idx - 1;
+            entries[entry_idx] = .{
+                .key = owned_old_keys[old_idx],
+                .right_child = InternalNode.getRightChild(&node_page.content, @intCast(old_idx)),
+            };
         }
 
         self.pool.unpin(node_id, false);
@@ -1040,6 +1026,56 @@ const TempInternalEntry = struct {
     key: []const u8,
     right_child: u64,
 };
+
+const SplitKeyPlan = struct {
+    insert_pos: usize,
+    total_key_bytes: usize,
+};
+
+fn planSplitKeyMerge(
+    comptime ContentPtr: type,
+    content: ContentPtr,
+    old_count: u16,
+    new_key: []const u8,
+    comptime getKeyFn: fn (ContentPtr, u16) []const u8,
+) SplitKeyPlan {
+    var insert_pos: usize = @as(usize, old_count);
+    var total_key_bytes: usize = new_key.len;
+    for (0..old_count) |idx_usize| {
+        const idx: u16 = @intCast(idx_usize);
+        const existing_key = getKeyFn(content, idx);
+        total_key_bytes += existing_key.len;
+        if (insert_pos == @as(usize, old_count) and std.mem.order(u8, new_key, existing_key) == .lt) {
+            insert_pos = idx_usize;
+        }
+    }
+    return .{
+        .insert_pos = insert_pos,
+        .total_key_bytes = total_key_bytes,
+    };
+}
+
+fn copyOwnedExistingKeys(
+    comptime ContentPtr: type,
+    content: ContentPtr,
+    old_count: u16,
+    key_buf: *[content_size]u8,
+    owned_keys: [][]const u8,
+    comptime getKeyFn: fn (ContentPtr, u16) []const u8,
+) usize {
+    std.debug.assert(owned_keys.len >= old_count);
+
+    var buf_offset: usize = 0;
+    for (0..old_count) |idx_usize| {
+        const idx: u16 = @intCast(idx_usize);
+        const existing_key = getKeyFn(content, idx);
+        const owned = key_buf[buf_offset..][0..existing_key.len];
+        @memcpy(owned, existing_key);
+        owned_keys[idx_usize] = owned;
+        buf_offset += existing_key.len;
+    }
+    return buf_offset;
+}
 
 // ============================================================================
 // Byte read/write helpers (little-endian)
