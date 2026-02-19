@@ -88,15 +88,16 @@ For any PR touching core DB code, complete the mandatory checklist in `docs/TIGE
   - [x] Heap storage (slotted pages, in-place update) — `src/storage/heap.zig`
   - [x] Undo-log MVCC + transaction manager — `src/mvcc/`
   - [x] Buffer pool enforces WAL protocol (page LSN must be flushed before page flush)
-- [ ] **Phase 3: Query Layer**
+- [x] **Phase 3: Query Layer**
   - [x] pg2 query language parser (tokenizer, AST, expression parser, statement parser)
   - [x] Schema / catalog management (catalog metadata store, schema loader)
   - [x] Executor: scan, filter, mutations — `src/executor/`
-  - [ ] Executor: sort, aggregation, joins
+  - [x] Executor: sort, aggregation, joins — integrated in `src/executor/executor.zig`
 - [ ] **Phase 4: Server** *(Linux-only target; use Docker for dev/test on macOS)*
   - [x] Session request path (tokenize → parse → execute → serialize, no network I/O)
-  - [ ] Connection handling (custom wire protocol)
-  - [ ] Runtime statistics + introspection
+  - [x] Transport abstractions + TCP and io_uring backends — `src/server/`
+  - [ ] Connection pooling (two-layer: client connections + pool connections)
+  - [ ] Runtime statistics exposure + query introspection (`inspect`)
 - [ ] **Phase 5: Replication**
   - [ ] WAL streaming to replicas
   - [ ] Replica read path
@@ -108,3 +109,4 @@ For any PR touching core DB code, complete the mandatory checklist in `docs/TIGE
 - Built-in online migrations
 - Use in browser (builtin online migrations could be useful)
 - **Built-in connection pool**: Two-layer architecture separating client connections from pool connections. Client connections (TCP sockets) are long-lived and cheap — just a socket fd + auth context. Pool connections are internal execution contexts (txn state, scratch buffers) with a fixed pool size. Clients borrow a pool connection per query; pool connection is returned after the query completes. During multi-statement transactions, the pool connection is pinned to the client until COMMIT/ROLLBACK. Subscription handles are separate from query connections and don't count toward the pool limit.
+- Built in AI assistant. e.g. `pg2 extract the user logs from the Log table into a new UserLog table`
