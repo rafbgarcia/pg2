@@ -5,6 +5,7 @@ const parser_mod = @import("../parser/parser.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
 const exec_mod = @import("../executor/executor.zig");
 const transport_mod = @import("transport.zig");
+const tiger_errors = @import("../tiger/error_taxonomy.zig");
 const row_mod = @import("../storage/row.zig");
 const catalog_mod = @import("../catalog/catalog.zig");
 const tx_mod = @import("../mvcc/transaction.zig");
@@ -110,12 +111,21 @@ pub const Session = struct {
             const request = request_opt orelse break;
             if (request.len > request_buf.len) return error.RequestTooLarge;
 
-            const response = try self.handleRequest(
+            const response = self.handleRequest(
                 tx_id,
                 snapshot,
                 request,
                 response_buf,
-            );
+            ) catch |err| {
+                const class = tiger_errors.classifySessionBoundary(err);
+                const boundary_msg = try serializeBoundaryError(
+                    response_buf,
+                    class,
+                    err,
+                );
+                try connection.writeResponse(boundary_msg);
+                continue;
+            };
             try connection.writeResponse(
                 response_buf[0..response.bytes_written],
             );
@@ -150,6 +160,20 @@ pub const Session = struct {
 fn fixedMessage(message: []const u8) []const u8 {
     const end = std.mem.indexOfScalar(u8, message, 0) orelse message.len;
     return message[0..end];
+}
+
+fn serializeBoundaryError(
+    out: []u8,
+    class: tiger_errors.ErrorClass,
+    err: anyerror,
+) error{ResponseTooLarge}![]const u8 {
+    var stream = std.io.fixedBufferStream(out);
+    const writer = stream.writer();
+    writer.print(
+        "ERR class={s} code={s}\n",
+        .{ @tagName(class), @errorName(err) },
+    ) catch return error.ResponseTooLarge;
+    return out[0..stream.pos];
 }
 
 fn serializeQueryResult(
@@ -452,5 +476,105 @@ test "session accept loop routes multiple connections through handleRequest" {
     try std.testing.expectEqualStrings(
         "OK rows=1\n1,Alice,true\n",
         conn_b.response_log[0][0..conn_b.response_lens[0]],
+    );
+}
+
+test "session accept loop emits classified boundary error on query-slot exhaustion" {
+    const TestConnection = struct {
+        request: []const u8,
+        response_log: [2][128]u8 = undefined,
+        response_lens: [2]usize = [_]usize{0} ** 2,
+        read_done: bool = false,
+        write_index: usize = 0,
+
+        fn connection(self: *@This()) Connection {
+            return .{
+                .ptr = @ptrCast(self),
+                .vtable = &vtable,
+            };
+        }
+
+        const vtable = Connection.VTable{
+            .readRequest = &readRequest,
+            .writeResponse = &writeResponse,
+        };
+
+        fn readRequest(
+            ptr: *anyopaque,
+            out: []u8,
+        ) transport_mod.ConnectionError!?[]const u8 {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.read_done) return null;
+            if (self.request.len > out.len) return error.RequestTooLarge;
+            @memcpy(out[0..self.request.len], self.request);
+            self.read_done = true;
+            return out[0..self.request.len];
+        }
+
+        fn writeResponse(
+            ptr: *anyopaque,
+            data: []const u8,
+        ) transport_mod.ConnectionError!void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            if (self.write_index >= self.response_log.len) {
+                return error.WriteFailed;
+            }
+            if (data.len > self.response_log[self.write_index].len) {
+                return error.ResponseTooLarge;
+            }
+            @memcpy(self.response_log[self.write_index][0..data.len], data);
+            self.response_lens[self.write_index] = data.len;
+            self.write_index += 1;
+        }
+    };
+
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    const backing_memory = try std.testing.allocator.alloc(
+        u8,
+        256 * 1024 * 1024,
+    );
+    defer std.testing.allocator.free(backing_memory);
+
+    var runtime = try BootstrappedRuntime.init(
+        backing_memory,
+        disk.storage(),
+        .{ .max_query_slots = 1 },
+    );
+
+    var catalog = Catalog{};
+    try initUserModel(&catalog, &runtime);
+
+    const tx_id = try runtime.tx_manager.begin();
+    var snapshot = try runtime.tx_manager.snapshot(tx_id);
+    defer snapshot.deinit();
+
+    // Exhaust the only slot to force a runtime boundary error.
+    const occupied_slot = try runtime.acquireQueryBuffers();
+    defer runtime.releaseQueryBuffers(occupied_slot.slot_index) catch {
+        @panic("occupied slot release failed");
+    };
+
+    var conn = TestConnection{
+        .request = "User",
+    };
+
+    var session = Session.init(&runtime, &catalog);
+    var request_buf: [64]u8 = undefined;
+    var response_buf: [128]u8 = undefined;
+
+    try session.serveConnection(
+        conn.connection(),
+        tx_id,
+        &snapshot,
+        request_buf[0..],
+        response_buf[0..],
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), conn.write_index);
+    try std.testing.expectEqualStrings(
+        "ERR class=resource_exhausted code=NoQuerySlotAvailable\n",
+        conn.response_log[0][0..conn.response_lens[0]],
     );
 }

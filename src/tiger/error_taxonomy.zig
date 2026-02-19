@@ -3,6 +3,7 @@ const mutation_mod = @import("../executor/mutation.zig");
 const buffer_pool_mod = @import("../storage/buffer_pool.zig");
 const wal_mod = @import("../storage/wal.zig");
 const tx_mod = @import("../mvcc/transaction.zig");
+const request_mod = @import("../runtime/request.zig");
 
 /// Stable machine-actionable Tiger error classes.
 pub const ErrorClass = enum(u8) {
@@ -10,6 +11,10 @@ pub const ErrorClass = enum(u8) {
     resource_exhausted,
     corruption,
     fatal,
+};
+
+pub const SessionBoundaryError = request_mod.RequestError || error{
+    ResponseTooLarge,
 };
 
 pub fn classifyBufferPool(err: buffer_pool_mod.BufferPoolError) ErrorClass {
@@ -90,9 +95,25 @@ pub fn classifyWal(err: wal_mod.WalError) ErrorClass {
     };
 }
 
+pub fn classifySessionBoundary(err: SessionBoundaryError) ErrorClass {
+    return switch (err) {
+        error.NoQuerySlotAvailable => .resource_exhausted,
+        error.InvalidQuerySlot => .fatal,
+        error.OutOfMemory => .resource_exhausted,
+        error.ResponseTooLarge => .resource_exhausted,
+    };
+}
+
 test "scan corruption class mapping" {
     try @import("std").testing.expectEqual(
         ErrorClass.corruption,
         classifyScan(error.Corruption),
+    );
+}
+
+test "session boundary slot exhaustion maps to resource_exhausted" {
+    try @import("std").testing.expectEqual(
+        ErrorClass.resource_exhausted,
+        classifySessionBoundary(error.NoQuerySlotAvailable),
     );
 }
