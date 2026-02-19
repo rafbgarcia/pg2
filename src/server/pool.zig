@@ -26,6 +26,14 @@ pub const ConnectionPoolConfig = struct {
     overload_policy: OverloadPolicy = .reject,
 };
 
+pub const PoolStats = struct {
+    overload_policy: OverloadPolicy,
+    pool_size: u16,
+    checked_out: u16,
+    pinned: u16,
+    pool_exhausted_total: u64,
+};
+
 pub const PoolConn = struct {
     slot_index: u16,
     query_buffers: QueryBuffers,
@@ -38,6 +46,8 @@ pub const PoolConn = struct {
 pub const ConnectionPool = struct {
     runtime: *BootstrappedRuntime,
     config: ConnectionPoolConfig,
+    checked_out_count: u16,
+    pinned_count: u16,
     pool_exhausted_total: u64,
 
     pub fn init(runtime: *BootstrappedRuntime) ConnectionPool {
@@ -52,6 +62,8 @@ pub const ConnectionPool = struct {
         return .{
             .runtime = runtime,
             .config = config,
+            .checked_out_count = 0,
+            .pinned_count = 0,
             .pool_exhausted_total = 0,
         };
     }
@@ -73,6 +85,8 @@ pub const ConnectionPool = struct {
         errdefer self.runtime.tx_manager.abort(tx_id) catch {};
 
         const snapshot = try self.runtime.tx_manager.snapshot(tx_id);
+        std.debug.assert(self.checked_out_count < self.runtime.max_query_slots);
+        self.checked_out_count += 1;
 
         return .{
             .slot_index = query_buffers.slot_index,
@@ -91,21 +105,37 @@ pub const ConnectionPool = struct {
         conn.snapshot.deinit();
         try self.runtime.tx_manager.commit(conn.tx_id);
         try self.runtime.releaseQueryBuffers(conn.slot_index);
+        std.debug.assert(self.checked_out_count > 0);
+        self.checked_out_count -= 1;
 
         conn.checked_out = false;
     }
 
     pub fn pin(self: *ConnectionPool, conn: *PoolConn) PoolError!void {
-        _ = self;
         if (!conn.checked_out) return error.InvalidPoolConn;
+        if (conn.pinned) return error.PoolConnPinned;
+        std.debug.assert(self.pinned_count < self.checked_out_count);
+        self.pinned_count += 1;
         conn.pinned = true;
     }
 
     pub fn unpin(self: *ConnectionPool, conn: *PoolConn) PoolError!void {
         if (!conn.checked_out) return error.InvalidPoolConn;
         if (!conn.pinned) return error.InvalidPoolConn;
+        std.debug.assert(self.pinned_count > 0);
+        self.pinned_count -= 1;
         conn.pinned = false;
         try self.checkin(conn);
+    }
+
+    pub fn snapshotStats(self: *const ConnectionPool) PoolStats {
+        return .{
+            .overload_policy = self.config.overload_policy,
+            .pool_size = self.runtime.max_query_slots,
+            .checked_out = self.checked_out_count,
+            .pinned = self.pinned_count,
+            .pool_exhausted_total = self.pool_exhausted_total,
+        };
     }
 };
 
@@ -278,4 +308,43 @@ test "pin and unpin keeps lease until unpin checkin" {
 
     try pool.unpin(&conn);
     try std.testing.expectError(error.InvalidPoolConn, pool.checkin(&conn));
+}
+
+test "snapshotStats tracks checkout pin and checkin counters" {
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    const backing_memory = try std.testing.allocator.alloc(
+        u8,
+        256 * 1024 * 1024,
+    );
+    defer std.testing.allocator.free(backing_memory);
+
+    var runtime = try BootstrappedRuntime.init(
+        backing_memory,
+        disk.storage(),
+        .{ .max_query_slots = 2 },
+    );
+    defer runtime.deinit();
+
+    var pool = ConnectionPool.init(&runtime);
+    const initial = pool.snapshotStats();
+    try std.testing.expectEqual(@as(u16, 2), initial.pool_size);
+    try std.testing.expectEqual(@as(u16, 0), initial.checked_out);
+    try std.testing.expectEqual(@as(u16, 0), initial.pinned);
+
+    var conn = try pool.checkout();
+    const checked_out = pool.snapshotStats();
+    try std.testing.expectEqual(@as(u16, 1), checked_out.checked_out);
+    try std.testing.expectEqual(@as(u16, 0), checked_out.pinned);
+
+    try pool.pin(&conn);
+    const pinned = pool.snapshotStats();
+    try std.testing.expectEqual(@as(u16, 1), pinned.checked_out);
+    try std.testing.expectEqual(@as(u16, 1), pinned.pinned);
+
+    try pool.unpin(&conn);
+    const released = pool.snapshotStats();
+    try std.testing.expectEqual(@as(u16, 0), released.checked_out);
+    try std.testing.expectEqual(@as(u16, 0), released.pinned);
 }

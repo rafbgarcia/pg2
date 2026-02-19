@@ -4,6 +4,7 @@ const request_mod = @import("../runtime/request.zig");
 const pool_mod = @import("pool.zig");
 const parser_mod = @import("../parser/parser.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
+const ast_mod = @import("../parser/ast.zig");
 const exec_mod = @import("../executor/executor.zig");
 const transport_mod = @import("transport.zig");
 const tiger_errors = @import("../tiger/error_taxonomy.zig");
@@ -16,6 +17,8 @@ const BootstrappedRuntime = bootstrap_mod.BootstrappedRuntime;
 const Catalog = catalog_mod.Catalog;
 const ConnectionPool = pool_mod.ConnectionPool;
 const PoolConn = pool_mod.PoolConn;
+const PoolStats = pool_mod.PoolStats;
+const NodeTag = ast_mod.NodeTag;
 const Value = row_mod.Value;
 const Acceptor = transport_mod.Acceptor;
 const Connection = transport_mod.Connection;
@@ -48,6 +51,7 @@ pub const Session = struct {
 
     pub fn handleRequest(
         self: *Session,
+        pool: *const ConnectionPool,
         pool_conn: *const PoolConn,
         source: []const u8,
         out: []u8,
@@ -80,6 +84,7 @@ pub const Session = struct {
                 .is_query_error = true,
             };
         }
+        const include_inspect = astHasInspectOp(&parsed.ast);
 
         var result = try request_mod.executeWithPoolConn(
             self.runtime,
@@ -93,7 +98,8 @@ pub const Session = struct {
         );
         defer result.deinit();
 
-        try serializeQueryResult(writer, &result);
+        const pool_stats: ?PoolStats = if (include_inspect) pool.snapshotStats() else null;
+        try serializeQueryResult(writer, &result, pool_stats);
         return .{
             .bytes_written = stream.pos,
             .is_query_error = result.has_error,
@@ -134,6 +140,7 @@ pub const Session = struct {
             };
 
             const response = self.handleRequest(
+                pool,
                 &pool_conn,
                 request,
                 response_buf,
@@ -199,6 +206,7 @@ fn serializeBoundaryError(
 fn serializeQueryResult(
     writer: anytype,
     result: *const exec_mod.QueryResult,
+    pool_stats: ?PoolStats,
 ) error{ResponseTooLarge}!void {
     std.debug.assert(result.row_count <= result.rows.len);
     if (result.getError()) |message| {
@@ -223,6 +231,48 @@ fn serializeQueryResult(
         }
         writer.writeAll("\n") catch return error.ResponseTooLarge;
     }
+
+    if (pool_stats) |stats| {
+        try serializeInspectStats(writer, &result.stats, stats);
+    }
+}
+
+fn serializeInspectStats(
+    writer: anytype,
+    exec_stats: *const exec_mod.ExecStats,
+    pool_stats: PoolStats,
+) error{ResponseTooLarge}!void {
+    writer.print(
+        "INSPECT exec rows_scanned={d} rows_matched={d} rows_returned={d} rows_inserted={d} rows_updated={d} rows_deleted={d} pages_read={d} pages_written={d}\n",
+        .{
+            exec_stats.rows_scanned,
+            exec_stats.rows_matched,
+            exec_stats.rows_returned,
+            exec_stats.rows_inserted,
+            exec_stats.rows_updated,
+            exec_stats.rows_deleted,
+            exec_stats.pages_read,
+            exec_stats.pages_written,
+        },
+    ) catch return error.ResponseTooLarge;
+    writer.print(
+        "INSPECT pool policy={s} size={d} checked_out={d} pinned={d} exhausted_total={d}\n",
+        .{
+            @tagName(pool_stats.overload_policy),
+            pool_stats.pool_size,
+            pool_stats.checked_out,
+            pool_stats.pinned,
+            pool_stats.pool_exhausted_total,
+        },
+    ) catch return error.ResponseTooLarge;
+}
+
+fn astHasInspectOp(ast: *const ast_mod.Ast) bool {
+    var i: u16 = 0;
+    while (i < ast.node_count) : (i += 1) {
+        if (ast.nodes[i].tag == NodeTag.op_inspect) return true;
+    }
+    return false;
 }
 
 fn serializeValue(
@@ -286,6 +336,7 @@ test "session request path releases leased query slot after serialization" {
 
     var first_conn = try pool.checkout();
     const first = try session.handleRequest(
+        &pool,
         &first_conn,
         "User",
         response_buf[0..],
@@ -299,6 +350,7 @@ test "session request path releases leased query slot after serialization" {
 
     var second_conn = try pool.checkout();
     const second = try session.handleRequest(
+        &pool,
         &second_conn,
         "User",
         response_buf[0..],
@@ -336,6 +388,7 @@ test "session request path serializes query results" {
 
     var insert_conn = try pool.checkout();
     _ = try session.handleRequest(
+        &pool,
         &insert_conn,
         "User |> insert(id = 1, name = \"Alice\", active = true)",
         response_buf[0..],
@@ -344,6 +397,7 @@ test "session request path serializes query results" {
 
     var read_conn = try pool.checkout();
     const result = try session.handleRequest(
+        &pool,
         &read_conn,
         "User",
         response_buf[0..],
@@ -353,6 +407,57 @@ test "session request path serializes query results" {
     try std.testing.expectEqualStrings(
         "OK rows=1\n1,Alice,true\n",
         response_buf[0..result.bytes_written],
+    );
+}
+
+test "session inspect appends execution and pool stats" {
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    const backing_memory = try std.testing.allocator.alloc(
+        u8,
+        256 * 1024 * 1024,
+    );
+    defer std.testing.allocator.free(backing_memory);
+
+    var runtime = try BootstrappedRuntime.init(
+        backing_memory,
+        disk.storage(),
+        .{ .max_query_slots = 1 },
+    );
+
+    var catalog = Catalog{};
+    try initUserModel(&catalog, &runtime);
+
+    var session = Session.init(&runtime, &catalog);
+    var pool = ConnectionPool.init(&runtime);
+    var response_buf: [1024]u8 = undefined;
+
+    var conn = try pool.checkout();
+    const result = try session.handleRequest(
+        &pool,
+        &conn,
+        "User |> inspect",
+        response_buf[0..],
+    );
+    try pool.checkin(&conn);
+    try std.testing.expect(!result.is_query_error);
+
+    const output = response_buf[0..result.bytes_written];
+    try std.testing.expect(std.mem.indexOf(u8, output, "OK rows=0\n") != null);
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "INSPECT exec rows_scanned=",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "INSPECT pool policy=reject size=1 checked_out=1 pinned=0 exhausted_total=0\n",
+        ) != null,
     );
 }
 
