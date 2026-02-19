@@ -235,16 +235,21 @@ const RecoveryEnvelope = struct {
 pub const Wal = struct {
     storage: io.Storage,
     allocator: std.mem.Allocator,
+    inline_buffer: [io.page_size]u8,
 
     /// Monotonically increasing log sequence number.
     next_lsn: u64 = 1,
     /// LSN up to which the WAL has been durably fsynced.
     flushed_lsn: u64 = 0,
 
-    /// In-memory write buffer. Records accumulate here until flush.
-    buffer: std.ArrayList(u8) = .{},
-    /// Optional explicit cap used to guarantee no post-seal buffer growth.
-    buffer_capacity_limit: ?usize = null,
+    /// In-memory write buffer carved at startup (fixed capacity).
+    buffer: []u8 = &.{},
+    /// Number of valid bytes currently buffered.
+    buffer_len: usize = 0,
+    /// True when `buffer` was allocator-backed (not inline storage).
+    buffer_owned: bool = false,
+    /// When true, runtime growth is forbidden and append fails closed.
+    buffer_fixed_capacity: bool = false,
     /// LSN of the most recent record in the buffer (unflushed).
     buffer_max_lsn: u64 = 0,
 
@@ -273,24 +278,39 @@ pub const Wal = struct {
         return .{
             .storage = storage,
             .allocator = allocator,
+            .inline_buffer = undefined,
         };
     }
 
     pub fn deinit(self: *Wal) void {
-        self.buffer.deinit(self.allocator);
+        if (self.buffer_owned) {
+            self.allocator.free(self.buffer);
+        }
     }
 
     /// Reserve WAL buffer bytes during startup and lock append growth to this
     /// ceiling. Useful with sealed allocators where runtime growth is forbidden.
     pub fn reserveBufferCapacity(self: *Wal, capacity_bytes: usize) WalError!void {
-        self.buffer.ensureTotalCapacity(self.allocator, capacity_bytes) catch
+        self.ensureInlineBufferBound();
+        if (self.buffer_owned) return error.OutOfMemory;
+        if (capacity_bytes <= self.inline_buffer.len) {
+            self.buffer = self.inline_buffer[0..capacity_bytes];
+            self.buffer_len = 0;
+            self.buffer_owned = false;
+            self.buffer_fixed_capacity = true;
+            return;
+        }
+        self.buffer = self.allocator.alloc(u8, capacity_bytes) catch
             return error.OutOfMemory;
-        self.buffer_capacity_limit = capacity_bytes;
+        self.buffer_len = 0;
+        self.buffer_owned = true;
+        self.buffer_fixed_capacity = true;
     }
 
     /// Append a record to the WAL. Returns the LSN assigned to this record.
     /// The record is buffered in memory — call `flush()` to make it durable.
     pub fn append(self: *Wal, tx_id: u64, record_type: RecordType, page_id: u64, payload: []const u8) WalError!u64 {
+        self.ensureInlineBufferBound();
         if (payload.len > max_payload_size) return error.PayloadTooLarge;
         const lsn = self.next_lsn;
         self.next_lsn += 1;
@@ -304,13 +324,16 @@ pub const Wal = struct {
         };
 
         const size = rec.serializedSize();
-        const start = self.buffer.items.len;
-        if (self.buffer_capacity_limit) |limit| {
-            if (start + size > limit) return error.OutOfMemory;
+        const start = self.buffer_len;
+        if (self.buffer.len == 0) return error.OutOfMemory;
+        if (start + size > self.buffer.len) {
+            if (self.buffer_fixed_capacity) return error.OutOfMemory;
+            // Runtime is expected to pre-reserve at startup. Tests and
+            // non-sealed allocators may grow dynamically as a fallback.
+            try self.growBuffer(start + size);
         }
-        self.buffer.resize(self.allocator, start + size) catch
-            return error.OutOfMemory;
-        _ = rec.serialize(self.buffer.items[start..]);
+        _ = rec.serialize(self.buffer[start .. start + size]);
+        self.buffer_len += size;
 
         self.buffer_max_lsn = lsn;
         self.records_written += 1;
@@ -321,15 +344,15 @@ pub const Wal = struct {
     /// Flush the WAL buffer to storage and fsync. After this returns,
     /// all appended records are durable.
     pub fn flush(self: *Wal) WalError!void {
-        if (self.buffer.items.len == 0) return;
+        if (self.buffer_len == 0) return;
 
         const page_size = io.page_size;
         var buf_offset: usize = 0;
 
-        while (buf_offset < self.buffer.items.len) {
+        while (buf_offset < self.buffer_len) {
             var page_buf: [page_size]u8 = std.mem.zeroes([page_size]u8);
             const space = page_size - self.wal_byte_offset;
-            const remaining = self.buffer.items.len - buf_offset;
+            const remaining = self.buffer_len - buf_offset;
             const to_copy = @min(space, remaining);
 
             // If continuing a partial page, read it first.
@@ -338,7 +361,7 @@ pub const Wal = struct {
                     return error.WalReadError;
             }
 
-            @memcpy(page_buf[self.wal_byte_offset..][0..to_copy], self.buffer.items[buf_offset..][0..to_copy]);
+            @memcpy(page_buf[self.wal_byte_offset..][0..to_copy], self.buffer[buf_offset..][0..to_copy]);
             buf_offset += to_copy;
 
             self.storage.write(self.wal_page_base + self.wal_page_offset, &page_buf) catch
@@ -353,9 +376,9 @@ pub const Wal = struct {
 
         self.storage.fsync() catch return error.WalFsyncError;
 
-        self.bytes_flushed += self.buffer.items.len;
+        self.bytes_flushed += self.buffer_len;
         self.flushed_lsn = self.buffer_max_lsn;
-        self.buffer.clearRetainingCapacity();
+        self.buffer_len = 0;
         self.flushes += 1;
 
         try self.persistEnvelope();
@@ -455,7 +478,7 @@ pub const Wal = struct {
         self.wal_byte_offset = @intCast(envelope.wal_byte_offset);
         self.next_lsn = envelope.next_lsn;
         self.flushed_lsn = envelope.flushed_lsn;
-        self.buffer.clearRetainingCapacity();
+        self.buffer_len = 0;
     }
 
     /// Convenience: begin a transaction.
@@ -485,6 +508,27 @@ pub const Wal = struct {
         self.storage.write(self.wal_meta_page_id, &page_buf) catch
             return error.WalWriteError;
         self.storage.fsync() catch return error.WalFsyncError;
+    }
+
+    fn ensureInlineBufferBound(self: *Wal) void {
+        if (!self.buffer_owned and self.buffer.len == 0) {
+            self.buffer = self.inline_buffer[0..];
+        }
+    }
+
+    fn growBuffer(self: *Wal, required_len: usize) WalError!void {
+        std.debug.assert(required_len > self.buffer.len);
+        const grown_len = @max(required_len, self.buffer.len * 2);
+        const new_buf = self.allocator.alloc(u8, grown_len) catch
+            return error.OutOfMemory;
+        if (self.buffer_len > 0) {
+            @memcpy(new_buf[0..self.buffer_len], self.buffer[0..self.buffer_len]);
+        }
+        if (self.buffer_owned) {
+            self.allocator.free(self.buffer);
+        }
+        self.buffer = new_buf;
+        self.buffer_owned = true;
     }
 };
 

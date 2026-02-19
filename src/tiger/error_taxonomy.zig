@@ -20,6 +20,7 @@ pub const SessionBoundaryError = request_mod.RequestError || error{
 pub fn classifyBufferPool(err: buffer_pool_mod.BufferPoolError) ErrorClass {
     return switch (err) {
         error.AllFramesPinned => .retryable,
+        error.OutOfMemory => .resource_exhausted,
         error.ChecksumMismatch => .corruption,
         error.StorageRead => .retryable,
         error.StorageWrite => .retryable,

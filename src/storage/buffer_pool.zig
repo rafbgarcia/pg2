@@ -10,6 +10,7 @@ const Wal = wal_mod.Wal;
 
 pub const BufferPoolError = error{
     AllFramesPinned,
+    OutOfMemory,
     ChecksumMismatch,
     StorageRead,
     StorageWrite,
@@ -128,7 +129,7 @@ pub const BufferPool = struct {
         frame.pin_count = 1;
         frame.ref_bit = true;
 
-        self.page_table.put(page_id, frame_idx) catch return error.StorageRead;
+        self.page_table.put(page_id, frame_idx) catch return error.OutOfMemory;
 
         return &frame.page;
     }

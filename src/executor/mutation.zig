@@ -257,77 +257,6 @@ pub fn executeUpdate(
     return updated_count;
 }
 
-/// Update a single matched row: undo push, apply assignments, re-encode,
-/// write back.
-fn updateSingleRow(
-    pool: *BufferPool,
-    wal: *Wal,
-    undo_log: *UndoLog,
-    tx_id: TxId,
-    schema: *const RowSchema,
-    tree: *const Ast,
-    tokens: *const TokenizeResult,
-    source: []const u8,
-    row_id: RowId,
-    row_values: []const Value,
-    first_assignment_node: NodeIndex,
-) MutationError!void {
-    const page = pool.pin(row_id.page_id) catch |e|
-        return mapPoolError(e);
-
-    // Read old data for undo.
-    const old_data = HeapPage.read(page, row_id.slot) catch {
-        pool.unpin(row_id.page_id, false);
-        return error.StorageRead;
-    };
-
-    _ = undo_log.push(
-        tx_id, row_id.page_id, row_id.slot, old_data,
-    ) catch {
-        pool.unpin(row_id.page_id, false);
-        return error.UndoLogFull;
-    };
-
-    // Apply assignments to existing values.
-    var new_values: [max_assignments]Value = undefined;
-    for (0..schema.column_count) |c| {
-        new_values[c] = row_values[c];
-    }
-    applyAssignments(
-        tree, tokens, source, schema, first_assignment_node, &new_values,
-    ) catch {
-        pool.unpin(row_id.page_id, false);
-        return error.ColumnNotFound;
-    };
-
-    // Re-encode.
-    var row_buf: [max_row_buf_size]u8 = undefined;
-    const row_len = row_mod.encodeRow(
-        schema, new_values[0..schema.column_count], &row_buf,
-    ) catch |e| {
-        pool.unpin(row_id.page_id, false);
-        return mapEncodeError(e);
-    };
-
-    // Update in-place.
-    HeapPage.update(
-        page, row_id.slot, row_buf[0..row_len],
-    ) catch |e| {
-        pool.unpin(row_id.page_id, false);
-        return mapHeapError(e);
-    };
-
-    // WAL append.
-    const lsn = wal.append(
-        tx_id, .update, row_id.page_id, row_buf[0..row_len],
-    ) catch |e| {
-        pool.unpin(row_id.page_id, true);
-        return mapWalAppendError(e);
-    };
-    page.header.lsn = lsn;
-    pool.unpin(row_id.page_id, true);
-}
-
 /// Execute a DELETE operation.
 ///
 /// Scans the table, filters by predicate, then for each matching row:
@@ -943,6 +872,7 @@ fn findPageWithSpace(
 fn mapPoolError(err: buffer_pool_mod.BufferPoolError) MutationError {
     return switch (err) {
         error.AllFramesPinned => error.AllFramesPinned,
+        error.OutOfMemory => error.OutOfMemory,
         error.ChecksumMismatch => error.ChecksumMismatch,
         error.StorageRead => error.StorageRead,
         error.StorageWrite => error.StorageWrite,

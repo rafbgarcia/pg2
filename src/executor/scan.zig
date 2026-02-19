@@ -338,6 +338,7 @@ fn resolveVisibleVersion(
 fn mapPoolError(err: buffer_pool_mod.BufferPoolError) ScanError {
     return switch (err) {
         error.AllFramesPinned => error.AllFramesPinned,
+        error.OutOfMemory => error.OutOfMemory,
         error.ChecksumMismatch => error.ChecksumMismatch,
         error.StorageRead => error.StorageRead,
         error.StorageWrite => error.StorageWrite,

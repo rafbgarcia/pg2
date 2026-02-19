@@ -35,9 +35,7 @@ pub const LeasedExecution = struct {
 
     pub fn deinit(self: *LeasedExecution) void {
         self.result.deinit();
-        self.runtime.releaseQueryBuffers(self.slot_index) catch {
-            @panic("leased execution slot release failed");
-        };
+        releaseQuerySlotSafely(self.runtime, self.slot_index);
         self.* = undefined;
     }
 };
@@ -48,9 +46,7 @@ pub fn executeWithLeasedQueryBuffers(
 ) RequestError!LeasedExecution {
     const buffers = try runtime.acquireQueryBuffers();
     errdefer {
-        runtime.releaseQueryBuffers(buffers.slot_index) catch {
-            @panic("query slot release failed after execution error");
-        };
+        releaseQuerySlotSafely(runtime, buffers.slot_index);
     }
 
     const ctx = makeExecContext(runtime, request, buffers);
@@ -60,6 +56,21 @@ pub fn executeWithLeasedQueryBuffers(
         .runtime = runtime,
         .slot_index = buffers.slot_index,
         .result = result,
+    };
+}
+
+fn releaseQuerySlotSafely(
+    runtime: *BootstrappedRuntime,
+    slot_index: u16,
+) void {
+    runtime.releaseQueryBuffers(slot_index) catch |err| {
+        std.log.err(
+            "query slot release failed: slot={d} err={s}",
+            .{ slot_index, @errorName(err) },
+        );
+        if (slot_index < runtime.max_query_slots) {
+            runtime.query_slot_in_use[slot_index] = false;
+        }
     };
 }
 

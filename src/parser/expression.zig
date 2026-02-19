@@ -15,6 +15,8 @@ const TokenizeResult = tokenizer_mod.TokenizeResult;
 const max_operator_stack = 64;
 /// Maximum depth of output stack for shunting-yard.
 const max_output_stack = 128;
+/// Maximum recursive expression nesting for list/function/aggregate arguments.
+const max_expression_nesting = 32;
 
 pub const ExprError = error{
     AstFull,
@@ -79,13 +81,28 @@ const OpEntry = struct {
     is_unary: bool,
 };
 
+const ParseExpressionResult = struct {
+    node: NodeIndex,
+    pos: u16,
+};
+
 /// Parse an expression starting at `pos`, writing nodes into `ast`.
 /// Returns the root NodeIndex of the expression and the new token position.
 pub fn parseExpression(
     ast: *Ast,
     tokens: *const TokenizeResult,
     start_pos: u16,
-) ExprError!struct { node: NodeIndex, pos: u16 } {
+) ExprError!ParseExpressionResult {
+    return parseExpressionWithNesting(ast, tokens, start_pos, 0);
+}
+
+fn parseExpressionWithNesting(
+    ast: *Ast,
+    tokens: *const TokenizeResult,
+    start_pos: u16,
+    nesting: u8,
+) ExprError!ParseExpressionResult {
+    if (nesting >= max_expression_nesting) return error.StackOverflow;
     var op_stack: [max_operator_stack]OpEntry = undefined;
     var op_count: u16 = 0;
     var output_stack: [max_output_stack]NodeIndex = undefined;
@@ -149,7 +166,7 @@ pub fn parseExpression(
 
             if (tok.token_type == .left_bracket) {
                 // List literal [a, b, c].
-                const list_result = try parseList(ast, tokens, pos);
+                const list_result = try parseList(ast, tokens, pos, nesting + 1);
                 if (output_count >= max_output_stack) return error.StackOverflow;
                 output_stack[output_count] = list_result.node;
                 output_count += 1;
@@ -163,7 +180,7 @@ pub fn parseExpression(
                 pos + 1 < tokens.count and
                 tokens.tokens[pos + 1].token_type == .left_paren)
             {
-                const fn_result = try parseFunctionCall(ast, tokens, pos);
+                const fn_result = try parseFunctionCall(ast, tokens, pos, nesting + 1);
                 if (output_count >= max_output_stack) return error.StackOverflow;
                 output_stack[output_count] = fn_result.node;
                 output_count += 1;
@@ -177,7 +194,7 @@ pub fn parseExpression(
                 pos + 1 < tokens.count and
                 tokens.tokens[pos + 1].token_type == .left_paren)
             {
-                const agg_result = try parseAggregateCall(ast, tokens, pos);
+                const agg_result = try parseAggregateCall(ast, tokens, pos, nesting + 1);
                 if (output_count >= max_output_stack) return error.StackOverflow;
                 output_stack[output_count] = agg_result.node;
                 output_count += 1;
@@ -379,7 +396,8 @@ fn parseList(
     ast: *Ast,
     tokens: *const TokenizeResult,
     start_pos: u16,
-) ExprError!struct { node: NodeIndex, pos: u16 } {
+    nesting: u8,
+) ExprError!ParseExpressionResult {
     var pos = start_pos + 1; // skip [
     var first: NodeIndex = null_node;
     var last: NodeIndex = null_node;
@@ -390,7 +408,7 @@ fn parseList(
             if (tokens.tokens[pos].token_type != .comma) return error.UnexpectedToken;
             pos += 1;
         }
-        const elem = try parseExpression(ast, tokens, pos);
+        const elem = try parseExpressionWithNesting(ast, tokens, pos, nesting);
         if (first == null_node) {
             first = elem.node;
             last = elem.node;
@@ -410,7 +428,8 @@ fn parseFunctionCall(
     ast: *Ast,
     tokens: *const TokenizeResult,
     start_pos: u16,
-) ExprError!struct { node: NodeIndex, pos: u16 } {
+    nesting: u8,
+) ExprError!ParseExpressionResult {
     const fn_tok = start_pos;
     var pos = start_pos + 2; // skip fn_name and (
 
@@ -424,7 +443,7 @@ fn parseFunctionCall(
                 if (tokens.tokens[pos].token_type != .comma) break;
                 pos += 1;
             }
-            const arg = try parseExpression(ast, tokens, pos);
+            const arg = try parseExpressionWithNesting(ast, tokens, pos, nesting);
             if (first_arg == null_node) {
                 first_arg = arg.node;
                 last_arg = arg.node;
@@ -453,7 +472,8 @@ fn parseAggregateCall(
     ast: *Ast,
     tokens: *const TokenizeResult,
     start_pos: u16,
-) ExprError!struct { node: NodeIndex, pos: u16 } {
+    nesting: u8,
+) ExprError!ParseExpressionResult {
     const agg_tok = start_pos;
     var pos = start_pos + 2; // skip agg_name and (
 
@@ -462,7 +482,7 @@ fn parseAggregateCall(
         // count(*)
         pos += 1;
     } else if (tokens.tokens[pos].token_type != .right_paren) {
-        const result = try parseExpression(ast, tokens, pos);
+        const result = try parseExpressionWithNesting(ast, tokens, pos, nesting);
         arg = result.node;
         pos = result.pos;
     }
