@@ -12,7 +12,7 @@ Remaining follow-up items from the code review that we should still address.
   - Why: Tiger Style requires no recursion (current depth cap is only a partial mitigation).
   - Files: `src/parser/expression.zig`.
 
-- [ ] B-tree split panic paths: add actionable context or convert to recoverable errors where appropriate.
+- [x] B-tree split panic paths: add actionable context or convert to recoverable errors where appropriate.
   - Why: current panic strings are low-diagnostic during field failures.
   - Files: `src/storage/btree.zig`.
 

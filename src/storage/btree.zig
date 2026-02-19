@@ -727,6 +727,10 @@ pub const BTree = struct {
             self.pool.unpin(right_id, false);
             return mapPoolError(e);
         };
+        errdefer {
+            self.pool.unpin(leaf_id, false);
+            self.pool.unpin(right_id, false);
+        }
 
         // Log WAL for the split.
         if (self.wal) |wal| {
@@ -740,14 +744,18 @@ pub const BTree = struct {
 
         // Fill left page with [0..mid).
         for (0..mid) |i| {
-            LeafNode.insert(&left_page.content, entries[i].key, entries[i].row_id) catch
-                @panic("leaf split redistribution failed");
+            LeafNode.insert(&left_page.content, entries[i].key, entries[i].row_id) catch |err| {
+                std.log.err("btree leaf split redistribution failed on left page: leaf_id={d} right_id={d} insert_idx={d} err={s}", .{ leaf_id, right_id, i, @errorName(err) });
+                return error.Corruption;
+            };
         }
 
         // Fill right page with [mid..total).
         for (mid..total) |i| {
-            LeafNode.insert(&right_page.content, entries[i].key, entries[i].row_id) catch
-                @panic("leaf split redistribution failed");
+            LeafNode.insert(&right_page.content, entries[i].key, entries[i].row_id) catch |err| {
+                std.log.err("btree leaf split redistribution failed on right page: leaf_id={d} right_id={d} insert_idx={d} err={s}", .{ leaf_id, right_id, i, @errorName(err) });
+                return error.Corruption;
+            };
         }
 
         // Set sibling pointers: left -> right -> old_right_sibling.
@@ -861,6 +869,10 @@ pub const BTree = struct {
             self.pool.unpin(new_right_id, false);
             return mapPoolError(e);
         };
+        errdefer {
+            self.pool.unpin(node_id, false);
+            self.pool.unpin(new_right_id, false);
+        }
 
         if (self.wal) |wal| {
             const lsn = wal.append(0, .btree_split_internal, node_id, new_key) catch |e|
@@ -874,8 +886,10 @@ pub const BTree = struct {
 
         // Fill left with [0..mid).
         for (0..mid) |i| {
-            InternalNode.insert(&left_page.content, entries[i].key, entries[i].right_child) catch
-                @panic("internal split redistribution failed");
+            InternalNode.insert(&left_page.content, entries[i].key, entries[i].right_child) catch |err| {
+                std.log.err("btree internal split redistribution failed on left page: node_id={d} new_right_id={d} insert_idx={d} err={s}", .{ node_id, new_right_id, i, @errorName(err) });
+                return error.Corruption;
+            };
         }
 
         // Promoted key is entries[mid]. Right child's left_child = entries[mid].right_child.
@@ -883,8 +897,10 @@ pub const BTree = struct {
 
         // Fill right with [mid+1..total).
         for (mid + 1..total) |i| {
-            InternalNode.insert(&right_page.content, entries[i].key, entries[i].right_child) catch
-                @panic("internal split redistribution failed");
+            InternalNode.insert(&right_page.content, entries[i].key, entries[i].right_child) catch |err| {
+                std.log.err("btree internal split redistribution failed on right page: node_id={d} new_right_id={d} insert_idx={d} err={s}", .{ node_id, new_right_id, i, @errorName(err) });
+                return error.Corruption;
+            };
         }
 
         self.pool.unpin(node_id, true);
@@ -897,6 +913,7 @@ pub const BTree = struct {
     fn splitRoot(self: *BTree, left_id: u64, key: []const u8, right_id: u64) BTreeError!void {
         const new_root_id = self.allocPage();
         const root_page = self.pool.pin(new_root_id) catch |e| return mapPoolError(e);
+        errdefer self.pool.unpin(new_root_id, false);
         InternalNode.init(root_page);
 
         if (self.wal) |wal| {
@@ -906,8 +923,13 @@ pub const BTree = struct {
         }
 
         InternalNode.setLeftChild(&root_page.content, left_id);
-        InternalNode.insert(&root_page.content, key, right_id) catch
-            @panic("root split insertion failed");
+        InternalNode.insert(&root_page.content, key, right_id) catch |err| {
+            std.log.err("btree root split insertion failed: new_root_id={d} left_id={d} right_id={d} key_len={d} err={s}", .{ new_root_id, left_id, right_id, key.len, @errorName(err) });
+            return switch (err) {
+                error.PageFull, error.DuplicateKey => error.Corruption,
+                else => err,
+            };
+        };
 
         self.pool.unpin(new_root_id, true);
         self.root_page_id = new_root_id;
