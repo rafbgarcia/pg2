@@ -173,7 +173,6 @@ fn isSchemaKeyword(tok_type: TokenType) bool {
         .kw_has_one,
         .kw_belongs_to,
         .kw_index,
-        .kw_unique_index,
         .kw_scope,
         .kw_reference,
         => true,
@@ -712,7 +711,6 @@ fn parseSchemaMember(
     if (tok_type == .kw_has_one) return parseSchemaRelation(ast, tokens, pos, .schema_has_one);
     if (tok_type == .kw_belongs_to) return parseSchemaRelation(ast, tokens, pos, .schema_belongs_to);
     if (tok_type == .kw_index) return parseSchemaIndex(ast, tokens, pos, .schema_index);
-    if (tok_type == .kw_unique_index) return parseSchemaIndex(ast, tokens, pos, .schema_unique_index);
     if (tok_type == .kw_reference) return parseSchemaReference(ast, tokens, pos);
 
     if (tok_type == .kw_scope) {

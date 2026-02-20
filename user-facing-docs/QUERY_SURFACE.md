@@ -11,7 +11,7 @@ Status labels:
 
 - `supported`: model and field declarations (`field(...)`) through schema definitions.
 - `supported`: schema `field` declarations are parenthesized-only; legacy `field name type ...` syntax is rejected fail-closed.
-- `supported`: schema `index` and `uniqueIndex` declarations are parenthesized-only; legacy `index col1, col2` syntax is rejected fail-closed.
+- `supported`: schema `index(...)` declarations are parenthesized-only; legacy `index col1, col2` syntax is rejected fail-closed.
 - `supported`: fail-closed explicit nullability on every field (`notNull` or `nullable` is required; implicit nullable is rejected).
 - `supported`: field defaults via `default` literal in schema definitions (for example `field(status, string, notNull, default, "pending")`).
 - `supported`: `reference(...)` metadata with explicit RI mode.

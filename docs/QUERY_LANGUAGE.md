@@ -154,7 +154,7 @@ index(idx_created_at, [created_at])
 index(idx_author_created, [author_id, created_at])
 ```
 
-`index` and `uniqueIndex` are parenthesized-only. Non-parenthesized forms (for example `index email`) are rejected.
+`index` is parenthesized-only. Non-parenthesized forms (for example `index email`) are rejected.
 
 Rules:
 
