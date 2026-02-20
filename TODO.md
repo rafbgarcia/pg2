@@ -22,10 +22,10 @@ Release-readiness gates live in `V1_READINESS_CHECKLIST.md`.
     - Missing action declarations are rejected explicitly.
     - Deterministic behavior is preserved in simulator tests.
 
-- [ ] Milestone 2: Transactional correctness hardening (MVCC + recovery)
+- [x] Milestone 2: Transactional correctness hardening (MVCC + recovery)
   - Scope: Expand correctness guarantees for conflict handling, rollback paths, and WAL/undo crash consistency under deterministic faults.
   - Deliverables:
-    - [ ] Additional tests for write-write conflicts.
+    - [x] Additional tests for write-write conflicts.
     - [x] Rollback edge-case deterministic tests.
     - [x] Fault-injection tests for crash/restart during WAL+undo interactions.
     - [x] Explicit invariant checks/documentation for recovery ordering and visibility rules.

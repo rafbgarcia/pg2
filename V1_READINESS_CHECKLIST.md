@@ -44,11 +44,11 @@ Roadmap sequencing lives in `TODO.md`.
   - [x] Unsupported actions (set default) fail closed.
   - [ ] Restrict/cascade/set-null behavior has deterministic E2E coverage.
 
-- [ ] Gate 5: MVCC + recovery correctness hardening
+- [x] Gate 5: MVCC + recovery correctness hardening
   - [x] Crash/restart tests cover WAL + undo interaction points.
   - [x] Rollback edge cases covered with deterministic seeds.
   - [x] Invariant docs updated for visibility and recovery ordering.
-  - [ ] Simulator crash matrix executes real recovery assertions.
+  - [x] Simulator crash matrix executes real recovery assertions.
 
 - [ ] Gate 6: Backup/restore minimum viability
   - [ ] Base backup command works on v1 runtime path.

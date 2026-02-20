@@ -172,7 +172,9 @@ visibility invariants:
    and readers consistently resolve to the correct prior version.
 2. **WAL+undo crash consistency**: when a mutation fails before WAL durability,
    pre-crash undo-based visibility matches post-restart persisted row visibility.
-3. **Replay determinism across seed sets**: running the same scenario twice with
+3. **Write-write interleaving visibility**: same-row writer interleavings resolve
+   to deterministic snapshot-visible versions across pre/between/post snapshots.
+4. **Replay determinism across seed sets**: running the same scenario twice with
    the same seed must produce the same signature.
 
 ## Running Simulations

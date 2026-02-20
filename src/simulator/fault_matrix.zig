@@ -1102,6 +1102,78 @@ fn runWalUndoCrashVisibilityConsistency(seed: u64) !ScenarioOutcome {
     return .{ .signature = h.final() };
 }
 
+fn runWriteWriteInterleavingVisibility(seed: u64) !ScenarioOutcome {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rand = prng.random();
+
+    var tm = TxManager.init(std.testing.allocator);
+    defer tm.deinit();
+    var undo_log = try UndoLog.init(std.testing.allocator, 128, 8 * 1024);
+    defer undo_log.deinit();
+
+    const page_id: u64 = 1500 + rand.uintLessThan(u64, 32);
+    const slot: u16 = rand.uintLessThan(u16, 16);
+
+    var v0: [24]u8 = undefined;
+    const v0_len = 8 + rand.uintLessThan(usize, 8);
+    rand.bytes(v0[0..v0_len]);
+
+    var v1: [24]u8 = undefined;
+    const v1_len = 8 + rand.uintLessThan(usize, 8);
+    rand.bytes(v1[0..v1_len]);
+
+    // Snapshot before both writers.
+    const tx_reader_before = try tm.begin();
+    var snap_before = try tm.snapshot(tx_reader_before);
+    defer snap_before.deinit();
+
+    // Writer 1 update (old version v0).
+    const tx_writer_1 = try tm.begin();
+    _ = try undo_log.push(tx_writer_1, page_id, slot, v0[0..v0_len]);
+    try tm.commit(tx_writer_1);
+
+    // Snapshot after writer 1, before writer 2.
+    const tx_reader_between = try tm.begin();
+    var snap_between = try tm.snapshot(tx_reader_between);
+    defer snap_between.deinit();
+
+    // Writer 2 update over writer 1's version (old version v1).
+    const tx_writer_2 = try tm.begin();
+    _ = try undo_log.push(tx_writer_2, page_id, slot, v1[0..v1_len]);
+    try tm.commit(tx_writer_2);
+
+    // Snapshot after both writers.
+    const tx_reader_after = try tm.begin();
+    var snap_after = try tm.snapshot(tx_reader_after);
+    defer snap_after.deinit();
+
+    const visible_before = undo_log.findVisible(page_id, slot, &snap_before, &tm);
+    try std.testing.expect(visible_before != null);
+    try std.testing.expectEqualSlices(u8, v0[0..v0_len], visible_before.?);
+
+    const visible_between = undo_log.findVisible(page_id, slot, &snap_between, &tm);
+    try std.testing.expect(visible_between != null);
+    try std.testing.expectEqualSlices(u8, v1[0..v1_len], visible_between.?);
+
+    const visible_after = undo_log.findVisible(page_id, slot, &snap_after, &tm);
+    try std.testing.expect(visible_after == null);
+
+    try tm.commit(tx_reader_before);
+    try tm.commit(tx_reader_between);
+    try tm.commit(tx_reader_after);
+
+    var h = std.hash.Wyhash.init(seed ^ 0xA11CE00F);
+    h.update(std.mem.asBytes(&page_id));
+    h.update(std.mem.asBytes(&slot));
+    h.update(v0[0..v0_len]);
+    h.update(v1[0..v1_len]);
+    h.update(visible_before.?);
+    h.update(visible_between.?);
+    const visible_after_tag: u8 = if (visible_after == null) 0 else 1;
+    h.update(&[_]u8{visible_after_tag});
+    return .{ .signature = h.final() };
+}
+
 const seed_set = [_]u64{
     0xC0FFEE01,
     0xC0FFEEA5,
@@ -1206,6 +1278,14 @@ test "seeded schedule: WAL+undo crash visibility consistency remains replay-dete
     }
 }
 
+test "seeded schedule: write-write interleaving visibility remains replay-deterministic" {
+    for (seed_set) |seed| {
+        const first = try runWriteWriteInterleavingVisibility(seed);
+        const second = try runWriteWriteInterleavingVisibility(seed);
+        try std.testing.expectEqual(first.signature, second.signature);
+    }
+}
+
 test "seeded schedule: btree split flush crash interleaving remains replay-deterministic" {
     for (seed_set) |seed| {
         const first = try runBTreeSplitFlushCrashInterleaving(seed);
@@ -1273,6 +1353,11 @@ test "ci seed sweep: extended deterministic replay coverage for short schedules"
         "wal_undo_crash_visibility_consistency",
         ci_short_seed_set[0..],
         runWalUndoCrashVisibilityConsistency,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "write_write_interleaving_visibility",
+        ci_short_seed_set[0..],
+        runWriteWriteInterleavingVisibility,
     );
 }
 
