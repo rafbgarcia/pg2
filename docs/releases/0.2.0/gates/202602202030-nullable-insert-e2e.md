@@ -1,7 +1,7 @@
 # Quality Gate Artifact: 202602202030-nullable-insert-e2e
 
 - Artifact ID: `202602202030-nullable-insert-e2e`
-- Commit: `pending`
+- Commit: `08a87b8`
 - Release: `0.2.0`
 - Title: `Explicit schema nullability + nullable insert matrix coverage`
 - Scope: `Require explicit field nullability (`notNull` or `nullable`) and add dedicated server-session E2E nullable/default scenarios.`
