@@ -9,9 +9,9 @@ const mutation_mod = @import("../executor/mutation.zig");
 const buffer_pool_mod = @import("../storage/buffer_pool.zig");
 const wal_mod = @import("../storage/wal.zig");
 const tx_mod = @import("../mvcc/transaction.zig");
-const request_mod = @import("../runtime/request.zig");
+const request_mod = @import("request.zig");
 
-/// Stable machine-actionable Tiger error classes.
+/// Stable machine-actionable runtime error classes.
 pub const ErrorClass = enum(u8) {
     retryable,
     resource_exhausted,

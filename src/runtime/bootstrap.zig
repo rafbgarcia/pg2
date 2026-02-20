@@ -11,7 +11,7 @@ const buffer_pool_mod = @import("../storage/buffer_pool.zig");
 const wal_mod = @import("../storage/wal.zig");
 const tx_mod = @import("../mvcc/transaction.zig");
 const undo_mod = @import("../mvcc/undo.zig");
-const static_alloc_mod = @import("../tiger/static_allocator.zig");
+const static_alloc_mod = @import("static_allocator.zig");
 const disk_mod = @import("../simulator/disk.zig");
 const scan_mod = @import("../executor/scan.zig");
 

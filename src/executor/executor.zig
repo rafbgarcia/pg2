@@ -18,7 +18,7 @@ const filter_mod = @import("filter.zig");
 const scan_mod = @import("scan.zig");
 const mutation_mod = @import("mutation.zig");
 const capacity_mod = @import("capacity.zig");
-const tiger_errors = @import("../tiger/error_taxonomy.zig");
+const runtime_errors = @import("../runtime/error_taxonomy.zig");
 
 const Allocator = std.mem.Allocator;
 const Ast = ast_mod.Ast;
@@ -308,7 +308,7 @@ fn executeReadPipeline(
         setBoundaryError(
             result,
             "table scan failed",
-            tiger_errors.classifyScan(err),
+            runtime_errors.classifyScan(err),
             err,
         );
         return;
@@ -541,7 +541,7 @@ fn applySingleNestedSelectionJoin(
         setBoundaryError(
             result,
             "nested relation scan failed",
-            tiger_errors.classifyScan(err),
+            runtime_errors.classifyScan(err),
             err,
         );
         return false;
@@ -1692,7 +1692,7 @@ fn executeMutation(
                 setBoundaryError(
                     result,
                     "insert failed",
-                    tiger_errors.classifyMutation(err),
+                    runtime_errors.classifyMutation(err),
                     err,
                 );
                 return;
@@ -1722,7 +1722,7 @@ fn executeMutation(
                 setBoundaryError(
                     result,
                     "update failed",
-                    tiger_errors.classifyMutation(err),
+                    runtime_errors.classifyMutation(err),
                     err,
                 );
                 return;
@@ -1749,7 +1749,7 @@ fn executeMutation(
                 setBoundaryError(
                     result,
                     "delete failed",
-                    tiger_errors.classifyMutation(err),
+                    runtime_errors.classifyMutation(err),
                     err,
                 );
                 return;
@@ -1875,7 +1875,7 @@ fn setError(result: *QueryResult, msg: []const u8) void {
 fn setBoundaryError(
     result: *QueryResult,
     summary: []const u8,
-    class: tiger_errors.ErrorClass,
+    class: runtime_errors.ErrorClass,
     err: anyerror,
 ) void {
     result.has_error = true;

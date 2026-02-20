@@ -54,6 +54,8 @@ pub const runtime = struct {
     pub const bootstrap = @import("runtime/bootstrap.zig");
     pub const config = @import("runtime/config.zig");
     pub const request = @import("runtime/request.zig");
+    pub const error_taxonomy = @import("runtime/error_taxonomy.zig");
+    pub const static_allocator = @import("runtime/static_allocator.zig");
 };
 
 pub const server = struct {
@@ -62,11 +64,6 @@ pub const server = struct {
     pub const transport = @import("server/transport.zig");
     pub const tcp_transport = @import("server/tcp_transport.zig");
     pub const io_uring_transport = @import("server/io_uring_transport.zig");
-};
-
-pub const tiger = struct {
-    pub const error_taxonomy = @import("tiger/error_taxonomy.zig");
-    pub const static_allocator = @import("tiger/static_allocator.zig");
 };
 
 comptime {
@@ -101,11 +98,11 @@ comptime {
     _ = runtime.bootstrap;
     _ = runtime.config;
     _ = runtime.request;
+    _ = runtime.error_taxonomy;
+    _ = runtime.static_allocator;
     _ = server.session;
     _ = server.pool;
     _ = server.transport;
     _ = server.tcp_transport;
     _ = server.io_uring_transport;
-    _ = tiger.error_taxonomy;
-    _ = tiger.static_allocator;
 }

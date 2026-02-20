@@ -15,7 +15,7 @@ const ast_mod = @import("../parser/ast.zig");
 const exec_mod = @import("../executor/executor.zig");
 const mutation_mod = @import("../executor/mutation.zig");
 const transport_mod = @import("transport.zig");
-const tiger_errors = @import("../tiger/error_taxonomy.zig");
+const runtime_errors = @import("../runtime/error_taxonomy.zig");
 const row_mod = @import("../storage/row.zig");
 const catalog_mod = @import("../catalog/catalog.zig");
 const heap_mod = @import("../storage/heap.zig");
@@ -150,7 +150,7 @@ pub const Session = struct {
             if (request.len > request_buf.len) return error.RequestTooLarge;
 
             var pool_conn = pool.checkout() catch |err| {
-                const class = tiger_errors.classifySessionBoundary(err);
+                const class = runtime_errors.classifySessionBoundary(err);
                 const boundary_msg = try serializeBoundaryError(
                     response_buf,
                     class,
@@ -166,7 +166,7 @@ pub const Session = struct {
                 request,
                 response_buf,
             ) catch |err| {
-                const class = tiger_errors.classifySessionBoundary(err);
+                const class = runtime_errors.classifySessionBoundary(err);
                 const boundary_msg = try serializeBoundaryError(
                     response_buf,
                     class,
@@ -225,7 +225,7 @@ pub const Session = struct {
                         writer.print(
                             "ERR class={s} code={s}\n",
                             .{
-                                @tagName(tiger_errors.classifyMutation(reclaim_err)),
+                                @tagName(runtime_errors.classifyMutation(reclaim_err)),
                                 @errorName(reclaim_err),
                             },
                         ) catch return error.ResponseTooLarge;
@@ -279,8 +279,8 @@ fn fixedMessage(message: []const u8) []const u8 {
 
 fn serializeBoundaryError(
     out: []u8,
-    class: tiger_errors.ErrorClass,
-    err: tiger_errors.SessionBoundaryError,
+    class: runtime_errors.ErrorClass,
+    err: runtime_errors.SessionBoundaryError,
 ) error{ResponseTooLarge}![]const u8 {
     var stream = std.io.fixedBufferStream(out);
     const writer = stream.writer();
