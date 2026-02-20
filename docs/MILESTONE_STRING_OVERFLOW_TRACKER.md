@@ -104,7 +104,7 @@ Use these first in a new session:
 8. `git show --name-only --stat ad8ccd7`
 9. `git show --name-only --stat fd81f61`
 10. `git show --name-only --stat c5548a0`
-11. `git show --name-only --stat TBD (this increment commit)`
+11. `git show --name-only --stat 0e1c366`
 12. `rg -n "overflow_chain_create|overflow_chain_relink|overflow_chain_unlink|overflow_chain_reclaim|replay|recover|tx_abort" src`
 13. `rg -n "INSPECT overflow|overflow_reclaim_stats|snapshotOverflowReclaimStats|overflow_reclaim_queue" src docs user-facing-docs`
 14. Run the AGENTS placeholder hygiene check command.

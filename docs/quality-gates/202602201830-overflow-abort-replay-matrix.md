@@ -1,7 +1,7 @@
 # Quality Gate Artifact: 202602201830-overflow-abort-replay-matrix
 
 - Artifact ID: `202602201830-overflow-abort-replay-matrix`
-- Commit: `TBD (this increment commit)` (required real committed SHA)
+- Commit: `0e1c366b779e7a4016d4cfc67ee00b39d28b58a6` (required real committed SHA)
 - Title: `overflow lifecycle abort replay matrix`
 - Scope: `Adds deterministic recovery replay coverage asserting aborted transactions do not apply overflow lifecycle side effects (create/relink/unlink/reclaim).`
 

@@ -24,7 +24,7 @@ Each artifact must answer the six mandatory gate questions:
 ## Hygiene Checks
 
 ```bash
-rg -n 'Commit: .*TBD|Commit: <pending>|<sha>|<answer>|<none or details>' docs/quality-gates
+rg -n 'Commit: .*T[B]D|Commit: <pending>|<sha>|<answer>|<none or details>' docs/quality-gates
 ```
 
 Expected matches should only appear in `docs/quality-gates/TEMPLATE.md`.
