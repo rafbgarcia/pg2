@@ -92,6 +92,26 @@ These are confirmed in chat with the user:
 ## Open Design Confirmation Needed Before Overflow Coding
 
 Confirmed: use same DB storage file with distinct overflow page type/region (not a separate OS file) for v1.
+Confirmed: overflow page-id allocation strategy is `dedicated page-id region` for v1.
+
+## Next-Session Kickoff (Concrete)
+
+Start here in the next Codex session:
+
+1. Implement dedicated overflow page-id region allocator (deterministic):
+   - Add constants and helpers for overflow page-id range ownership.
+   - Ensure allocator is bounded and fail-closed when region is exhausted.
+2. Extend row string encoding to support inline vs overflow-pointer variants.
+3. Wire mutation insert/update path:
+   - Apply 1024-byte inline threshold.
+   - Spill oversized string payloads into overflow chain pages from the dedicated region.
+4. Wire read path:
+   - Resolve overflow pointers into bounded query string arena bytes.
+5. Add tests:
+   - Row encode/decode inline vs overflow pointer cases.
+   - Mutation/read roundtrip for spilled strings.
+   - Deterministic failure when overflow region is exhausted.
+6. Add Tiger artifact + readiness/doc updates and commit as one increment.
 
 ## Fresh Codex Handoff Commands
 
