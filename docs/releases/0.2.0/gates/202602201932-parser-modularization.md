@@ -1,7 +1,7 @@
 # Quality Gate Artifact: 202602201932-parser-modularization
 
 - Artifact ID: `202602201932-parser-modularization`
-- Commit: `pending`
+- Commit: `6019ad9`
 - Release: `0.2.0`
 - Title: `Parser modularization and test extraction`
 - Scope: `Refactor parser internals into domain-focused modules and move parser scenarios into a dedicated test file without changing grammar behavior.`
