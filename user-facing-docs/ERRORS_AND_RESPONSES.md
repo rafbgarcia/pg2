@@ -57,6 +57,21 @@ When surfaced through `ERR query: ... class=<x>; code=<CodeName>`:
 - `Corruption` (`corruption`):
   - malformed overflow pointer/page/chain detected (fail-closed).
 
+## Current Insert Validation Error Codes
+
+When surfaced through `ERR query: insert failed; class=<x>; code=<CodeName>`:
+
+- `DuplicateKey` (`fatal`):
+  - insert conflicts with an existing primary/unique key.
+- `NullNotAllowed` (`fatal`):
+  - a required `notNull` column is omitted or null at insert time.
+- `TypeMismatch` (`fatal`):
+  - assigned value type does not match the column type.
+- `ColumnNotFound` (`fatal`):
+  - insert assignment references an unknown column.
+- `ReferentialIntegrityViolation` (`fatal`):
+  - insert foreign key value does not match an existing referenced row.
+
 ## Stability Note
 
 Error prefix format and class/code boundary format are the stable integration points for clients.
