@@ -1,5 +1,6 @@
 # Quality Gate Artifact: a22b91c
 
+- Artifact ID: `202602192135-milestone2-recovery-invariant-tracking`
 - Commit: `a22b91c`
 - Title: `docs: track Milestone 2 gate progress and recovery invariants`
 - Scope: Document Milestone 2 gate status and recovery invariant expectations.

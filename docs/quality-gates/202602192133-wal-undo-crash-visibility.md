@@ -1,5 +1,6 @@
 # Quality Gate Artifact: e5c45f5
 
+- Artifact ID: `202602192133-wal-undo-crash-visibility`
 - Commit: `e5c45f5`
 - Title: `sim: add WAL+undo crash visibility consistency scenario`
 - Scope: Add deterministic simulation scenario validating pre-crash undo

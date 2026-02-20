@@ -1,6 +1,7 @@
 # Quality Gate Artifact: 2026-02-20-overflow-page-foundation
 
-- Commit: `<pending>`
+- Artifact ID: `202602200005-overflow-page-foundation`
+- Commit: `7f4239d208b34b855ece379f95c03618d306ec5d`
 - Title: `Introduce versioned overflow page type and chunk primitives`
 - Scope: `Adds a dedicated overflow page type and storage module for single-chunk payload + next-page chaining, with deterministic format/validation tests.`
 

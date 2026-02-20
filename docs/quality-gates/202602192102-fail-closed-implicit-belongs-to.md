@@ -1,5 +1,6 @@
 # Quality Gate Artifact: a1ebf01
 
+- Artifact ID: `202602192102-fail-closed-implicit-belongs-to`
 - Commit: `a1ebf01`
 - Title: `Fail closed on implicit belongs_to integrity`
 - Scope: Reject implicit `belongs_to` integrity policy; require explicit RI mode.

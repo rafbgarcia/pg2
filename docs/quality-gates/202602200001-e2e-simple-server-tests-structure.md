@@ -1,6 +1,7 @@
 # Quality Gate Artifact: 2026-02-20-e2e-simple-server-tests-structure
 
-- Commit: `<pending>`
+- Artifact ID: `202602200001-e2e-simple-server-tests-structure`
+- Commit: `7f4239d208b34b855ece379f95c03618d306ec5d`
 - Title: `Refactor server E2E tests to simple schema/insert/query examples`
 - Scope: `Replaces step-array scenario style with direct readable tests for schema bootstrap, insert, and query behavior through the session boundary.`
 

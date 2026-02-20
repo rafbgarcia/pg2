@@ -1,5 +1,6 @@
 # Quality Gate Artifact: 890c767
 
+- Artifact ID: `202602192137-write-write-visibility-matrix`
 - Commit: `890c767`
 - Title: `sim: add write-write visibility matrix and mark Gate 5 complete`
 - Scope: Add deterministic simulation scenario for same-row write-write

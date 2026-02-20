@@ -1,5 +1,6 @@
 # Quality Gate Artifact: 810a60c
 
+- Artifact ID: `202602192142-inspect-plan-metadata`
 - Commit: `810a60c`
 - Title: `Add deterministic inspect plan metadata`
 - Scope: Extend inspect output with deterministic plan metadata

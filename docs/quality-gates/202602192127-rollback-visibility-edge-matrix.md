@@ -1,5 +1,6 @@
 # Quality Gate Artifact: a1c44df
 
+- Artifact ID: `202602192127-rollback-visibility-edge-matrix`
 - Commit: `a1c44df`
 - Title: `sim: add deterministic rollback visibility edge matrix scenario`
 - Scope: Add deterministic simulation coverage for rollback visibility edge

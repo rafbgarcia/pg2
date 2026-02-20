@@ -1,5 +1,6 @@
 # Quality Gate Artifact: e5de781
 
+- Artifact ID: `202602181954-ri-enforcement-in-mutations`
 - Commit: `e5de781`
 - Title: `enforce referential integrity actions in mutation paths`
 - Scope: Enforce RI actions on insert/update/delete execution paths.

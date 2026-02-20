@@ -1,6 +1,7 @@
 # Quality Gate Artifact: 2026-02-20-e2e-spec-03-filter-sort-limit-offset-server-path
 
-- Commit: `<pending>`
+- Artifact ID: `202602200002-e2e-spec-03-filter-sort-limit-offset-server-path`
+- Commit: `7f4239d208b34b855ece379f95c03618d306ec5d`
 - Title: `Mirror e2e/specs/03_filter_sort_limit_offset.spec in Zig server-path test`
 - Scope: `Adds a deterministic session-path scenario test for filter/sort/offset/limit parity with the human-readable E2E spec.`
 

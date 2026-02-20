@@ -1,5 +1,6 @@
 # Quality Gate Artifact: 2d15cb5
 
+- Artifact ID: `202602181959-ri-mode-rename-fail-closed`
 - Commit: `2d15cb5`
 - Title: `rename ri mode field and codify fail-closed integrity principle`
 - Scope: Clarify RI mode naming and harden fail-closed integrity semantics.

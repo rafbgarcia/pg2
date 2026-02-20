@@ -1,5 +1,6 @@
 # Quality Gate Artifact: ace72c4
 
+- Artifact ID: `202602192100-harden-fk-config-validation`
 - Commit: `ace72c4`
 - Title: `Harden foreign-key config validation`
 - Scope: Tighten FK/RI configuration validation across catalog/schema/mutation.

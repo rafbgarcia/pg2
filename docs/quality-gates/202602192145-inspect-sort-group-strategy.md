@@ -1,5 +1,6 @@
 # Quality Gate Artifact: fa983f5
 
+- Artifact ID: `202602192145-inspect-sort-group-strategy`
 - Commit: `fa983f5`
 - Title: `Expand inspect with sort and group strategy details`
 - Scope: Extend inspect plan details with sort/group physical strategies and

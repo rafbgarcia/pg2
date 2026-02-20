@@ -1,5 +1,6 @@
 # Quality Gate Artifact: 993fc8a
 
+- Artifact ID: `202602182002-referential-update-regressions`
 - Commit: `993fc8a`
 - Title: `expand referential update action regression coverage`
 - Scope: Strengthen regression coverage for referential update actions.

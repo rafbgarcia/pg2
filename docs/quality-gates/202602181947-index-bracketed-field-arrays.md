@@ -1,5 +1,6 @@
 # Quality Gate Artifact: eb64d65
 
+- Artifact ID: `202602181947-index-bracketed-field-arrays`
 - Commit: `eb64d65`
 - Title: `schema: require bracketed index field arrays`
 - Scope: Make index declaration shape explicit with bracketed field arrays.

@@ -1,6 +1,7 @@
 # Quality Gate Artifact: 2026-02-20-heap-auto-compaction-threshold
 
-- Commit: `<pending>`
+- Artifact ID: `202602200003-heap-auto-compaction-threshold`
+- Commit: `7f4239d208b34b855ece379f95c03618d306ec5d`
 - Title: `Auto-compact heap pages on insert/update contiguous-space shortfall`
 - Scope: `Adds deterministic in-page compaction primitives and threshold-triggered compact+retry behavior for heap insert and row-growth update paths.`
 

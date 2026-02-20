@@ -1,5 +1,6 @@
 # Quality Gate Artifact: 85de518
 
+- Artifact ID: `202602181803-reference-ri-syntax`
 - Commit: `85de518`
 - Title: `schema: add explicit reference RI syntax`
 - Scope: Add explicit RI policy/action syntax to schema parser/catalog loading.

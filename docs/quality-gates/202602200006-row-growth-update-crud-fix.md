@@ -1,6 +1,7 @@
 # Quality Gate Artifact: 2026-02-20-row-growth-update-crud-fix
 
-- Commit: `<pending>`
+- Artifact ID: `202602200006-row-growth-update-crud-fix`
+- Commit: `7f4239d208b34b855ece379f95c03618d306ec5d`
 - Title: `Support row-growth updates in heap pages and lock with server E2E CRUD test`
 - Scope: `Extends heap update behavior to relocate rows within a page when payload grows, and adds a session-path E2E regression for Alice -> Alicia update.`
 

@@ -1,6 +1,7 @@
 # Quality Gate Artifact: 2026-02-20-bounded-query-string-arena
 
-- Commit: `<pending>`
+- Artifact ID: `202602200000-bounded-query-string-arena`
+- Commit: `7f4239d208b34b855ece379f95c03618d306ec5d`
 - Title: `Materialize query string values in bounded per-query arena`
 - Scope: `Adds deterministic bounded string materialization buffers to runtime query slots and threads them through scan/executor read paths to avoid dangling string slices after page unpin.`
 
