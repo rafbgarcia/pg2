@@ -8,19 +8,11 @@ You are an expert database engineer building a new database (`pg2`) in Zig.
 
 pg2 has no users yet. Hence, no need to worry about breaking changes. Major refactors may be necessary to achieve the user's intended design.
 
-### Your workflow
-
-The `docs/releases/<latest-version>.md` file contains the current work in progress.
-
-1. Read that file to understand what has to be done next. Proceed and git commit as needed.
-3. End the session with a give a high level overview of what was done and what's your recommended next action
-
-### Current Focus
-
-We are in the process of building a library of real-world E2E tests exercising the server session path to ensure end-users code paths are covered.
-Think carefully about real-world scenarios when designing test examples.
-Each functionality should have its own test file. Each test should target a single real-world scenarios, edge cases, etc. for clarity and organization.
-E2E test files are under `src/server/e2e/`.
+**Current Focus**
+We are in building an extensive test suite and extending the database features for a production-ready release.
+Each functionality should have its own test file so that we can easily know what features are currently supported and missing.
+Think carefully to create real-world test cases, think and cover edge cases, etc.
+`ls test/features/`
 
 # pg2
 
@@ -48,6 +40,9 @@ src/
   simulator/     # Deterministic simulation harness, fault injection
   replication/   # WAL streaming, replica sync
   server/        # Wire protocol, connection handling
+test/
+  features/      # User-facing features, serves as quick reference of what's currently supported
+  internals/     # Internal machinery tests
 docs/
   ...
 ```
@@ -59,16 +54,6 @@ zig build              # Build the project
 zig build test         # Run unit tests
 zig build sim          # Run deterministic simulation tests (takes a seed argument)
 ```
-
-### User-Facing Docs Rule
-
-- Maintain minimal living user-facing docs as behavior lands. Do not wait for a final stabilization pass.
-- Keep baseline user-facing docs in `user-facing-docs/` (query surface, errors/responses, operations).
-- If a change alters user-visible behavior (syntax, semantics, error classes, supported/unsupported features, operational commands), update at least one relevant doc in the same commit.
-- Keep this lightweight during early stages:
-  - Required now: concise reference updates (facts, constraints, examples aligned with current behavior).
-  - Deferred until later releases: long tutorials, deep walkthroughs, broad polish passes.
-- If behavior is intentionally unsupported or fail-closed, document that explicitly.
 
 ## Conventions
 
