@@ -210,23 +210,41 @@ pub const HeapPage = struct {
         return page.content[slot.offset..][0..slot.len];
     }
 
-    /// Update a row in-place. The new data must fit in the existing slot's space.
-    /// For simplicity, in-place update requires the new row to be <= old row size.
-    /// Returns the old row data (caller should copy if needed for undo log).
+    /// Update a row.
     ///
-    /// If the new row is larger, returns error.RowTooLarge.
+    /// If the new payload fits in the current slot, update in-place.
+    /// If it does not fit, relocate the row to fresh space in the page and
+    /// repoint the slot. Old bytes are left as internal fragmentation.
     pub fn update(page: *Page, slot_idx: u16, new_data: []const u8) HeapError!void {
         std.debug.assert(page.header.page_type == .heap);
-        const header = SlottedHeader.read(&page.content);
+        var header = SlottedHeader.read(&page.content);
         if (slot_idx >= header.slot_count) return error.InvalidSlot;
 
         var slot = Slot.read(&page.content, slot_idx);
         if (slot.len == Slot.deleted_len) return error.InvalidSlot;
         assert_live_slot_valid(slot, header);
 
-        if (new_data.len > slot.len) return error.RowTooLarge;
-
+        if (new_data.len > std.math.maxInt(u16)) return error.RowTooLarge;
         const new_len: u16 = @intCast(new_data.len);
+
+        if (new_len > slot.len) {
+            // Grow by relocating to the current free region.
+            if (header.free_end - header.free_start < new_len) return error.PageFull;
+
+            header.free_end -= new_len;
+            const new_offset = header.free_end;
+            @memcpy(page.content[new_offset..][0..new_len], new_data);
+
+            slot.offset = new_offset;
+            slot.len = new_len;
+            Slot.write_at(&page.content, slot_idx, slot);
+            header.write(&page.content);
+
+            const row_end = @as(usize, slot.offset) + slot.len;
+            std.debug.assert(slot.len == new_len);
+            std.debug.assert(row_end <= content_size);
+            return;
+        }
 
         // Write new data at the same offset.
         @memcpy(page.content[slot.offset..][0..new_len], new_data);
@@ -401,13 +419,39 @@ test "update in-place with smaller data" {
     try std.testing.expectEqualSlices(u8, "short", result);
 }
 
-test "update rejects larger data" {
+test "update supports larger data when page has space" {
     var page = Page.init(0, .free);
     HeapPage.init(&page);
 
     const s0 = try HeapPage.insert(&page, "small");
-    const result = HeapPage.update(&page, s0, "this is much larger than the original");
-    try std.testing.expectError(HeapError.RowTooLarge, result);
+    const before = HeapPage.free_space(&page);
+    try HeapPage.update(&page, s0, "this is much larger than the original");
+    const after = HeapPage.free_space(&page);
+
+    const result = try HeapPage.read(&page, s0);
+    try std.testing.expectEqualSlices(u8, "this is much larger than the original", result);
+    try std.testing.expect(after < before);
+}
+
+test "update larger data returns page full when no contiguous free space" {
+    var page = Page.init(0, .free);
+    HeapPage.init(&page);
+
+    var row: [100]u8 = undefined;
+    @memset(&row, 0x44);
+
+    var first_slot: ?u16 = null;
+    while (true) {
+        const inserted = HeapPage.insert(&page, &row) catch |err| {
+            try std.testing.expectEqual(HeapError.PageFull, err);
+            break;
+        };
+        if (first_slot == null) first_slot = inserted;
+    }
+
+    const grow = [_]u8{0x45} ** 120;
+    const result = HeapPage.update(&page, first_slot.?, &grow);
+    try std.testing.expectError(HeapError.PageFull, result);
 }
 
 test "page full returns error" {

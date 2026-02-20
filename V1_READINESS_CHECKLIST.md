@@ -33,7 +33,8 @@ Roadmap sequencing lives in `TODO.md`.
   - [ ] Supported/unsupported features are explicit in user-facing docs.
 
 - [ ] Gate 3: CRUD + query surface is stable
-  - [ ] Insert/update/delete/read work end-to-end via server protocol.
+  - [x] Insert/update/delete/read work end-to-end via server protocol.
+    - Covered in `src/server/e2e/insert.zig`, `src/server/e2e/update.zig`, `src/server/e2e/delete.zig`, `src/server/e2e/select.zig`.
   - [ ] `where`, `sort`, `limit`, `offset`, `group` are covered by E2E tests.
   - [x] `inspect` output is deterministic and documented.
   - [ ] Query boundary errors are stable and classified.
@@ -63,7 +64,7 @@ Roadmap sequencing lives in `TODO.md`.
 
 - [ ] Gate 8: V1 E2E specification suite passes
   - [ ] `e2e/specs/01_schema_bootstrap.spec`
-  - [ ] `e2e/specs/02_basic_crud.spec`
+  - [ ] `e2e/specs/02_basic_crud.spec` (CRUD flow now covered via operation tests in `src/server/e2e/`, including row-growth update regression)
   - [ ] `e2e/specs/03_filter_sort_limit_offset.spec` (partial query coverage in `src/server/e2e_specs.zig`; offset/limit assertion still pending)
   - [ ] `e2e/specs/04_group_aggregates.spec`
   - [ ] `e2e/specs/05_referential_restrict.spec`

@@ -7,6 +7,8 @@ pg2's mission is to make the database the complete data system without leaking d
 ## Guidelines
 
 - [CRITICAL] Do not make design assumptions - always confirm with the user.
+- [CRITICAL] Do not take shortcuts. Do not monkeypatch. Do not leave tech debt. The codebase implementation must be a production-grade database implementation.
+- [CRITICAL] Let the user know if you find inappropriate design decisions as you visit code.
 
 ## Project Principles
 
@@ -53,8 +55,7 @@ zig build sim          # Run deterministic simulation tests (takes a seed argume
 ref spec: `src/server/e2e/e2e_specs.zig`
 
 - Focus exclusively on real-world E2E examples through the server session path until the user says otherwise.
-- Use `e2e/specs/*.spec` as reference intent, but write direct Zig tests with explicit request/response assertions.
-- Record every behavior gap discovered by these tests in `TODO.md` before moving to the next task.
+- The intention with this is to build a solid foundation for a production-grade database so we may have to refactor the codebase as we find issues.
 
 issue found:
 - [ ] Row growth update fails in CRUD flow: `User |> where(id = 1) |> update(name = "Alicia")` returns `ERR query: update failed; class=resource_exhausted; code=RowTooLarge`.
@@ -65,9 +66,7 @@ For each implementation increment, follow this sequence:
 
 1. Implement the scoped code/tests change.
 2. If core DB code changed (`src/storage`, `src/mvcc`, `src/executor`, `src/parser`, `src/server`, `src/replication`, `src/catalog`), create or update a Tiger gate artifact in `docs/tiger-gates/` using `docs/tiger-gates/TEMPLATE.md`.
-3. Update progress tracking docs to reflect what is now complete:
-   - `TODO.md`
-   - `V1_READINESS_CHECKLIST.md`
+3. Update progress tracking docs to reflect what is now complete
 4. Commit the implementation, Tiger artifact update (if required), and tracking updates together.
 5. Ask the user whether to proceed to the next recommended task.
 
