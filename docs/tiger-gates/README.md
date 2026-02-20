@@ -39,3 +39,4 @@ Each artifact answers the mandatory checklist in `docs/TIGER_STYLE.md`:
 - `docs/tiger-gates/2026-02-20-e2e-spec-03-filter-sort-limit-offset-server-path.md`
 - `docs/tiger-gates/2026-02-20-e2e-simple-server-tests-structure.md`
 - `docs/tiger-gates/2026-02-20-row-growth-update-crud-fix.md`
+- `docs/tiger-gates/2026-02-20-heap-auto-compaction-threshold.md`

@@ -171,7 +171,11 @@ pub const HeapPage = struct {
 
         // Check if there's enough space: we need room for the slot entry + row data.
         const needed = Slot.size + row_len;
-        if (header.free_end - header.free_start < needed) return error.PageFull;
+        if (header.free_end - header.free_start < needed) {
+            _ = maybe_compact_for_required_space(page, needed);
+            header = SlottedHeader.read(&page.content);
+            if (header.free_end - header.free_start < needed) return error.PageFull;
+        }
 
         // Allocate row data from the end.
         header.free_end -= row_len;
@@ -214,7 +218,9 @@ pub const HeapPage = struct {
     ///
     /// If the new payload fits in the current slot, update in-place.
     /// If it does not fit, relocate the row to fresh space in the page and
-    /// repoint the slot. Old bytes are left as internal fragmentation.
+    /// repoint the slot. If contiguous free space is insufficient but
+    /// reclaimable fragmented bytes can cover the shortfall, this performs an
+    /// automatic in-page compaction and retries.
     pub fn update(page: *Page, slot_idx: u16, new_data: []const u8) HeapError!void {
         std.debug.assert(page.header.page_type == .heap);
         var header = SlottedHeader.read(&page.content);
@@ -229,7 +235,11 @@ pub const HeapPage = struct {
 
         if (new_len > slot.len) {
             // Grow by relocating to the current free region.
-            if (header.free_end - header.free_start < new_len) return error.PageFull;
+            if (header.free_end - header.free_start < new_len) {
+                _ = maybe_compact_for_required_space(page, new_len);
+                header = SlottedHeader.read(&page.content);
+                if (header.free_end - header.free_start < new_len) return error.PageFull;
+            }
 
             header.free_end -= new_len;
             const new_offset = header.free_end;
@@ -302,6 +312,48 @@ pub const HeapPage = struct {
         return header.free_end - header.free_start;
     }
 
+    /// Returns reclaimable bytes currently stranded as internal fragmentation.
+    pub fn fragmented_bytes(page: *const Page) u16 {
+        std.debug.assert(page.header.page_type == .heap);
+        const header = SlottedHeader.read(&page.content);
+        return fragmented_bytes_with_header(page, header);
+    }
+
+    /// Compacts live row payloads into a contiguous region at the end of page.
+    /// Slot indexes are preserved.
+    pub fn compact(page: *Page) void {
+        std.debug.assert(page.header.page_type == .heap);
+        var header = SlottedHeader.read(&page.content);
+
+        var scratch: [content_size]u8 = undefined;
+        var write_end: u16 = content_size;
+        var slot_idx: u16 = 0;
+        while (slot_idx < header.slot_count) : (slot_idx += 1) {
+            var slot = Slot.read(&page.content, slot_idx);
+            if (slot.len == Slot.deleted_len) continue;
+
+            assert_live_slot_valid(slot, header);
+            write_end -= slot.len;
+            const dst_off = write_end;
+
+            @memcpy(
+                scratch[dst_off..][0..slot.len],
+                page.content[slot.offset..][0..slot.len],
+            );
+            slot.offset = dst_off;
+            Slot.write_at(&page.content, slot_idx, slot);
+        }
+
+        @memcpy(
+            page.content[write_end..content_size],
+            scratch[write_end..content_size],
+        );
+        @memset(page.content[header.free_start..write_end], 0);
+
+        header.free_end = write_end;
+        header.write(&page.content);
+    }
+
     /// Returns the total slot count (including deleted slots).
     pub fn slot_count(page: *const Page) u16 {
         std.debug.assert(page.header.page_type == .heap);
@@ -312,6 +364,49 @@ pub const HeapPage = struct {
         return count;
     }
 };
+
+fn maybe_compact_for_required_space(page: *Page, required_space: u16) bool {
+    std.debug.assert(page.header.page_type == .heap);
+    const before = HeapPage.free_space(page);
+    if (before >= required_space) return false;
+
+    const header = SlottedHeader.read(&page.content);
+    const fragmented = fragmented_bytes_with_header(page, header);
+    const shortfall = required_space - before;
+    if (fragmented < shortfall) return false;
+
+    HeapPage.compact(page);
+    const after = HeapPage.free_space(page);
+    std.debug.assert(after >= before);
+    std.debug.assert(after >= required_space);
+    return true;
+}
+
+fn fragmented_bytes_with_header(page: *const Page, header: SlottedHeader) u16 {
+    const live_bytes = live_row_bytes_with_header(page, header);
+    const max_contiguous_after = max_contiguous_after_compaction(header, live_bytes);
+    const current = HeapPage.free_space(page);
+    std.debug.assert(max_contiguous_after >= current);
+    return max_contiguous_after - current;
+}
+
+fn live_row_bytes_with_header(page: *const Page, header: SlottedHeader) u16 {
+    var live_bytes: u16 = 0;
+    var slot_idx: u16 = 0;
+    while (slot_idx < header.slot_count) : (slot_idx += 1) {
+        const slot = Slot.read(&page.content, slot_idx);
+        if (slot.len == Slot.deleted_len) continue;
+        assert_live_slot_valid(slot, header);
+        live_bytes += slot.len;
+    }
+    return live_bytes;
+}
+
+fn max_contiguous_after_compaction(header: SlottedHeader, live_bytes: u16) u16 {
+    const used = @as(usize, header.free_start) + live_bytes;
+    std.debug.assert(used <= content_size);
+    return @intCast(content_size - used);
+}
 
 fn assert_header_valid(header: SlottedHeader) void {
     std.debug.assert(header.format_magic == SlottedHeader.format_magic_value);
@@ -452,6 +547,56 @@ test "update larger data returns page full when no contiguous free space" {
     const grow = [_]u8{0x45} ** 120;
     const result = HeapPage.update(&page, first_slot.?, &grow);
     try std.testing.expectError(HeapError.PageFull, result);
+}
+
+test "update auto-compacts when fragmented bytes cover growth shortfall" {
+    var page = Page.init(0, .free);
+    HeapPage.init(&page);
+
+    const large = [_]u8{0x41} ** 1800;
+    const tiny = [_]u8{0x42} ** 32;
+    const grown = [_]u8{0x43} ** 1200;
+    const filler = [_]u8{0x44} ** 256;
+
+    const s0 = try HeapPage.insert(&page, large[0..]);
+    try HeapPage.update(&page, s0, tiny[0..]);
+    try std.testing.expect(HeapPage.fragmented_bytes(&page) > 0);
+
+    const needed: u16 = @intCast(grown.len);
+    var attempts: u16 = 0;
+    while (attempts < 128 and HeapPage.free_space(&page) >= needed) : (attempts += 1) {
+        _ = HeapPage.insert(&page, filler[0..]) catch break;
+    }
+    try std.testing.expect(HeapPage.free_space(&page) < needed);
+
+    try HeapPage.update(&page, s0, grown[0..]);
+    const result = try HeapPage.read(&page, s0);
+    try std.testing.expectEqualSlices(u8, grown[0..], result);
+}
+
+test "insert auto-compacts when fragmented bytes cover insert shortfall" {
+    var page = Page.init(0, .free);
+    HeapPage.init(&page);
+
+    const large = [_]u8{0x51} ** 1700;
+    const tiny = [_]u8{0x52} ** 24;
+    const inserted = [_]u8{0x53} ** 900;
+    const filler = [_]u8{0x54} ** 240;
+
+    const s0 = try HeapPage.insert(&page, large[0..]);
+    try HeapPage.update(&page, s0, tiny[0..]);
+    try std.testing.expect(HeapPage.fragmented_bytes(&page) > 0);
+
+    const needed: u16 = Slot.size + @as(u16, @intCast(inserted.len));
+    var attempts: u16 = 0;
+    while (attempts < 128 and HeapPage.free_space(&page) >= needed) : (attempts += 1) {
+        _ = HeapPage.insert(&page, filler[0..]) catch break;
+    }
+    try std.testing.expect(HeapPage.free_space(&page) < needed);
+
+    const slot = try HeapPage.insert(&page, inserted[0..]);
+    const result = try HeapPage.read(&page, slot);
+    try std.testing.expectEqualSlices(u8, inserted[0..], result);
 }
 
 test "page full returns error" {
