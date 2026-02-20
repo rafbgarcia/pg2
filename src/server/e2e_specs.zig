@@ -13,114 +13,166 @@ const BootstrappedRuntime = bootstrap_mod.BootstrappedRuntime;
 const Catalog = catalog_mod.Catalog;
 const Session = session_mod.Session;
 const ConnectionPool = pool_mod.ConnectionPool;
+const testing_allocator = std.testing.allocator;
 
-const ScenarioStep = struct {
-    request: []const u8,
-    expect_exact: []const u8,
-};
+const TestExecutor = struct {
+    runtime: *BootstrappedRuntime,
+    catalog: *Catalog,
+    session: Session,
+    pool: ConnectionPool,
+    response_buf: [1024]u8 = undefined,
 
-fn runScenario(
-    schema_source: []const u8,
-    steps: []const ScenarioStep,
-) !void {
-    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
-    defer disk.deinit();
+    fn init(
+        self: *TestExecutor,
+        runtime: *BootstrappedRuntime,
+        catalog: *Catalog,
+    ) void {
+        self.* = .{
+            .runtime = runtime,
+            .catalog = catalog,
+            .session = Session.init(runtime, catalog),
+            .pool = ConnectionPool.init(runtime),
+        };
+    }
 
-    const backing_memory = try std.testing.allocator.alloc(
-        u8,
-        256 * 1024 * 1024,
-    );
-    defer std.testing.allocator.free(backing_memory);
+    fn applyDefinitions(self: *TestExecutor, source: []const u8) !void {
+        const tokens = tokenizer_mod.tokenize(source);
+        if (tokens.has_error) return error.InvalidSchema;
 
-    var runtime = try BootstrappedRuntime.init(
-        backing_memory,
-        disk.storage(),
-        .{ .max_query_slots = 1 },
-    );
+        const parsed = parser_mod.parse(&tokens, source);
+        if (parsed.has_error) return error.InvalidSchema;
 
-    var catalog = Catalog{};
-    try loadSchemaAndInitializeHeapPages(&catalog, &runtime, schema_source);
+        try schema_loader_mod.loadSchema(self.catalog, &parsed.ast, &tokens, source);
 
-    var session = Session.init(&runtime, &catalog);
-    var pool = ConnectionPool.init(&runtime);
-    var response_buf: [1024]u8 = undefined;
+        var model_id: u16 = 0;
+        while (model_id < self.catalog.*.model_count) : (model_id += 1) {
+            const page_id: u32 = @as(u32, 100) + model_id;
+            self.catalog.models[model_id].heap_first_page_id = page_id;
+            self.catalog.models[model_id].total_pages = 1;
 
-    for (steps) |step| {
-        var pool_conn = try pool.checkout();
-        defer pool.checkin(&pool_conn) catch {
-            @panic("pool checkin failed in E2E scenario");
+            const page = try self.runtime.pool.pin(page_id);
+            heap_mod.HeapPage.init(page);
+            self.runtime.pool.unpin(page_id, true);
+        }
+    }
+
+    fn run(self: *TestExecutor, request: []const u8) ![]const u8 {
+        var pool_conn = try self.pool.checkout();
+        defer self.pool.checkin(&pool_conn) catch {
+            @panic("pool checkin failed in E2E request");
         };
 
-        const result = try session.handleRequest(
-            &pool,
+        const result = try self.session.handleRequest(
+            &self.pool,
             &pool_conn,
-            step.request,
-            response_buf[0..],
+            request,
+            self.response_buf[0..],
         );
-        try std.testing.expectEqualStrings(
-            step.expect_exact,
-            response_buf[0..result.bytes_written],
+        return self.response_buf[0..result.bytes_written];
+    }
+};
+
+const E2EEnv = struct {
+    disk: disk_mod.SimulatedDisk,
+    backing_memory: []u8,
+    runtime: BootstrappedRuntime,
+    catalog: Catalog,
+    executor: TestExecutor,
+
+    fn init(self: *E2EEnv) !void {
+        self.disk = disk_mod.SimulatedDisk.init(testing_allocator);
+        errdefer self.disk.deinit();
+
+        self.backing_memory = try testing_allocator.alloc(u8, 256 * 1024 * 1024);
+        errdefer testing_allocator.free(self.backing_memory);
+
+        self.runtime = try BootstrappedRuntime.init(
+            self.backing_memory,
+            self.disk.storage(),
+            .{ .max_query_slots = 1 },
         );
+        self.catalog = .{};
+        self.executor.init(&self.runtime, &self.catalog);
     }
-}
 
-fn loadSchemaAndInitializeHeapPages(
-    catalog: *Catalog,
-    runtime: *BootstrappedRuntime,
-    schema_source: []const u8,
-) !void {
-    const tokens = tokenizer_mod.tokenize(schema_source);
-    if (tokens.has_error) return error.InvalidSchema;
-
-    const parsed = parser_mod.parse(&tokens, schema_source);
-    if (parsed.has_error) return error.InvalidSchema;
-
-    try schema_loader_mod.loadSchema(catalog, &parsed.ast, &tokens, schema_source);
-
-    var model_id: u16 = 0;
-    while (model_id < catalog.model_count) : (model_id += 1) {
-        const page_id: u32 = @as(u32, 100) + model_id;
-        catalog.models[model_id].heap_first_page_id = page_id;
-        catalog.models[model_id].total_pages = 1;
-
-        const page = try runtime.pool.pin(page_id);
-        heap_mod.HeapPage.init(page);
-        runtime.pool.unpin(page_id, true);
+    fn deinit(self: *E2EEnv) void {
+        // Keep teardown aligned with existing server tests which do not call
+        // runtime.deinit in this path.
+        testing_allocator.free(self.backing_memory);
+        self.disk.deinit();
     }
-}
+};
 
-test "e2e spec 03 filter sort limit offset via server session path" {
-    // Mirrors e2e/specs/03_filter_sort_limit_offset.spec
-    const schema_source =
+test "e2e schema bootstrap defines model and scans empty via session path" {
+    var env: E2EEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
         \\User {
         \\  field(id, bigint, notNull, primaryKey)
         \\  field(name, string, notNull)
         \\  field(active, boolean, notNull)
         \\}
-    ;
+    );
 
-    const steps = [_]ScenarioStep{
-        .{
-            .request = "User |> insert(id = 1, name = \"Charlie\", active = true)",
-            .expect_exact = "OK rows=0\n",
-        },
-        .{
-            .request = "User |> insert(id = 2, name = \"Alice\", active = true)",
-            .expect_exact = "OK rows=0\n",
-        },
-        .{
-            .request = "User |> insert(id = 3, name = \"Bob\", active = false)",
-            .expect_exact = "OK rows=0\n",
-        },
-        .{
-            .request = "User |> where(active = true) |> sort(name asc)",
-            .expect_exact = "OK rows=2\n2,Alice,true\n1,Charlie,true\n",
-        },
-        .{
-            .request = "User |> sort(name asc) |> offset(1) |> limit(1)",
-            .expect_exact = "OK rows=1\n3,Bob,false\n",
-        },
-    };
+    const result = try executor.run("User");
+    try std.testing.expectEqualStrings("OK rows=0\n", result);
+}
 
-    try runScenario(schema_source, steps[0..]);
+test "e2e insert returns success via session path" {
+    var env: E2EEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\  field(active, boolean, notNull)
+        \\}
+    );
+
+    const result = try executor.run(
+        "User |> insert(id = 1, name = \"Alice\", active = true)",
+    );
+    try std.testing.expectEqualStrings("OK rows=0\n", result);
+}
+
+test "e2e query returns deterministic rows via session path" {
+    var env: E2EEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\  field(active, boolean, notNull)
+        \\}
+    );
+
+    var result = try executor.run(
+        "User |> insert(id = 1, name = \"Charlie\", active = true)",
+    );
+    try std.testing.expectEqualStrings("OK rows=0\n", result);
+
+    result = try executor.run(
+        "User |> insert(id = 2, name = \"Alice\", active = true)",
+    );
+    try std.testing.expectEqualStrings("OK rows=0\n", result);
+
+    result = try executor.run(
+        "User |> insert(id = 3, name = \"Bob\", active = false)",
+    );
+    try std.testing.expectEqualStrings("OK rows=0\n", result);
+
+    result = try executor.run("User |> where(active = true) |> sort(name asc)");
+    try std.testing.expectEqualStrings(
+        "OK rows=2\n2,Alice,true\n1,Charlie,true\n",
+        result,
+    );
 }

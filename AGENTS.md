@@ -48,12 +48,14 @@ zig build test         # Run unit tests
 zig build sim          # Run deterministic simulation tests (takes a seed argument)
 ```
 
-## Planning References
+## Current Milestone Focus
 
-Before starting the next implementation task, reference both:
+`./TODO.md`
+ref spec: `src/server/e2e_specs.zig`
 
-- `TODO.md` for milestone sequencing and scope.
-- `V1_READINESS_CHECKLIST.md` for release-readiness gates and acceptance criteria.
+- Focus exclusively on real-world E2E examples through the server session path until the user says otherwise.
+- Use `e2e/specs/*.spec` as reference intent, but write direct Zig tests with explicit request/response assertions.
+- Record every behavior gap discovered by these tests in `TODO.md` before moving to the next task.
 
 ## Delivery Workflow
 
