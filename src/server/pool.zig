@@ -9,6 +9,7 @@ const std = @import("std");
 const bootstrap_mod = @import("../runtime/bootstrap.zig");
 const tx_mod = @import("../mvcc/transaction.zig");
 const disk_mod = @import("../simulator/disk.zig");
+const wal_mod = @import("../storage/wal.zig");
 
 const BootstrappedRuntime = bootstrap_mod.BootstrappedRuntime;
 const QueryBuffers = bootstrap_mod.QueryBuffers;
@@ -17,6 +18,7 @@ const TxId = tx_mod.TxId;
 
 pub const PoolError = tx_mod.TxManagerError ||
     bootstrap_mod.QueryBufferError ||
+    wal_mod.WalError ||
     error{
         PoolExhausted,
         QueueTimeout,
@@ -94,6 +96,7 @@ pub const ConnectionPool = struct {
         if (!conn.checked_out) return error.InvalidPoolConn;
         if (conn.pinned) return error.PoolConnPinned;
 
+        _ = try self.runtime.wal.commitTx(conn.tx_id);
         conn.snapshot.deinit();
         try self.runtime.tx_manager.commit(conn.tx_id);
         try self.runtime.releaseQueryBuffers(conn.slot_index);
@@ -107,6 +110,8 @@ pub const ConnectionPool = struct {
         if (!conn.checked_out) return error.InvalidPoolConn;
         if (conn.pinned) return error.PoolConnPinned;
 
+        _ = try self.runtime.wal.abortTx(conn.tx_id);
+        try self.runtime.wal.flush();
         conn.snapshot.deinit();
         try self.runtime.tx_manager.abort(conn.tx_id);
         try self.runtime.releaseQueryBuffers(conn.slot_index);
@@ -166,6 +171,7 @@ pub const ConnectionPool = struct {
 
         const tx_id = try self.runtime.tx_manager.begin();
         errdefer self.runtime.tx_manager.abort(tx_id) catch {};
+        _ = try self.runtime.wal.beginTx(tx_id);
 
         const snapshot = try self.runtime.tx_manager.snapshot(tx_id);
         std.debug.assert(self.checked_out_count < self.runtime.max_query_slots);

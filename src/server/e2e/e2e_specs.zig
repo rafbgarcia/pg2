@@ -6,6 +6,8 @@
 comptime {
     _ = @import("delete.zig");
     _ = @import("insert.zig");
+    _ = @import("overflow_reclaim_drain_policy.zig");
+    _ = @import("overflow_replay_tx_markers.zig");
     _ = @import("string_overflow.zig");
     _ = @import("select.zig");
     _ = @import("update.zig");

@@ -82,14 +82,21 @@ pub const TestExecutor = struct {
         }
 
         const tx_id = pool_conn.tx_id;
-        try self.pool.checkin(&pool_conn);
-        try mutation_mod.commitOverflowReclaimEntriesForTx(
+        mutation_mod.commitOverflowReclaimEntriesForTx(
             self.catalog,
             &self.runtime.pool,
             &self.runtime.wal,
             tx_id,
             1,
-        );
+        ) catch |err| {
+            mutation_mod.rollbackOverflowReclaimEntriesForTx(
+                self.catalog,
+                tx_id,
+            );
+            try self.pool.abortCheckin(&pool_conn);
+            return err;
+        };
+        try self.pool.checkin(&pool_conn);
         return self.response_buf[0..result.bytes_written];
     }
 };

@@ -23,8 +23,9 @@ Status labels:
 String storage behavior (current):
 - `supported`: strings above 1024 bytes are stored through overflow chains transparently.
 - `supported`: replace/delete of spilled strings use deterministic logical unlink + reclaim pipeline.
-- `supported`: reclaim drain budget is fixed at one committed overflow chain per request boundary; multi-chain unlinks advance backlog deterministically across subsequent requests.
+- `supported`: reclaim drain budget is fixed at one committed overflow chain per successful commit boundary; multi-chain unlinks advance backlog deterministically across subsequent committed transactions.
 - `supported`: malformed overflow chain reads fail closed as corruption-class errors.
+- `supported`: overflow lifecycle recovery replay requires strict transaction markers (`tx_begin` + terminal marker); legacy markerless lifecycle WAL fails closed as corruption.
 
 ## Read Pipeline Operators
 

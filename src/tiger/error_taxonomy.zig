@@ -119,6 +119,15 @@ pub fn classifySessionBoundary(err: SessionBoundaryError) ErrorClass {
         error.TooManyActiveTransactions => .resource_exhausted,
         error.TxStateWindowFull => .resource_exhausted,
         error.TransactionNotActive => .fatal,
+        error.PayloadTooLarge => .resource_exhausted,
+        error.RecordBufferTooSmall => .resource_exhausted,
+        error.PayloadBufferTooSmall => .resource_exhausted,
+        error.WalReadError => .retryable,
+        error.WalWriteError => .retryable,
+        error.WalFsyncError => .retryable,
+        error.InvalidEnvelope => .corruption,
+        error.CorruptEnvelope => .corruption,
+        error.UnsupportedEnvelopeVersion => .fatal,
     };
 }
 

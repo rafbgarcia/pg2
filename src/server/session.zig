@@ -182,13 +182,6 @@ pub const Session = struct {
                 };
             } else {
                 const tx_id = pool_conn.tx_id;
-                pool.checkin(&pool_conn) catch |checkin_err| {
-                    std.log.err(
-                        "pool checkin failed: slot={d} err={s}",
-                        .{ pool_conn.slot_index, @errorName(checkin_err) },
-                    );
-                    @panic("pool checkin failed");
-                };
                 mutation_mod.commitOverflowReclaimEntriesForTx(
                     self.catalog,
                     &self.runtime.pool,
@@ -196,6 +189,17 @@ pub const Session = struct {
                     tx_id,
                     1,
                 ) catch |reclaim_err| {
+                    mutation_mod.rollbackOverflowReclaimEntriesForTx(
+                        self.catalog,
+                        tx_id,
+                    );
+                    pool.abortCheckin(&pool_conn) catch |abort_err| {
+                        std.log.err(
+                            "pool abort checkin failed: slot={d} err={s}",
+                            .{ pool_conn.slot_index, @errorName(abort_err) },
+                        );
+                        @panic("pool abort checkin failed");
+                    };
                     var stream = std.io.fixedBufferStream(response_buf);
                     const writer = stream.writer();
                     writer.print(
@@ -208,6 +212,13 @@ pub const Session = struct {
                     const boundary_msg = response_buf[0..stream.pos];
                     try connection.writeResponse(boundary_msg);
                     continue;
+                };
+                pool.checkin(&pool_conn) catch |checkin_err| {
+                    std.log.err(
+                        "pool checkin failed: slot={d} err={s}",
+                        .{ pool_conn.slot_index, @errorName(checkin_err) },
+                    );
+                    @panic("pool checkin failed");
                 };
             }
             std.debug.assert(response.bytes_written <= response_buf.len);

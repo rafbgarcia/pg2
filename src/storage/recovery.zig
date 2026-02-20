@@ -2,7 +2,7 @@
 //!
 //! Responsibilities in this file:
 //! - Reads WAL records in bounded buffers for deterministic recovery.
-//! - Filters replay to committed (or implicitly replayable) transactions.
+//! - Filters replay to committed transactions with strict tx markers.
 //! - Validates overflow lifecycle record payloads and allocator ownership.
 //! - Applies idempotent overflow-chain reclaim into buffer-pool page state.
 //!
@@ -51,6 +51,11 @@ const OverflowChainRecordMeta = struct {
     payload_bytes: u32,
 };
 
+const TxReplayDecision = enum {
+    replay,
+    skip,
+};
+
 /// Replays committed overflow lifecycle WAL records into page state.
 ///
 /// Caller supplies bounded record/payload buffers to keep recovery deterministic
@@ -69,7 +74,8 @@ pub fn replayCommittedOverflowLifecycle(
     };
 
     for (records) |rec| {
-        if (!isTxReplayable(records, rec.tx_id)) continue;
+        const tx_replay = try classifyTxReplay(records, rec.tx_id);
+        if (tx_replay != .replay) continue;
         switch (rec.record_type) {
             .overflow_chain_create => {
                 const meta = try decodeOverflowChainRecordMeta(rec.payload);
@@ -119,30 +125,36 @@ pub fn replayCommittedOverflowLifecycle(
     return stats;
 }
 
-fn isTxReplayable(
+fn classifyTxReplay(
     records: []const Record,
     tx_id: u64,
-) bool {
-    var saw_tx_state = false;
-    var committed = false;
+) RecoveryError!TxReplayDecision {
+    var saw_begin = false;
+    var saw_commit = false;
+    var saw_abort = false;
     var saw_mutation = false;
     for (records) |rec| {
         if (rec.tx_id != tx_id) continue;
         switch (rec.record_type) {
             .tx_commit => {
-                saw_tx_state = true;
-                committed = true;
+                if (saw_commit or saw_abort) return error.Corruption;
+                saw_commit = true;
             },
             .tx_abort => {
-                saw_tx_state = true;
-                committed = false;
+                if (saw_abort or saw_commit) return error.Corruption;
+                saw_abort = true;
             },
-            .tx_begin => {},
+            .tx_begin => {
+                if (saw_begin) return error.Corruption;
+                saw_begin = true;
+            },
             else => saw_mutation = true,
         }
     }
-    if (saw_tx_state) return committed;
-    return saw_mutation;
+    if (!saw_mutation) return .skip;
+    if (!saw_begin) return error.Corruption;
+    if (saw_commit) return .replay;
+    return .skip;
 }
 
 fn decodeOverflowChainRecordMeta(payload: []const u8) RecoveryError!OverflowChainRecordMeta {
@@ -234,6 +246,7 @@ test "replayCommittedOverflowLifecycle reclaims chain and is idempotent" {
     catalog.overflow_page_allocator = try OverflowPageIdAllocator.initWithBounds(20_000, 8);
 
     const tx: u64 = 1;
+    _ = try wal.beginTx(tx);
     const long_len = 1200;
     var long_text: [long_len]u8 = undefined;
     @memset(long_text[0..], 'r');
@@ -320,7 +333,7 @@ test "replayCommittedOverflowLifecycle reclaims chain and is idempotent" {
         tx_id,
         1,
     );
-    try wal.flush();
+    _ = try wal.commitTx(tx);
 
     var replay_wal = Wal.init(std.testing.allocator, disk.storage());
     defer replay_wal.deinit();
@@ -396,6 +409,7 @@ test "replayCommittedOverflowLifecycle skips aborted tx after overflow create" {
     }
 
     const tx_id: u64 = 91;
+    _ = try wal.beginTx(tx_id);
     var create_payload: [16]u8 = undefined;
     encodeOverflowChainRecordMetaForTest(
         create_payload[0..],
@@ -455,6 +469,7 @@ test "replayCommittedOverflowLifecycle skips aborted tx after overflow relink in
     }
 
     const tx_id: u64 = 92;
+    _ = try wal.beginTx(tx_id);
     var create_payload: [16]u8 = undefined;
     encodeOverflowChainRecordMetaForTest(
         create_payload[0..],
@@ -514,6 +529,7 @@ test "replayCommittedOverflowLifecycle skips aborted tx after overflow unlink en
     }
 
     const tx_id: u64 = 93;
+    _ = try wal.beginTx(tx_id);
     var unlink_payload: [16]u8 = undefined;
     encodeOverflowChainRecordMetaForTest(
         unlink_payload[0..],
@@ -554,4 +570,44 @@ test "replayCommittedOverflowLifecycle skips aborted tx after overflow unlink en
     const root_page = try pool.pin(overflow_root);
     defer pool.unpin(overflow_root, false);
     try std.testing.expectEqual(PageType.overflow, root_page.header.page_type);
+}
+
+test "replayCommittedOverflowLifecycle fails closed when tx markers are missing for mutation records" {
+    const disk_mod = @import("../simulator/disk.zig");
+
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 8);
+    defer pool.deinit();
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+
+    const overflow_root: u64 = 24_000;
+    var allocator = try OverflowPageIdAllocator.initWithBounds(overflow_root, 8);
+
+    var reclaim_payload: [16]u8 = undefined;
+    encodeOverflowChainRecordMetaForTest(
+        reclaim_payload[0..],
+        .{
+            .first_page_id = overflow_root,
+            .page_count = 1,
+            .payload_bytes = 4,
+        },
+    );
+    _ = try wal.append(101, .overflow_chain_reclaim, overflow_root, reclaim_payload[0..]);
+    try wal.flush();
+
+    var records: [64]Record = undefined;
+    var payload: [16 * 1024]u8 = undefined;
+    try std.testing.expectError(
+        error.Corruption,
+        replayCommittedOverflowLifecycle(
+            &pool,
+            &wal,
+            &allocator,
+            records[0..],
+            payload[0..],
+        ),
+    );
 }
