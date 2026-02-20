@@ -6,6 +6,7 @@ pub const storage = struct {
     pub const heap = @import("storage/heap.zig");
     pub const btree = @import("storage/btree.zig");
     pub const row = @import("storage/row.zig");
+    pub const overflow = @import("storage/overflow.zig");
 };
 
 pub const mvcc = struct {
@@ -69,6 +70,7 @@ comptime {
     _ = storage.heap;
     _ = storage.btree;
     _ = storage.row;
+    _ = storage.overflow;
     _ = mvcc.transaction;
     _ = mvcc.undo;
     _ = parser.tokenizer;

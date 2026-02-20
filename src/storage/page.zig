@@ -9,6 +9,7 @@ pub const PageType = enum(u8) {
     heap = 1,
     btree_leaf = 2,
     btree_internal = 3,
+    overflow = 4,
 };
 
 /// On-disk page header. 24 bytes.
@@ -207,7 +208,7 @@ test "different pages produce different checksums" {
 }
 
 test "all page types roundtrip" {
-    const types = [_]PageType{ .free, .heap, .btree_leaf, .btree_internal };
+    const types = [_]PageType{ .free, .heap, .btree_leaf, .btree_internal, .overflow };
     for (types) |pt| {
         var page = Page.init(0, pt);
         var buf: [page_size]u8 = undefined;

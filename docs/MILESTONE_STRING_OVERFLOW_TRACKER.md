@@ -30,7 +30,7 @@ These are confirmed in chat with the user:
 
 ## Current Code Status (This Session)
 
-### Implemented in `src/storage/heap.zig`
+### Implemented in committed chunk `5f07acf`
 
 - Added deterministic compaction primitives:
   - `HeapPage.fragmented_bytes`
@@ -45,40 +45,42 @@ These are confirmed in chat with the user:
 
 ### Not implemented yet
 
-- No overflow storage structures yet (no pointer format, no overflow page type, no reclaim queue).
-- No new server E2E coverage for compaction threshold path in this chunk.
-- No Tiger artifact/doc update for this compaction threshold increment yet.
+- No overflow pointer integration in row format yet.
+- No reclaim queue/GC path yet.
+- No mutation/WAL integration for overflow chains yet.
 
 ## Known Test State
 
-- `zig build test` passed after heap changes before adding large E2E stress case.
-- A large E2E stress test in `src/server/e2e/update.zig` was removed because it hit existing runtime memory ceilings (`OutOfMemory`) unrelated to heap compaction correctness.
-- Last interrupted run happened during a fresh `zig build test`; re-run required for final confirmation in next chunk.
+- `zig build test` passes for committed auto-compaction increment.
+- `zig build test` also passes after overflow page foundation module changes in this in-progress chunk.
+
+## New In-Progress Chunk: Overflow Storage Foundation
+
+Implemented (not yet committed in this tracker section):
+
+- Added page type `.overflow` in `src/storage/page.zig`.
+- Added `src/storage/overflow.zig` with:
+  - versioned overflow page header (`magic/version`),
+  - single-chunk payload + next-page pointer model,
+  - deterministic tests for init, roundtrip, capacity bounds, and corrupt format rejection.
+- Wired module into test discovery via `src/pg2.zig`.
 
 ## Next Logical Chunk
 
-1. Re-run full test suite:
-   - `zig build test`
-2. If green:
-   - Write Tiger artifact for this increment (core DB code changed in `src/storage`).
-   - Update `docs/tiger-gates/README.md`.
-   - Update readiness/progress tracking docs.
-   - Commit as one increment.
-3. Start overflow implementation design+scaffold:
-   - Define overflow pointer encoding in row format.
-   - Define overflow page/chunk format and version fields.
-   - Define WAL record payload contract for overflow create/relink/unlink.
-   - Add deterministic crash/fault tests before feature completion.
+1. Commit overflow storage foundation with Tiger artifact.
+2. Row format integration:
+   - Extend string fixed-slot encoding to support inline vs overflow-pointer variants.
+   - Keep backwards-compatible row format behavior decisions explicit (likely version bump).
+3. Mutation path integration:
+   - On insert/update, apply 1024-byte inline policy for strings.
+   - Allocate/write overflow pages and set in-row pointers when spilling.
+4. Durability integration:
+   - Define WAL payload contract for overflow chain create/relink/unlink.
+   - Add deterministic crash/fault tests for spill + update + unlink/recover.
 
 ## Open Design Confirmation Needed Before Overflow Coding
 
-Confirm one storage-layout decision before implementation:
-
-- Overflow pages as:
-  1. Separate page type/segment inside same DB storage file, or
-  2. Separate physical file.
-
-Recommendation for v1: option 1 (same file, distinct page type/region) for lower operational complexity and tighter recovery semantics.
+Confirmed: use same DB storage file with distinct overflow page type/region (not a separate OS file) for v1.
 
 ## Fresh Codex Handoff Commands
 
@@ -88,4 +90,3 @@ Use these first in a new session:
 2. `zig build test`
 3. `rg -n "compact|fragmented_bytes|maybe_compact_for_required_space" src/storage/heap.zig`
 4. Continue from "Next Logical Chunk" above.
-

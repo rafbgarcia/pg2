@@ -36,6 +36,7 @@ Roadmap sequencing lives in `TODO.md`.
   - [x] Insert/update/delete/read work end-to-end via server protocol.
     - Covered in `src/server/e2e/insert.zig`, `src/server/e2e/update.zig`, `src/server/e2e/delete.zig`, `src/server/e2e/select.zig`.
     - Heap mutation foundation now includes deterministic auto-compaction-on-shortfall tests in `src/storage/heap.zig` for update growth and insert retry paths.
+    - Overflow storage foundation page type landed in `src/storage/overflow.zig`; row/mutation integration is pending.
   - [ ] `where`, `sort`, `limit`, `offset`, `group` are covered by E2E tests.
   - [x] `inspect` output is deterministic and documented.
   - [ ] Query boundary errors are stable and classified.
