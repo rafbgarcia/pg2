@@ -39,7 +39,8 @@ Release-readiness gates live in `V1_READINESS_CHECKLIST.md`.
     - [x] Structured introspection data for key planner/executor decisions.
     - [x] User-facing explanation strings tied to runtime stats and query shape.
     - [x] Tests that assert introspection stability/quality for representative queries.
-      - Added deterministic `INSPECT plan ...` output for source model, pipeline operator chain, join strategy/order, materialization mode, and nested relation count.
+      - Added deterministic `INSPECT plan ...` output for source model, pipeline operator chain, join strategy/order, materialization mode, sort/group physical strategies, and nested relation count.
+      - Added `INSPECT explain ...` plain-language strategy explanations for sort/group paths.
   - Done when:
     - Common query plans are explainable without reading internals.
     - Introspection output is deterministic and test-covered.

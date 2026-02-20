@@ -110,6 +110,16 @@ pub const MaterializationMode = enum {
     bounded_row_buffers,
 };
 
+pub const SortStrategy = enum {
+    none,
+    in_place_insertion,
+};
+
+pub const GroupStrategy = enum {
+    none,
+    in_memory_linear,
+};
+
 pub const PlanStats = struct {
     source_model: [32]u8 = [_]u8{0} ** 32,
     source_model_len: u8 = 0,
@@ -119,6 +129,8 @@ pub const PlanStats = struct {
     join_strategy: JoinStrategy = .none,
     join_order: JoinOrder = .none,
     materialization_mode: MaterializationMode = .none,
+    sort_strategy: SortStrategy = .none,
+    group_strategy: GroupStrategy = .none,
     nested_relation_count: u8 = 0,
 };
 
@@ -687,6 +699,7 @@ fn applySort(
     caps: *const capacity_mod.OperatorCapacities,
     group_runtime: *GroupRuntime,
 ) bool {
+    result.stats.plan.sort_strategy = .in_place_insertion;
     const node = ctx.ast.getNode(sort_node);
     const key_count = ctx.ast.listLen(node.data.unary);
     if (key_count == 0) {
@@ -738,6 +751,7 @@ fn applyGroup(
     caps: *const capacity_mod.OperatorCapacities,
     group_runtime: *GroupRuntime,
 ) bool {
+    result.stats.plan.group_strategy = .in_memory_linear;
     const node = ctx.ast.getNode(group_node);
     const group_key_count = ctx.ast.listLen(node.data.unary);
     if (group_key_count == 0) {
@@ -2136,7 +2150,43 @@ test "execute captures deterministic inspect plan metadata" {
         MaterializationMode.none,
         result.stats.plan.materialization_mode,
     );
+    try testing.expectEqual(
+        SortStrategy.in_place_insertion,
+        result.stats.plan.sort_strategy,
+    );
+    try testing.expectEqual(
+        GroupStrategy.none,
+        result.stats.plan.group_strategy,
+    );
     try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_relation_count);
+}
+
+test "execute captures group strategy in inspect plan metadata" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const src = "User |> group(active) |> inspect";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    var result = try execute(
+        &env.makeCtx(tx, &snap, &p.ast, &tok, src),
+    );
+    defer result.deinit();
+
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(
+        SortStrategy.none,
+        result.stats.plan.sort_strategy,
+    );
+    try testing.expectEqual(
+        GroupStrategy.in_memory_linear,
+        result.stats.plan.group_strategy,
+    );
 }
 
 test "execute with unknown model returns error" {

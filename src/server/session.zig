@@ -285,12 +285,21 @@ fn serializeInspectStats(
         }
     }
     writer.print(
-        " join_strategy={s} join_order={s} materialization={s} nested_relations={d}\n",
+        " join_strategy={s} join_order={s} materialization={s} sort_strategy={s} group_strategy={s} nested_relations={d}\n",
         .{
             @tagName(exec_stats.plan.join_strategy),
             @tagName(exec_stats.plan.join_order),
             @tagName(exec_stats.plan.materialization_mode),
+            @tagName(exec_stats.plan.sort_strategy),
+            @tagName(exec_stats.plan.group_strategy),
             exec_stats.plan.nested_relation_count,
+        },
+    ) catch return error.ResponseTooLarge;
+    writer.print(
+        "INSPECT explain sort={s} group={s}\n",
+        .{
+            sortStrategyExplain(exec_stats.plan.sort_strategy),
+            groupStrategyExplain(exec_stats.plan.group_strategy),
         },
     ) catch return error.ResponseTooLarge;
 }
@@ -306,6 +315,20 @@ fn planOpLabel(op: exec_mod.PlanOp) []const u8 {
         .delete_op => "delete",
         .sort_op => "sort",
         .inspect_op => "inspect",
+    };
+}
+
+fn sortStrategyExplain(strategy: exec_mod.SortStrategy) []const u8 {
+    return switch (strategy) {
+        .none => "not_applied",
+        .in_place_insertion => "rows sorted in place with insertion order swaps",
+    };
+}
+
+fn groupStrategyExplain(strategy: exec_mod.GroupStrategy) []const u8 {
+    return switch (strategy) {
+        .none => "not_applied",
+        .in_memory_linear => "groups merged with linear key scan in memory",
     };
 }
 
@@ -505,7 +528,14 @@ test "session inspect appends execution and pool stats" {
         std.mem.indexOf(
             u8,
             output,
-            "INSPECT plan source_model=User pipeline=inspect join_strategy=none join_order=none materialization=none nested_relations=0\n",
+            "INSPECT plan source_model=User pipeline=inspect join_strategy=none join_order=none materialization=none sort_strategy=none group_strategy=none nested_relations=0\n",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "INSPECT explain sort=not_applied group=not_applied\n",
         ) != null,
     );
 }

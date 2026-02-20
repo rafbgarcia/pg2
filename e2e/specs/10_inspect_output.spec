@@ -18,4 +18,6 @@ steps:
   - request: User |> inspect
     expect_contains: "INSPECT pool policy="
   - request: User |> inspect
-    expect_contains: "INSPECT plan source_model=User pipeline=inspect join_strategy=none join_order=none materialization=none nested_relations=0"
+    expect_contains: "INSPECT plan source_model=User pipeline=inspect join_strategy=none join_order=none materialization=none sort_strategy=none group_strategy=none nested_relations=0"
+  - request: User |> inspect
+    expect_contains: "INSPECT explain sort=not_applied group=not_applied"

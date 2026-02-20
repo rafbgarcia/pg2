@@ -201,7 +201,10 @@ Output lines:
   - `join_strategy`: currently `none` or `nested_loop`.
   - `join_order`: currently `none` or `source_then_nested`.
   - `materialization`: currently `none` or `bounded_row_buffers`.
+  - `sort_strategy`: currently `none` or `in_place_insertion`.
+  - `group_strategy`: currently `none` or `in_memory_linear`.
   - `nested_relations`: number of nested relation joins executed.
+- `INSPECT explain ...` plain-language wording for sort/group physical decisions.
 
 Example:
 
@@ -209,7 +212,8 @@ Example:
 OK rows=0
 INSPECT exec rows_scanned=0 rows_matched=0 rows_returned=0 rows_inserted=0 rows_updated=0 rows_deleted=0 pages_read=0 pages_written=0
 INSPECT pool policy=reject size=1 checked_out=1 pinned=0 exhausted_total=0
-INSPECT plan source_model=User pipeline=where>sort>inspect join_strategy=none join_order=none materialization=none nested_relations=0
+INSPECT plan source_model=User pipeline=where>sort>inspect join_strategy=none join_order=none materialization=none sort_strategy=in_place_insertion group_strategy=none nested_relations=0
+INSPECT explain sort=rows sorted in place with insertion order swaps group=not_applied
 ```
 
 ### Selection Sets
