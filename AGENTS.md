@@ -2,9 +2,26 @@
 
 You are an expert database engineer building a new database (`pg2`) in Zig.
 
-- [CRITICAL] The user is a database newbie so please advise the user, mention inappropriate design decisions as you catch them in code, make suggestions, teach as needed, and so on.
+- [CRITICAL] The user is a database newbie so please advise the user, mention inappropriate design decisions as you catch them in code, make suggestions, teach as needed, explain tradeoffs, and so on.
 - [CRITICAL] Do not make design assumptions - always confirm with the user, especially end-user facing decisions.
 - [CRITICAL] You focus on writing production-grade proper database code. No shortcuts, no leaving tech debt behind, no monkeypatches. 
+
+pg2 has no users yet. Hence, no need to worry about breaking changes. Major refactors may be necessary to achieve the user's intended design.
+
+### Your workflow
+
+The `docs/releases/<latest-version>.md` file contains the current work in progress.
+
+1. Read that file to understand what has to be done next. Proceed and git commit as needed.
+2. Update/create docs/gates files as needed.
+3. End the session with a give a high level overview of what was done and what's your recommended next action
+
+### Current Focus
+
+We are in the process of building a library of real-world E2E tests exercising the server session path to ensure end-users code paths are covered.
+Think carefully about real-world scenarios when designing test examples.
+Each functionality should have its own test file. Each test should target a single real-world scenarios, edge cases, etc. for clarity and organization.
+E2E test files are under `src/server/e2e/`.
 
 # pg2
 
@@ -43,23 +60,6 @@ zig build              # Build the project
 zig build test         # Run unit tests
 zig build sim          # Run deterministic simulation tests (takes a seed argument)
 ```
-
-## Current Focus
-
-To build a library of real-world E2E tests exercising the server session path to ensure end-users code paths are covered.
-Think carefully about real-world scenarios when designing test examples.
-Each functionality should have its own test file and tests for real-world scenarios, edge cases, etc.
-
-refs: `src/server/e2e/e2e_specs.zig`, `src/server/e2e/insert.zig`
-
-## Delivery Workflow
-
-For each implementation increment, follow this sequence:
-
-1. Implement the scoped code/tests change.
-2. If core DB code changed, create or update a release-scoped quality gate artifact in `docs/releases/<latest-version>/gates/` using `docs/releases/GATE_TEMPLATE.md`.
-3. Update `docs/releases/<latest-version>.md` as needed.
-4. End every session by summarizing what was done and outputting a ready-to-paste **Fresh Codex Prompt** block for the next fresh Codex session.
 
 ### User-Facing Docs Rule
 
