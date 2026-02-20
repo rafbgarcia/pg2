@@ -48,7 +48,7 @@ pub const runtime = struct {
 
 pub const server = struct {
     pub const session = @import("server/session.zig");
-    pub const e2e_specs = @import("server/e2e_specs.zig");
+    pub const e2e_specs = @import("server/e2e/e2e_specs.zig");
     pub const pool = @import("server/pool.zig");
     pub const transport = @import("server/transport.zig");
     pub const tcp_transport = @import("server/tcp_transport.zig");

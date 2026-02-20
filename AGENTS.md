@@ -50,12 +50,14 @@ zig build sim          # Run deterministic simulation tests (takes a seed argume
 
 ## Current Milestone Focus
 
-`./TODO.md`
-ref spec: `src/server/e2e_specs.zig`
+ref spec: `src/server/e2e/e2e_specs.zig`
 
 - Focus exclusively on real-world E2E examples through the server session path until the user says otherwise.
 - Use `e2e/specs/*.spec` as reference intent, but write direct Zig tests with explicit request/response assertions.
 - Record every behavior gap discovered by these tests in `TODO.md` before moving to the next task.
+
+issue found:
+- [ ] Row growth update fails in CRUD flow: `User |> where(id = 1) |> update(name = "Alicia")` returns `ERR query: update failed; class=resource_exhausted; code=RowTooLarge`.
 
 ## Delivery Workflow
 
