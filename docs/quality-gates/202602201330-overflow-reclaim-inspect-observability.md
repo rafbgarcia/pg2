@@ -1,7 +1,7 @@
 # Quality Gate Artifact: 202602201330-overflow-reclaim-inspect-observability
 
 - Artifact ID: `202602201330-overflow-reclaim-inspect-observability`
-- Commit: `pending commit` (required real committed SHA; never `TBD`)
+- Commit: `fd81f61` (required real committed SHA)
 - Title: `overflow reclaim inspect observability`
 - Scope: `Adds deterministic overflow reclaim backlog/throughput counters and exposes them through server inspect output with E2E coverage.`
 

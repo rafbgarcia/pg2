@@ -122,7 +122,7 @@ These are confirmed in chat with the user:
     - excessive hop count / cyclic chain behavior.
   - Added deterministic corruption test for cyclic overflow chain reclaim.
 
-### Implemented in committed chunk `pending commit`
+### Implemented in committed chunk `fd81f61`
 
 - Overflow reclaim observability through session inspect:
   - Added catalog-owned reclaim counters:
@@ -156,7 +156,7 @@ These are confirmed in chat with the user:
 
 ## Next-Session Kickoff (Concrete)
 
-Completed in committed chunks `c5548a0` and `pending commit`:
+Completed in committed chunks `c5548a0` and `fd81f61`:
 
 1. Overflow reclaim pipeline.
 2. WAL lifecycle contract for create/relink/unlink/reclaim.
@@ -178,6 +178,6 @@ Use these first in a new session:
 2. `zig build test`
 3. `git log -2 --stat`
 4. `git show --name-only --stat c5548a0`
-5. `git show --name-only --stat pending_commit_sha`
+5. `git show --name-only --stat fd81f61`
 6. `rg -n "INSPECT overflow|overflow_reclaim_stats|snapshotOverflowReclaimStats|overflow_reclaim_queue" src docs user-facing-docs`
 7. Continue from "Next Logical Chunk" above.

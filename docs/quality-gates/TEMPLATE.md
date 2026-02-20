@@ -1,7 +1,7 @@
 # Quality Gate Artifact: <YYYYMMDDHHMM-short-slug>
 
 - Artifact ID: `<YYYYMMDDHHMM-short-slug>`
-- Commit: `<sha>` (required real committed SHA; never `TBD`)
+- Commit: `<sha>` (required real committed SHA)
 - Title: `<short title>`
 - Scope: `<one sentence>`
 
