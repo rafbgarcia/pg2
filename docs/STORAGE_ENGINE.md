@@ -98,6 +98,14 @@ Rows are stored in heap pages using a slotted page layout.
 
 A row is identified by a `RowId = (page_id, slot_index)`. Unlike PostgreSQL, updates happen **in-place** — the old version is pushed to the undo log, not kept in the heap.
 
+### V1 String Overflow Topology
+
+For v1, large string payloads spill to overflow pages in the same DB storage file.
+
+- Overflow pages are a dedicated page type.
+- Allocation uses a dedicated overflow page-id region (deterministic baseline allocator).
+- This is intentionally single-file topology (not separate OS files) to reduce operational complexity while the storage contracts are being hardened.
+
 ## B-Tree Index
 
 Standard B+ tree over 8KB pages. Leaf pages contain `(key, RowId)` pairs. Internal pages contain `(key, child_page_id)` pairs.

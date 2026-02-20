@@ -125,6 +125,14 @@ This is a deliberate architectural choice, not a simplification:
 
 This model is used successfully in production by SQLite (WAL mode), LMDB, and TigerBeetle. Read scalability should come from replicas and/or topology decisions, not from concurrent writers on the primary.
 
+## V1 Storage Topology Decision
+
+For v1, pg2 uses a single DB storage file with page-type segmentation, including overflow pages for spilled string payloads.
+
+- Overflow data is not stored in separate OS files in v1.
+- Overflow page allocation uses a dedicated page-id region in the same file (deterministic/fail-closed baseline).
+- This keeps operational surface area small while preserving a clean path to evolve allocator policy later (free-list reuse, per-model regions) without changing the logical string type contract.
+
 ## MVCC Model
 
 pg2 uses undo-log MVCC with in-place updates.
