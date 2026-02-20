@@ -28,152 +28,62 @@ These are confirmed in chat with the user:
 - Physical storage policy is separate and uses byte thresholds, not character counts.
 - 1024 is bytes, so number of characters depends on UTF-8 code points.
 
-## Current Code Status (This Session)
+## Milestone Done Criteria (Exit Criteria)
 
-### Implemented in committed chunk `5f07acf`
+This milestone is done only when all conditions below are true:
 
-- Added deterministic compaction primitives:
-  - `HeapPage.fragmented_bytes`
-  - `HeapPage.compact`
-  - internal threshold helper `maybe_compact_for_required_space`
-- Wired auto-compaction retry into:
-  - `HeapPage.insert` when contiguous free space is insufficient.
-  - `HeapPage.update` growth path when contiguous free space is insufficient.
-- Added heap tests for:
-  - update auto-compacts when fragmented bytes cover growth shortfall.
-  - insert auto-compacts when fragmented bytes cover insert shortfall.
-
-### Implemented in committed chunk `73e509b`
-
-- Overflow storage foundation:
-  - Added page type `.overflow` in `src/storage/page.zig`.
-  - Added `src/storage/overflow.zig` with:
-    - versioned overflow page header (`magic/version`),
-    - single-chunk payload + next-page pointer model,
-    - deterministic tests for init, roundtrip, capacity bounds, and corrupt format rejection.
-  - Wired module into test discovery via `src/pg2.zig`.
-
-### Implemented in committed chunk `a3970a5`
-
-- Bounded string materialization arena:
-  - Added per-query bounded string arena bytes in runtime bootstrap:
-    - `BootstrapConfig.query_string_arena_bytes_per_slot` (default 4 MiB).
-    - Query buffers now include `string_arena_bytes`.
-  - Added bounded `StringArena` in `src/executor/scan.zig`; scan decode copies strings into arena-backed memory.
-  - `ScanResult` now owns string storage for allocator-returning scan APIs (`tableScan`, `indexRange`) to guarantee lifetime safety.
-  - Executor read path threads per-query arena to `tableScanInto` calls (including nested relation scans).
-
-### Implemented in committed chunk `76598c4`
-
-- Dedicated overflow page-id region allocator:
-  - Added deterministic allocator state in `src/storage/overflow.zig` with default dedicated region bounds, ownership checks, and fail-closed `RegionExhausted`.
-  - Catalog now owns allocator state (`catalog.overflow_page_allocator`) so allocation is explicit and deterministic across mutation/read paths.
-- Row format inline-vs-overflow pointer encoding:
-  - Bumped row format version to v2 (`src/storage/row.zig`).
-  - String fixed slot now encodes explicit storage kind:
-    - inline tag + in-row var-data offset, or
-    - overflow tag + first overflow page id.
-  - Added `decodeColumnStorageChecked` to expose overflow references to higher layers.
-  - Kept legacy v1 inline-string decode compatibility for already-encoded rows.
-- Insert/update spill path with 1024-byte threshold:
-  - Mutation path now marks oversized strings (>1024 bytes) for spill.
-  - Overflow chains are written into dedicated region pages and row encoding stores overflow pointers.
-  - Added bounded pre-check for update fit before spill to fail closed on page-capacity shortfall.
-- Read-path overflow resolution into bounded arena:
-  - Scan decode now resolves overflow chains into `StringArena` using bounded per-query bytes.
-  - Overflow chain traversal is fail-closed on:
-    - out-of-region page ids,
-    - unexpected page type/format,
-    - excessive traversal hops (cycle/corruption guard).
-- Deterministic tests added:
-  - Row encode/decode coverage for overflow pointer slot and legacy v1 compatibility.
-  - Mutation/scan roundtrip for spilled insert and spilled update.
-  - Deterministic overflow-region exhaustion rejection.
-
-### Implemented in committed chunk `c5548a0`
-
-- Deterministic overflow reclaim pipeline:
-  - Added catalog-owned deterministic reclaim queue (`catalog.overflow_reclaim_queue`).
-  - Update/delete paths now:
-    - decode old-row overflow roots,
-    - append logical unlink records,
-    - enqueue reclaim work deterministically,
-    - drain reclaim with fixed per-mutation budget (1 chain).
-  - Reclaim rewrites overflow pages back to `.free` with zeroed content.
-- Overflow WAL lifecycle contract:
-  - Added explicit WAL record types for overflow lifecycle:
-    - `overflow_chain_create`
-    - `overflow_chain_relink`
-    - `overflow_chain_unlink`
-    - `overflow_chain_reclaim`
-  - Chain metadata payload contract is explicit and bounded for create/unlink/reclaim.
-  - Relink metadata payload contract is explicit and bounded for row-pointer publication events.
-- Crash/restart deterministic coverage:
-  - Added mutation deterministic tests for:
-    - replace path WAL ordering,
-    - delete path unlink/reclaim ordering,
-    - crash + restart WAL recover decode coverage for spill/replace/delete lifecycle.
-  - Added server-path E2E coverage for overflow insert/update/read and delete.
-- Malformed/extreme hardening:
-  - Reclaim traversal is fail-closed on:
-    - out-of-region ids,
-    - non-overflow page type in chain,
-    - malformed page format,
-    - excessive hop count / cyclic chain behavior.
-  - Added deterministic corruption test for cyclic overflow chain reclaim.
-
-### Implemented in committed chunk `fd81f61`
-
-- Overflow reclaim observability through session inspect:
-  - Added catalog-owned reclaim counters:
-    - `enqueued_total`
-    - `dequeued_total`
-    - `reclaimed_chains_total`
-    - `reclaimed_pages_total`
-    - `reclaim_failures_total`
-  - Added `Catalog.snapshotOverflowReclaimStats()` with queue-depth snapshot.
-  - Session inspect output now includes:
-    - `INSPECT overflow reclaim_queue_depth=... reclaim_enqueued_total=... reclaim_dequeued_total=... reclaim_chains_total=... reclaim_pages_total=... reclaim_failures_total=...`
-- Reclaim lifecycle wiring:
-  - Overflow unlink/reclaim enqueue/dequeue/success/failure paths now update deterministic counters.
-- Test and docs coverage:
-  - Added server-path E2E spec for backlog depth + throughput counters.
-  - Added catalog unit test for reclaim stats snapshot semantics.
-  - Updated query/user-facing docs for the additional inspect line.
-
-### Documentation finalization in committed chunk `ad8ccd7`
-
-- Updated milestone + quality-gate metadata to reference real committed SHAs.
-- Removed placeholder wording in quality-gate template/entry commit fields.
+1. Scope completion:
+   - Auto-compaction + hybrid inline/overflow + deterministic reclaim behavior are complete through server session E2E coverage.
+2. Remaining core gaps closed:
+   - Overflow lifecycle WAL is applied in full page/data replay recovery paths (not decode-only coverage).
+   - Transaction abort/rollback semantics are explicitly defined and tested for overflow create/relink/unlink/reclaim lifecycle.
+   - Reclaim drain budget semantics are explicitly defined and tested for mutations that unlink multiple overflow chains.
+3. Quality-gate discipline:
+   - Every core DB increment in this milestone has a corresponding artifact in `docs/quality-gates/` and `docs/quality-gates/README.md` is updated.
+   - No placeholder commit markers remain in quality-gate or milestone docs.
+4. User-facing docs parity:
+   - Any user-visible behavior or error/inspect output changes are documented in `user-facing-docs/` in the same increment.
+5. Validation:
+   - `zig build test` passes at milestone close with overflow E2E coverage included.
 
 ## Known Test State
 
-- `zig build test` passes for this increment (including overflow reclaim and new E2E overflow tests).
+- `zig build test` passes for this increment (includes overflow lifecycle recovery replay unit + server E2E idempotence coverage).
 
 ## Next Logical Chunk
 
-1. Durable replay integration:
-   - Integrate overflow lifecycle records into a full data-page WAL replay path (not only WAL envelope+decode recovery).
-2. Tx-level abort semantics:
+1. Durable replay integration (completed in `0000000`):
+   - Added `src/storage/recovery.zig` replay path for committed/legacy-replayable overflow lifecycle WAL.
+   - Added crash/restart validation through server session E2E and replay idempotence checks.
+2. Tx-level abort semantics (open):
    - Define and test overflow lifecycle behavior under transaction abort/rollback with explicit undo/reclaim ordering.
-3. Queue-drain budget semantics:
+   - Acceptance:
+     - Deterministic tests cover abort after create, abort after relink intent, and abort after unlink enqueue.
+     - Tests assert no leaked reachable chains and no reclaimed-live-chain behavior.
+3. Queue-drain budget semantics (open):
    - Define/document expected backlog progression when one mutation unlinks multiple overflow chains.
+   - Acceptance:
+     - Tests verify deterministic backlog depth progression and counter behavior under fixed per-mutation reclaim budget.
+     - `INSPECT overflow ...` counters/queue depth reflect documented behavior.
 
 ## Next-Session Kickoff (Concrete)
 
-Completed in committed chunks `c5548a0`, `fd81f61`, and `ad8ccd7`:
+Completed in committed chunks `c5548a0`, `fd81f61`, `ad8ccd7`, and `0000000`:
 
 1. Overflow reclaim pipeline.
 2. WAL lifecycle contract for create/relink/unlink/reclaim.
 3. Deterministic crash/restart coverage for spill/replace/delete.
 4. Malformed/cyclic chain fail-closed reclaim coverage.
 5. Inspect-level reclaim backlog/throughput visibility.
+6. Recovery replay application for overflow lifecycle WAL with idempotent reclaim semantics.
 
-Next session should move to:
+Next session should execute in order:
 
-1. Integrate overflow lifecycle WAL into full page replay/recovery.
-2. Add tx-abort lifecycle tests for overflow create/relink/unlink/reclaim.
-3. Define/test explicit reclaim-drain budget semantics for multi-overflow-field mutations.
+1. Add tx-abort lifecycle matrix tests for overflow create/relink/unlink/reclaim ordering guarantees.
+2. Lock reclaim budget semantics with deterministic multi-chain unlink tests + inspect assertions.
+3. Decide and implement strict tx-marker replay policy (current replay supports legacy mutation WAL without tx begin/commit markers to avoid dropping replay).
+4. Update quality-gate artifact(s), `docs/quality-gates/README.md`, and user-facing docs for any behavior changes.
+5. Run the AGENTS placeholder hygiene check before finalizing docs.
 
 ## Fresh Codex Handoff Commands
 
@@ -181,9 +91,12 @@ Use these first in a new session:
 
 1. `git status --short`
 2. `zig build test`
-3. `git log -2 --stat`
-4. `git show --name-only --stat ad8ccd7`
-5. `git show --name-only --stat fd81f61`
-6. `git show --name-only --stat c5548a0`
-7. `rg -n "INSPECT overflow|overflow_reclaim_stats|snapshotOverflowReclaimStats|overflow_reclaim_queue" src docs user-facing-docs`
-8. Continue from "Next Logical Chunk" above.
+3. `git log -6 --stat`
+4. `git show --name-only --stat 0000000`
+5. `git show --name-only --stat ad8ccd7`
+6. `git show --name-only --stat fd81f61`
+7. `git show --name-only --stat c5548a0`
+8. `rg -n "overflow_chain_create|overflow_chain_relink|overflow_chain_unlink|overflow_chain_reclaim|replay|recover" src`
+9. `rg -n "INSPECT overflow|overflow_reclaim_stats|snapshotOverflowReclaimStats|overflow_reclaim_queue" src docs user-facing-docs`
+10. Run the AGENTS placeholder hygiene check command.
+11. Continue from "Next Logical Chunk" acceptance criteria above.
