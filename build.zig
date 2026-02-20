@@ -45,7 +45,7 @@ pub fn build(b: *std.Build) void {
 
     // --- Simulation tests ---
     const sim_test_mod = b.createModule(.{
-        .root_source_file = b.path("src/simulator/tests.zig"),
+        .root_source_file = b.path("src/simulator/tests_test.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{

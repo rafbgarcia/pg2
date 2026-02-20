@@ -1,6 +1,6 @@
 //! E2E coverage for insert defaults on omitted fields.
 const std = @import("std");
-const e2e = @import("../test_env.zig");
+const e2e = @import("../test_env_test.zig");
 
 test "e2e insert applies schema defaults for omitted fields" {
     var env: e2e.E2EEnv = undefined;

@@ -1,6 +1,6 @@
 //! E2E coverage for nullable insert behavior.
 const std = @import("std");
-const e2e = @import("../test_env.zig");
+const e2e = @import("../test_env_test.zig");
 
 test "e2e insert allows omitted nullable field and persists null" {
     var env: e2e.E2EEnv = undefined;

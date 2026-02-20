@@ -1,6 +1,6 @@
 //! E2E coverage for update behavior through server session path.
 const std = @import("std");
-const e2e = @import("../test_env.zig");
+const e2e = @import("../test_env_test.zig");
 
 test "e2e update supports row growth via session path" {
     var env: e2e.E2EEnv = undefined;

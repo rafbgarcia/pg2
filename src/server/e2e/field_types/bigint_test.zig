@@ -1,6 +1,6 @@
 //! E2E coverage for bigint field behavior through server session path.
 const std = @import("std");
-const e2e = @import("../test_env.zig");
+const e2e = @import("../test_env_test.zig");
 
 test "e2e bigint fields preserve large integer values end-to-end" {
     var env: e2e.E2EEnv = undefined;

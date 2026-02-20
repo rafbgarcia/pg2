@@ -5,7 +5,7 @@
 //! - Validates fixed one-chain drain budget progression across committed writes.
 const std = @import("std");
 const overflow_mod = @import("../../storage/overflow.zig");
-const e2e = @import("test_env.zig");
+const e2e = @import("test_env_test.zig");
 
 test "e2e overflow multi-chain unlink drains one committed chain per successful write commit boundary" {
     var env: e2e.E2EEnv = undefined;

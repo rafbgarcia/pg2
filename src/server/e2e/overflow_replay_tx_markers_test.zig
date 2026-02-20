@@ -8,7 +8,7 @@ const buffer_pool_mod = @import("../../storage/buffer_pool.zig");
 const overflow_mod = @import("../../storage/overflow.zig");
 const recovery_mod = @import("../../storage/recovery.zig");
 const wal_mod = @import("../../storage/wal.zig");
-const e2e = @import("test_env.zig");
+const e2e = @import("test_env_test.zig");
 
 const Record = wal_mod.Record;
 

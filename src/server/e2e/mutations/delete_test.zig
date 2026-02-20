@@ -1,6 +1,6 @@
 //! E2E coverage for delete behavior through server session path.
 const std = @import("std");
-const e2e = @import("../test_env.zig");
+const e2e = @import("../test_env_test.zig");
 
 test "e2e delete removes row via session path" {
     var env: e2e.E2EEnv = undefined;

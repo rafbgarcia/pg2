@@ -9,7 +9,7 @@ const overflow_mod = @import("../../storage/overflow.zig");
 const page_mod = @import("../../storage/page.zig");
 const recovery_mod = @import("../../storage/recovery.zig");
 const wal_mod = @import("../../storage/wal.zig");
-const e2e = @import("test_env.zig");
+const e2e = @import("test_env_test.zig");
 
 const PageType = page_mod.PageType;
 const Record = wal_mod.Record;

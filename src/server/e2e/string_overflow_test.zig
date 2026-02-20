@@ -10,7 +10,7 @@ const overflow_mod = @import("../../storage/overflow.zig");
 const page_mod = @import("../../storage/page.zig");
 const recovery_mod = @import("../../storage/recovery.zig");
 const wal_mod = @import("../../storage/wal.zig");
-const e2e = @import("test_env.zig");
+const e2e = @import("test_env_test.zig");
 
 test "e2e overflow insert update and read via session path" {
     var env: e2e.E2EEnv = undefined;

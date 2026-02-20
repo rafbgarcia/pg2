@@ -1,6 +1,6 @@
 //! E2E coverage for boolean field behavior through server session path.
 const std = @import("std");
-const e2e = @import("../test_env.zig");
+const e2e = @import("../test_env_test.zig");
 
 test "e2e boolean fields support operational toggle workflows" {
     var env: e2e.E2EEnv = undefined;
