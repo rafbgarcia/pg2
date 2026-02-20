@@ -1,4 +1,4 @@
-//! Simulator test aggregation module.
+//! Internal simulation test aggregation module.
 //!
 //! Responsibilities in this file:
 //! - Forces compile-time discovery of simulator fault-matrix suites.

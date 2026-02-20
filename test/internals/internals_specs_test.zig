@@ -5,6 +5,8 @@
 //! - Keeps internal correctness coverage discoverable outside feature specs.
 comptime {
     _ = @import("durability/overflow_reclaim_crash_matrix_test.zig");
+    _ = @import("durability/overflow_reclaim_replay_test.zig");
     _ = @import("durability/overflow_replay_tx_markers_test.zig");
     _ = @import("maintenance/overflow_reclaim_drain_policy_test.zig");
+    _ = @import("maintenance/overflow_reclaim_surface_test.zig");
 }
