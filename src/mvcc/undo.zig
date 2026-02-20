@@ -382,6 +382,51 @@ test "findVisible walks chain for deep history" {
     try std.testing.expectEqualSlices(u8, "v1", visible.?);
 }
 
+test "findVisible skips aborted head and returns latest committed version" {
+    var tm = tx_mod.TxManager.init(std.testing.allocator);
+    defer tm.deinit();
+    var log = try UndoLog.init(std.testing.allocator, 64, 4096);
+    defer log.deinit();
+
+    const t1 = try tm.begin();
+    _ = try log.push(t1, 0, 0, "v1");
+    try tm.commit(t1);
+
+    const t2 = try tm.begin();
+    _ = try log.push(t2, 0, 0, "v2");
+    try tm.abort(t2);
+
+    const t3 = try tm.begin();
+    var snap = try tm.snapshot(t3);
+    defer snap.deinit();
+
+    const visible = log.findVisible(0, 0, &snap, &tm);
+    try std.testing.expect(visible != null);
+    try std.testing.expectEqualSlices(u8, "v2", visible.?);
+}
+
+test "findVisible skips active head and returns latest committed version" {
+    var tm = tx_mod.TxManager.init(std.testing.allocator);
+    defer tm.deinit();
+    var log = try UndoLog.init(std.testing.allocator, 64, 4096);
+    defer log.deinit();
+
+    const t1 = try tm.begin();
+    _ = try log.push(t1, 0, 0, "v1");
+    try tm.commit(t1);
+
+    const t2 = try tm.begin();
+    _ = try log.push(t2, 0, 0, "v2");
+
+    const t3 = try tm.begin();
+    var snap = try tm.snapshot(t3);
+    defer snap.deinit();
+
+    const visible = log.findVisible(0, 0, &snap, &tm);
+    try std.testing.expect(visible != null);
+    try std.testing.expectEqualSlices(u8, "v2", visible.?);
+}
+
 test "push returns UndoLogFull when entry ring fills" {
     var log = try UndoLog.init(std.testing.allocator, 2, 128);
     defer log.deinit();
