@@ -3,6 +3,64 @@ const std = @import("std");
 const overflow_mod = @import("../../../storage/overflow.zig");
 const e2e = @import("../test_env.zig");
 
+const wide_field_count: usize = 127;
+
+fn appendWideFieldName(writer: anytype, field_index: usize) !void {
+    try writer.print("f{d:0>3}", .{field_index});
+}
+
+fn appendWideFieldDefinition(writer: anytype, field_index: usize) !void {
+    try writer.writeAll("  field(");
+    try appendWideFieldName(writer, field_index);
+    switch (field_index % 3) {
+        1 => try writer.writeAll(", bigint, notNull)\n"),
+        2 => try writer.writeAll(", string, notNull)\n"),
+        else => try writer.writeAll(", boolean, notNull)\n"),
+    }
+}
+
+fn appendWideFieldInsertAssignment(writer: anytype, field_index: usize) !void {
+    try writer.writeAll(", ");
+    try appendWideFieldName(writer, field_index);
+    try writer.writeAll(" = ");
+    switch (field_index % 3) {
+        1 => try writer.print("{d}", .{1000 + field_index}),
+        2 => try writer.print("\"v{d:0>3}\"", .{field_index}),
+        else => {
+            if ((field_index % 2) == 0) {
+                try writer.writeAll("false");
+            } else {
+                try writer.writeAll("true");
+            }
+        },
+    }
+}
+
+fn buildWideInsertSchema(buf: []u8) ![]const u8 {
+    var stream = std.io.fixedBufferStream(buf);
+    const writer = stream.writer();
+    try writer.writeAll("WideUser {\n");
+    try writer.writeAll("  field(id, bigint, notNull, primaryKey)\n");
+    var field_index: usize = 1;
+    while (field_index <= wide_field_count) : (field_index += 1) {
+        try appendWideFieldDefinition(writer, field_index);
+    }
+    try writer.writeAll("}\n");
+    return stream.getWritten();
+}
+
+fn buildWideInsertRequest(buf: []u8, id: usize) ![]const u8 {
+    var stream = std.io.fixedBufferStream(buf);
+    const writer = stream.writer();
+    try writer.print("WideUser |> insert(id = {d}", .{id});
+    var field_index: usize = 1;
+    while (field_index <= wide_field_count) : (field_index += 1) {
+        try appendWideFieldInsertAssignment(writer, field_index);
+    }
+    try writer.writeAll(") {}");
+    return stream.getWritten();
+}
+
 test "e2e insert returns explicit insert count via session path" {
     var env: e2e.E2EEnv = undefined;
     try env.init();
@@ -157,4 +215,94 @@ test "e2e insert large-row payloads remain readable via session path" {
         .{payload_c[0..]},
     );
     try std.testing.expectEqualStrings(expected_c, result);
+}
+
+test "e2e insert supports 128 total fields with deterministic readback" {
+    var env: e2e.E2EEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+
+    var schema_buf: [8 * 1024]u8 = undefined;
+    const schema = try buildWideInsertSchema(schema_buf[0..]);
+    try executor.applyDefinitions(schema);
+
+    var insert_req_buf: [16 * 1024]u8 = undefined;
+    const insert_req = try buildWideInsertRequest(insert_req_buf[0..], 1);
+    var result = try executor.run(insert_req);
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run("WideUser |> where(id = 1) { id f002 f003 f126 f127 }");
+    try std.testing.expect(std.mem.startsWith(
+        u8,
+        result,
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,1001,v002,true,1004,v005,false,",
+    ));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        result,
+        "1061,v062,true,1064,v065,false,1067",
+    ) != null);
+    try std.testing.expect(std.mem.endsWith(
+        u8,
+        result,
+        ",1124,v125,false,1127\n",
+    ));
+}
+
+test "e2e insert duplicate key fails closed late in high-volume workload" {
+    var env: e2e.E2EEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\  field(active, boolean, notNull)
+        \\}
+    );
+
+    var insert_req_buf: [256]u8 = undefined;
+    var row_index: usize = 0;
+    while (row_index < 300) : (row_index += 1) {
+        const id = row_index + 1;
+        const insert_req = try std.fmt.bufPrint(
+            insert_req_buf[0..],
+            "User |> insert(id = {d}, name = \"user-{d}\", active = true) {{}}",
+            .{ id, id },
+        );
+        const result = try executor.run(insert_req);
+        try std.testing.expectEqualStrings(
+            "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+            result,
+        );
+    }
+
+    var result = try executor.run(
+        "User |> insert(id = 299, name = \"duplicate\", active = true) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        result,
+    );
+
+    result = try executor.run("User |> where(id = 299) { id name active }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n299,user-299,true\n",
+        result,
+    );
+
+    result = try executor.run(
+        "User |> insert(id = 301, name = \"user-301\", active = true) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
 }
