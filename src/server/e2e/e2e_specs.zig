@@ -9,12 +9,12 @@ comptime {
     _ = @import("constraints/not_null.zig");
     _ = @import("constraints/type_mismatch.zig");
     _ = @import("constraints/unknown_field.zig");
-    _ = @import("delete.zig");
-    _ = @import("insert.zig");
+    _ = @import("mutations/delete.zig");
+    _ = @import("mutations/insert.zig");
     _ = @import("overflow_reclaim_crash_matrix.zig");
     _ = @import("overflow_reclaim_drain_policy.zig");
     _ = @import("overflow_replay_tx_markers.zig");
     _ = @import("string_overflow.zig");
-    _ = @import("select.zig");
-    _ = @import("update.zig");
+    _ = @import("queries/select.zig");
+    _ = @import("mutations/update.zig");
 }

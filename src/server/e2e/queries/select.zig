@@ -1,6 +1,6 @@
 //! E2E coverage for select/query behavior through server session path.
 const std = @import("std");
-const e2e = @import("test_env.zig");
+const e2e = @import("../test_env.zig");
 
 test "e2e query returns deterministic rows via session path" {
     var env: e2e.E2EEnv = undefined;
