@@ -41,7 +41,10 @@ Roadmap sequencing lives in `TODO.md`.
       - row inline-vs-overflow pointer encoding (`src/storage/row.zig`),
       - mutation spill on >1024B strings (`src/executor/mutation.zig`),
       - read-path overflow materialization into bounded query string arena (`src/executor/scan.zig`),
-      - deterministic overflow exhaustion and spill roundtrip tests.
+      - deterministic overflow exhaustion and spill roundtrip tests,
+      - deterministic replace/delete reclaim queue + WAL lifecycle ordering tests,
+      - crash/restart WAL recovery decode coverage for spill/replace/delete lifecycle,
+      - session-path overflow E2E coverage in `src/server/e2e/overflow.zig`.
     - Read-path string materialization now uses bounded per-query arena bytes (runtime-configured), eliminating page-slice lifetime hazards in scan results.
   - [ ] `where`, `sort`, `limit`, `offset`, `group` are covered by E2E tests.
   - [x] `inspect` output is deterministic and documented.

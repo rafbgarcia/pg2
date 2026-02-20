@@ -20,7 +20,7 @@ pub const TestExecutor = struct {
     catalog: *Catalog,
     session: Session,
     pool: ConnectionPool,
-    response_buf: [1024]u8 = undefined,
+    response_buf: [16 * 1024]u8 = undefined,
 
     pub fn init(
         self: *TestExecutor,

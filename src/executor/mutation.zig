@@ -68,6 +68,7 @@ pub const MutationError = error{
     NullInPredicate,
     ResultOverflow,
     OverflowRegionExhausted,
+    OverflowReclaimQueueFull,
     // WAL errors
     WalWriteError,
     WalFsyncError,
@@ -103,6 +104,23 @@ const PinnedMutationPage = struct {
         self.pool.unpin(self.page_id, self.dirty);
         self.active = false;
     }
+};
+
+const OverflowChainRecordMeta = struct {
+    first_page_id: u64,
+    page_count: u32,
+    payload_bytes: u32,
+};
+
+const OverflowRelinkRecordMeta = struct {
+    old_first_page_id: u64,
+    new_first_page_id: u64,
+};
+
+const OverflowChainStats = struct {
+    first_page_id: u64,
+    page_count: u32,
+    payload_bytes: u32,
 };
 
 /// Execute an INSERT operation.
@@ -145,6 +163,8 @@ pub fn executeInsert(
     );
 
     var overflow_page_ids: [max_assignments]u64 = [_]u64{0} ** max_assignments;
+    var overflow_chain_stats: [max_assignments]OverflowChainStats =
+        [_]OverflowChainStats{.{ .first_page_id = 0, .page_count = 0, .payload_bytes = 0 }} ** max_assignments;
     markOversizedStringSlots(
         schema,
         values[0..schema.column_count],
@@ -171,10 +191,13 @@ pub fn executeInsert(
 
     try spillOversizedStrings(
         pool,
+        wal,
+        tx_id,
         &catalog.overflow_page_allocator,
         schema,
         values[0..schema.column_count],
         overflow_page_ids[0..schema.column_count],
+        overflow_chain_stats[0..schema.column_count],
     );
 
     const row_len = row_mod.encodeRowWithOverflow(
@@ -214,6 +237,15 @@ pub fn executeInsert(
 
     const result = RowId{ .page_id = page_id, .slot = slot };
     std.debug.assert(result.page_id >= model.heap_first_page_id);
+
+    try appendOverflowRelinkWalForRow(
+        wal,
+        tx_id,
+        page_id,
+        overflow_page_ids[0..schema.column_count],
+        0,
+    );
+    try drainOverflowReclaimQueue(catalog, pool, wal, tx_id, 1);
     return result;
 }
 
@@ -337,6 +369,7 @@ pub fn executeUpdate(
         }
     }
 
+    try drainOverflowReclaimQueue(catalog, pool, wal, tx_id, 1);
     return updated_count;
 }
 
@@ -426,7 +459,15 @@ pub fn executeDelete(
                 model_id,
                 row.values[0..row.column_count],
             );
-            try deleteSingleRow(pool, wal, undo_log, tx_id, row.row_id);
+            try deleteSingleRow(
+                catalog,
+                pool,
+                wal,
+                undo_log,
+                tx_id,
+                schema,
+                row.row_id,
+            );
             deleted_count += 1;
         }
     }
@@ -434,16 +475,19 @@ pub fn executeDelete(
     if (deleted_count > 0) {
         catalog.decrementRowCount(model_id, deleted_count);
     }
+    try drainOverflowReclaimQueue(catalog, pool, wal, tx_id, 1);
 
     return deleted_count;
 }
 
 /// Delete a single matched row: undo push, tombstone, WAL append.
 fn deleteSingleRow(
+    catalog: *Catalog,
     pool: *BufferPool,
     wal: *Wal,
     undo_log: *UndoLog,
     tx_id: TxId,
+    schema: *const RowSchema,
     row_id: RowId,
 ) MutationError!void {
     var pinned = try PinnedMutationPage.pin(pool, row_id.page_id);
@@ -460,6 +504,13 @@ fn deleteSingleRow(
         old_data,
     ) catch return error.UndoLogFull;
 
+    var old_overflow_roots: [max_assignments]u64 = [_]u64{0} ** max_assignments;
+    const old_overflow_count = try collectOverflowRootsFromRow(
+        schema,
+        old_data,
+        old_overflow_roots[0..schema.column_count],
+    );
+
     // Tombstone the slot.
     HeapPage.delete(pinned.page, row_id.slot) catch return error.StorageRead;
     pinned.markDirty();
@@ -472,6 +523,11 @@ fn deleteSingleRow(
         &.{},
     ) catch |e| return mapWalAppendError(e);
     pinned.page.header.lsn = lsn;
+
+    for (0..old_overflow_count) |i| {
+        try enqueueOverflowChainForReclaim(catalog, wal, tx_id, old_overflow_roots[i]);
+    }
+    try drainOverflowReclaimQueue(catalog, pool, wal, tx_id, 1);
 }
 
 fn updateRowWithValues(
@@ -491,8 +547,16 @@ fn updateRowWithValues(
         return error.StorageRead;
     _ = undo_log.push(tx_id, row_id.page_id, row_id.slot, old_data) catch
         return error.UndoLogFull;
+    var old_overflow_roots: [max_assignments]u64 = [_]u64{0} ** max_assignments;
+    const old_overflow_count = try collectOverflowRootsFromRow(
+        schema,
+        old_data,
+        old_overflow_roots[0..schema.column_count],
+    );
 
     var overflow_page_ids: [max_assignments]u64 = [_]u64{0} ** max_assignments;
+    var overflow_chain_stats: [max_assignments]OverflowChainStats =
+        [_]OverflowChainStats{.{ .first_page_id = 0, .page_count = 0, .payload_bytes = 0 }} ** max_assignments;
     markOversizedStringSlots(
         schema,
         new_values,
@@ -515,10 +579,13 @@ fn updateRowWithValues(
 
     try spillOversizedStrings(
         pool,
+        wal,
+        tx_id,
         &catalog.overflow_page_allocator,
         schema,
         new_values,
         overflow_page_ids[0..schema.column_count],
+        overflow_chain_stats[0..schema.column_count],
     );
 
     const row_len = row_mod.encodeRowWithOverflow(
@@ -535,6 +602,17 @@ fn updateRowWithValues(
     const lsn = wal.append(tx_id, .update, row_id.page_id, row_buf[0..row_len]) catch |e|
         return mapWalAppendError(e);
     pinned.page.header.lsn = lsn;
+
+    try appendOverflowRelinkWalForRow(
+        wal,
+        tx_id,
+        row_id.page_id,
+        overflow_page_ids[0..schema.column_count],
+        0,
+    );
+    for (0..old_overflow_count) |i| {
+        try enqueueOverflowChainForReclaim(catalog, wal, tx_id, old_overflow_roots[i]);
+    }
 }
 
 fn canUpdateFitInPage(page: *const Page, slot_idx: u16, new_len: u16) bool {
@@ -567,37 +645,47 @@ fn markOversizedStringSlots(
 
 fn spillOversizedStrings(
     pool: *BufferPool,
+    wal: *Wal,
+    tx_id: TxId,
     overflow_allocator: *OverflowPageIdAllocator,
     schema: *const RowSchema,
     values: []const Value,
     overflow_page_ids: []u64,
+    overflow_chain_stats: []OverflowChainStats,
 ) MutationError!void {
     std.debug.assert(values.len >= schema.column_count);
     std.debug.assert(overflow_page_ids.len >= schema.column_count);
+    std.debug.assert(overflow_chain_stats.len >= schema.column_count);
     for (0..schema.column_count) |i| {
         if (overflow_page_ids[i] == 0) continue;
         if (values[i] == .null_value) continue;
         const col = schema.columns[i];
         if (col.column_type != .string) continue;
-        overflow_page_ids[i] = try writeOverflowChain(
+        overflow_chain_stats[i] = try writeOverflowChain(
             pool,
+            wal,
+            tx_id,
             overflow_allocator,
             values[i].string,
         );
+        overflow_page_ids[i] = overflow_chain_stats[i].first_page_id;
     }
 }
 
 fn writeOverflowChain(
     pool: *BufferPool,
+    wal: *Wal,
+    tx_id: TxId,
     overflow_allocator: *OverflowPageIdAllocator,
     payload: []const u8,
-) MutationError!u64 {
+) MutationError!OverflowChainStats {
     std.debug.assert(payload.len > overflow_mod.string_inline_threshold_bytes);
     const chunk_capacity = OverflowPage.max_payload_len();
     std.debug.assert(chunk_capacity > 0);
 
     const first_page_id = overflow_allocator.allocate() catch |e|
         return mapOverflowAllocatorError(e);
+    var page_count: u32 = 0;
 
     var payload_offset: usize = 0;
     var current_page_id = first_page_id;
@@ -624,9 +712,29 @@ fn writeOverflowChain(
         pinned.markDirty();
 
         payload_offset += chunk_len;
+        page_count += 1;
         current_page_id = next_page_id;
     }
-    return first_page_id;
+
+    var payload_buf: [16]u8 = undefined;
+    const payload_meta: OverflowChainRecordMeta = .{
+        .first_page_id = first_page_id,
+        .page_count = page_count,
+        .payload_bytes = @intCast(payload.len),
+    };
+    const payload_len = encodeOverflowChainRecordMeta(payload_buf[0..], payload_meta);
+    _ = wal.append(
+        tx_id,
+        .overflow_chain_create,
+        first_page_id,
+        payload_buf[0..payload_len],
+    ) catch |e| return mapWalAppendError(e);
+
+    return .{
+        .first_page_id = first_page_id,
+        .page_count = page_count,
+        .payload_bytes = @intCast(payload.len),
+    };
 }
 
 fn decodeRowWithOverflow(
@@ -685,6 +793,207 @@ fn resolveOverflowStringIntoArena(
         current = chunk.next_page_id;
     }
     return string_arena.finishString(start);
+}
+
+fn collectOverflowRootsFromRow(
+    schema: *const RowSchema,
+    row_data: []const u8,
+    out_overflow_roots: []u64,
+) MutationError!usize {
+    std.debug.assert(out_overflow_roots.len >= schema.column_count);
+    var count: usize = 0;
+    for (0..schema.column_count) |i| {
+        const decoded = row_mod.decodeColumnStorageChecked(
+            schema,
+            row_data,
+            @intCast(i),
+        ) catch return error.Corruption;
+        switch (decoded) {
+            .value => {},
+            .string_overflow_page_id => |first_page_id| {
+                if (first_page_id == 0) return error.Corruption;
+                var seen = false;
+                for (0..count) |existing_idx| {
+                    if (out_overflow_roots[existing_idx] == first_page_id) {
+                        seen = true;
+                        break;
+                    }
+                }
+                if (seen) continue;
+                if (count >= out_overflow_roots.len) return error.Corruption;
+                out_overflow_roots[count] = first_page_id;
+                count += 1;
+            },
+        }
+    }
+    return count;
+}
+
+fn appendOverflowRelinkWalForRow(
+    wal: *Wal,
+    tx_id: TxId,
+    row_page_id: u64,
+    new_overflow_page_ids: []const u64,
+    old_first_page_id: u64,
+) MutationError!void {
+    for (new_overflow_page_ids) |new_first_page_id| {
+        if (new_first_page_id == 0) continue;
+        var payload_buf: [16]u8 = undefined;
+        const payload_len = encodeOverflowRelinkRecordMeta(
+            payload_buf[0..],
+            .{
+                .old_first_page_id = old_first_page_id,
+                .new_first_page_id = new_first_page_id,
+            },
+        );
+        _ = wal.append(
+            tx_id,
+            .overflow_chain_relink,
+            row_page_id,
+            payload_buf[0..payload_len],
+        ) catch |e| return mapWalAppendError(e);
+    }
+}
+
+fn enqueueOverflowChainForReclaim(
+    catalog: *Catalog,
+    wal: *Wal,
+    tx_id: TxId,
+    first_page_id: u64,
+) MutationError!void {
+    catalog.overflow_reclaim_queue.enqueue(first_page_id) catch |e| {
+        return switch (e) {
+            error.InvalidChainRoot => error.Corruption,
+            error.QueueFull => error.OverflowReclaimQueueFull,
+            error.QueueEmpty => error.Corruption,
+            error.DuplicateChainRoot => error.Corruption,
+        };
+    };
+    var payload_buf: [16]u8 = undefined;
+    const payload_len = encodeOverflowChainRecordMeta(
+        payload_buf[0..],
+        .{
+            .first_page_id = first_page_id,
+            .page_count = 0,
+            .payload_bytes = 0,
+        },
+    );
+    _ = wal.append(
+        tx_id,
+        .overflow_chain_unlink,
+        first_page_id,
+        payload_buf[0..payload_len],
+    ) catch |e| return mapWalAppendError(e);
+}
+
+fn drainOverflowReclaimQueue(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    tx_id: TxId,
+    max_items: usize,
+) MutationError!void {
+    var processed: usize = 0;
+    while (processed < max_items and !catalog.overflow_reclaim_queue.isEmpty()) : (processed += 1) {
+        const first_page_id = catalog.overflow_reclaim_queue.dequeue() catch
+            return error.Corruption;
+        const page_count = try reclaimOverflowChain(
+            pool,
+            &catalog.overflow_page_allocator,
+            first_page_id,
+        );
+        var payload_buf: [16]u8 = undefined;
+        const payload_len = encodeOverflowChainRecordMeta(
+            payload_buf[0..],
+            .{
+                .first_page_id = first_page_id,
+                .page_count = page_count,
+                .payload_bytes = 0,
+            },
+        );
+        _ = wal.append(
+            tx_id,
+            .overflow_chain_reclaim,
+            first_page_id,
+            payload_buf[0..payload_len],
+        ) catch |e| return mapWalAppendError(e);
+    }
+}
+
+fn reclaimOverflowChain(
+    pool: *BufferPool,
+    overflow_allocator: *const OverflowPageIdAllocator,
+    first_page_id: u64,
+) MutationError!u32 {
+    if (!overflow_allocator.ownsPageId(first_page_id)) return error.Corruption;
+
+    var page_count: u32 = 0;
+    var hops: u64 = 0;
+    const max_hops = overflow_allocator.capacity();
+    var current = first_page_id;
+    while (true) {
+        if (hops >= max_hops) return error.Corruption;
+        hops += 1;
+
+        var pinned = try PinnedMutationPage.pin(pool, current);
+        defer pinned.release();
+        if (pinned.page.header.page_type != .overflow) return error.Corruption;
+
+        const chunk = OverflowPage.readChunk(pinned.page) catch return error.Corruption;
+        const next_page_id = chunk.next_page_id;
+        if (next_page_id != OverflowPage.null_page_id and
+            !overflow_allocator.ownsPageId(next_page_id))
+        {
+            return error.Corruption;
+        }
+
+        pinned.page.header.page_type = .free;
+        @memset(&pinned.page.content, 0);
+        pinned.markDirty();
+        page_count += 1;
+
+        if (next_page_id == OverflowPage.null_page_id) break;
+        current = next_page_id;
+    }
+    return page_count;
+}
+
+fn encodeOverflowChainRecordMeta(
+    out: []u8,
+    meta: OverflowChainRecordMeta,
+) usize {
+    std.debug.assert(out.len >= 16);
+    @memcpy(out[0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, meta.first_page_id)));
+    @memcpy(out[8..12], std.mem.asBytes(&std.mem.nativeToLittle(u32, meta.page_count)));
+    @memcpy(out[12..16], std.mem.asBytes(&std.mem.nativeToLittle(u32, meta.payload_bytes)));
+    return 16;
+}
+
+fn decodeOverflowChainRecordMeta(payload: []const u8) MutationError!OverflowChainRecordMeta {
+    if (payload.len != 16) return error.Corruption;
+    return .{
+        .first_page_id = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[0..8]).*),
+        .page_count = std.mem.littleToNative(u32, std.mem.bytesAsValue(u32, payload[8..12]).*),
+        .payload_bytes = std.mem.littleToNative(u32, std.mem.bytesAsValue(u32, payload[12..16]).*),
+    };
+}
+
+fn encodeOverflowRelinkRecordMeta(
+    out: []u8,
+    meta: OverflowRelinkRecordMeta,
+) usize {
+    std.debug.assert(out.len >= 16);
+    @memcpy(out[0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, meta.old_first_page_id)));
+    @memcpy(out[8..16], std.mem.asBytes(&std.mem.nativeToLittle(u64, meta.new_first_page_id)));
+    return 16;
+}
+
+fn decodeOverflowRelinkRecordMeta(payload: []const u8) MutationError!OverflowRelinkRecordMeta {
+    if (payload.len != 16) return error.Corruption;
+    return .{
+        .old_first_page_id = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[0..8]).*),
+        .new_first_page_id = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[8..16]).*),
+    };
 }
 
 fn enforceOutgoingReferentialIntegrity(
@@ -870,6 +1179,7 @@ fn cascadeDeleteReferencingRows(
     source_column_id: catalog_mod.ColumnId,
     key: Value,
 ) MutationError!void {
+    const source_model = &catalog.models[source_model_id];
     var row_ids: [scan_mod.max_result_rows]RowId = undefined;
     const count = try collectReferencingRows(
         catalog,
@@ -881,7 +1191,15 @@ fn cascadeDeleteReferencingRows(
     );
     var i: u16 = 0;
     while (i < count) : (i += 1) {
-        try deleteSingleRow(pool, wal, undo_log, tx_id, row_ids[i]);
+        try deleteSingleRow(
+            @constCast(catalog),
+            pool,
+            wal,
+            undo_log,
+            tx_id,
+            &source_model.row_schema,
+            row_ids[i],
+        );
     }
 }
 
@@ -1782,6 +2100,362 @@ test "update spills oversized string and read resolves overflow payload" {
 
     try testing.expectEqual(@as(u16, 1), result.row_count);
     try testing.expectEqualSlices(u8, long_name[0..], result.rows[0].values[1].string);
+}
+
+test "overflow WAL lifecycle is deterministic for replace path" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.catalog.overflow_page_allocator = try overflow_mod.PageIdAllocator.initWithBounds(6_000, 16);
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    var first_name: [1200]u8 = undefined;
+    @memset(first_name[0..], 'a');
+    var insert_src_buf: [1500]u8 = undefined;
+    const insert_src = try std.fmt.bufPrint(
+        insert_src_buf[0..],
+        "User |> insert(id = 1, name = \"{s}\")",
+        .{first_name[0..]},
+    );
+    const insert_tok = tokenizer_mod.tokenize(insert_src);
+    const insert_parsed = parser_mod.parse(&insert_tok, insert_src);
+    const insert_root = insert_parsed.ast.getNode(insert_parsed.ast.root);
+    const insert_pipeline = insert_parsed.ast.getNode(insert_root.data.unary);
+    const insert_op = insert_parsed.ast.getNode(insert_pipeline.data.binary.rhs);
+    _ = try executeInsert(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx,
+        env.model_id,
+        &insert_parsed.ast,
+        &insert_tok,
+        insert_src,
+        insert_op.data.unary,
+    );
+
+    var second_name: [1200]u8 = undefined;
+    @memset(second_name[0..], 'b');
+    var update_src_buf: [1600]u8 = undefined;
+    const update_src = try std.fmt.bufPrint(
+        update_src_buf[0..],
+        "User |> where(id = 1) |> update(name = \"{s}\")",
+        .{second_name[0..]},
+    );
+    const update_tok = tokenizer_mod.tokenize(update_src);
+    const update_parsed = parser_mod.parse(&update_tok, update_src);
+    const update_root = update_parsed.ast.getNode(update_parsed.ast.root);
+    const update_pipeline = update_parsed.ast.getNode(update_root.data.unary);
+    const update_where = update_parsed.ast.getNode(update_pipeline.data.binary.rhs);
+    const update_op = update_parsed.ast.getNode(update_where.next);
+    _ = try executeUpdate(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        &env.undo_log,
+        tx,
+        &snap,
+        &env.tm,
+        env.model_id,
+        &update_parsed.ast,
+        &update_tok,
+        update_src,
+        update_where.data.unary,
+        update_op.data.unary,
+        testing.allocator,
+    );
+
+    try env.wal.flush();
+
+    var records_buf: [64]wal_mod.Record = undefined;
+    var payload_buf: [16 * 1024]u8 = undefined;
+    const decoded = try env.wal.readFromInto(1, &records_buf, &payload_buf);
+    const records = records_buf[0..decoded.records_len];
+
+    var overflow_types: [8]wal_mod.RecordType = undefined;
+    var overflow_type_count: usize = 0;
+    var created_chain: u64 = 0;
+    var unlinked_chain: u64 = 0;
+    var reclaimed_chain: u64 = 0;
+    for (records) |rec| {
+        switch (rec.record_type) {
+            .overflow_chain_create, .overflow_chain_relink, .overflow_chain_unlink, .overflow_chain_reclaim => {
+                overflow_types[overflow_type_count] = rec.record_type;
+                overflow_type_count += 1;
+            },
+            else => continue,
+        }
+        if (rec.record_type == .overflow_chain_create and created_chain == 0) {
+            const meta = try decodeOverflowChainRecordMeta(rec.payload);
+            created_chain = meta.first_page_id;
+        }
+        if (rec.record_type == .overflow_chain_unlink) {
+            const meta = try decodeOverflowChainRecordMeta(rec.payload);
+            unlinked_chain = meta.first_page_id;
+        }
+        if (rec.record_type == .overflow_chain_reclaim) {
+            const meta = try decodeOverflowChainRecordMeta(rec.payload);
+            reclaimed_chain = meta.first_page_id;
+            try testing.expect(meta.page_count > 0);
+        }
+    }
+    try testing.expectEqual(@as(usize, 6), overflow_type_count);
+    try testing.expectEqual(wal_mod.RecordType.overflow_chain_create, overflow_types[0]);
+    try testing.expectEqual(wal_mod.RecordType.overflow_chain_relink, overflow_types[1]);
+    try testing.expectEqual(wal_mod.RecordType.overflow_chain_create, overflow_types[2]);
+    try testing.expectEqual(wal_mod.RecordType.overflow_chain_relink, overflow_types[3]);
+    try testing.expectEqual(wal_mod.RecordType.overflow_chain_unlink, overflow_types[4]);
+    try testing.expectEqual(wal_mod.RecordType.overflow_chain_reclaim, overflow_types[5]);
+    try testing.expectEqual(created_chain, unlinked_chain);
+    try testing.expectEqual(created_chain, reclaimed_chain);
+    try testing.expect(env.catalog.overflow_reclaim_queue.isEmpty());
+}
+
+test "overflow WAL lifecycle includes unlink and reclaim on delete" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.catalog.overflow_page_allocator = try overflow_mod.PageIdAllocator.initWithBounds(7_000, 8);
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    var long_name: [1200]u8 = undefined;
+    @memset(long_name[0..], 'd');
+    var insert_src_buf: [1500]u8 = undefined;
+    const insert_src = try std.fmt.bufPrint(
+        insert_src_buf[0..],
+        "User |> insert(id = 1, name = \"{s}\")",
+        .{long_name[0..]},
+    );
+    const insert_tok = tokenizer_mod.tokenize(insert_src);
+    const insert_parsed = parser_mod.parse(&insert_tok, insert_src);
+    const insert_root = insert_parsed.ast.getNode(insert_parsed.ast.root);
+    const insert_pipeline = insert_parsed.ast.getNode(insert_root.data.unary);
+    const insert_op = insert_parsed.ast.getNode(insert_pipeline.data.binary.rhs);
+    _ = try executeInsert(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx,
+        env.model_id,
+        &insert_parsed.ast,
+        &insert_tok,
+        insert_src,
+        insert_op.data.unary,
+    );
+
+    const delete_src = "User |> where(id = 1) |> delete";
+    const delete_tok = tokenizer_mod.tokenize(delete_src);
+    const delete_parsed = parser_mod.parse(&delete_tok, delete_src);
+    const delete_root = delete_parsed.ast.getNode(delete_parsed.ast.root);
+    const delete_pipeline = delete_parsed.ast.getNode(delete_root.data.unary);
+    const delete_where = delete_parsed.ast.getNode(delete_pipeline.data.binary.rhs);
+    _ = try executeDelete(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        &env.undo_log,
+        tx,
+        &snap,
+        &env.tm,
+        env.model_id,
+        &delete_parsed.ast,
+        &delete_tok,
+        delete_src,
+        delete_where.data.unary,
+        testing.allocator,
+    );
+
+    try env.wal.flush();
+
+    var records_buf: [32]wal_mod.Record = undefined;
+    var payload_buf: [8 * 1024]u8 = undefined;
+    const decoded = try env.wal.readFromInto(1, &records_buf, &payload_buf);
+    const records = records_buf[0..decoded.records_len];
+    var overflow_types: [6]wal_mod.RecordType = undefined;
+    var overflow_type_count: usize = 0;
+    for (records) |rec| {
+        switch (rec.record_type) {
+            .overflow_chain_create, .overflow_chain_relink, .overflow_chain_unlink, .overflow_chain_reclaim => {
+                overflow_types[overflow_type_count] = rec.record_type;
+                overflow_type_count += 1;
+            },
+            else => {},
+        }
+    }
+    try testing.expectEqual(@as(usize, 4), overflow_type_count);
+    try testing.expectEqual(wal_mod.RecordType.overflow_chain_create, overflow_types[0]);
+    try testing.expectEqual(wal_mod.RecordType.overflow_chain_relink, overflow_types[1]);
+    try testing.expectEqual(wal_mod.RecordType.overflow_chain_unlink, overflow_types[2]);
+    try testing.expectEqual(wal_mod.RecordType.overflow_chain_reclaim, overflow_types[3]);
+    try testing.expect(env.catalog.overflow_reclaim_queue.isEmpty());
+}
+
+test "overflow lifecycle WAL records survive crash and restart recovery" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.catalog.overflow_page_allocator = try overflow_mod.PageIdAllocator.initWithBounds(8_000, 24);
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    var name_a: [1200]u8 = undefined;
+    @memset(name_a[0..], 'k');
+    var insert_src_buf: [1500]u8 = undefined;
+    const insert_src = try std.fmt.bufPrint(
+        insert_src_buf[0..],
+        "User |> insert(id = 1, name = \"{s}\")",
+        .{name_a[0..]},
+    );
+    const insert_tok = tokenizer_mod.tokenize(insert_src);
+    const insert_parsed = parser_mod.parse(&insert_tok, insert_src);
+    const insert_root = insert_parsed.ast.getNode(insert_parsed.ast.root);
+    const insert_pipeline = insert_parsed.ast.getNode(insert_root.data.unary);
+    const insert_op = insert_parsed.ast.getNode(insert_pipeline.data.binary.rhs);
+    _ = try executeInsert(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx,
+        env.model_id,
+        &insert_parsed.ast,
+        &insert_tok,
+        insert_src,
+        insert_op.data.unary,
+    );
+
+    var name_b: [1200]u8 = undefined;
+    @memset(name_b[0..], 'm');
+    var update_src_buf: [1600]u8 = undefined;
+    const update_src = try std.fmt.bufPrint(
+        update_src_buf[0..],
+        "User |> where(id = 1) |> update(name = \"{s}\")",
+        .{name_b[0..]},
+    );
+    const update_tok = tokenizer_mod.tokenize(update_src);
+    const update_parsed = parser_mod.parse(&update_tok, update_src);
+    const update_root = update_parsed.ast.getNode(update_parsed.ast.root);
+    const update_pipeline = update_parsed.ast.getNode(update_root.data.unary);
+    const update_where = update_parsed.ast.getNode(update_pipeline.data.binary.rhs);
+    const update_op = update_parsed.ast.getNode(update_where.next);
+    _ = try executeUpdate(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        &env.undo_log,
+        tx,
+        &snap,
+        &env.tm,
+        env.model_id,
+        &update_parsed.ast,
+        &update_tok,
+        update_src,
+        update_where.data.unary,
+        update_op.data.unary,
+        testing.allocator,
+    );
+
+    const delete_src = "User |> where(id = 1) |> delete";
+    const delete_tok = tokenizer_mod.tokenize(delete_src);
+    const delete_parsed = parser_mod.parse(&delete_tok, delete_src);
+    const delete_root = delete_parsed.ast.getNode(delete_parsed.ast.root);
+    const delete_pipeline = delete_parsed.ast.getNode(delete_root.data.unary);
+    const delete_where = delete_parsed.ast.getNode(delete_pipeline.data.binary.rhs);
+    _ = try executeDelete(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        &env.undo_log,
+        tx,
+        &snap,
+        &env.tm,
+        env.model_id,
+        &delete_parsed.ast,
+        &delete_tok,
+        delete_src,
+        delete_where.data.unary,
+        testing.allocator,
+    );
+
+    try env.wal.flush();
+    env.disk.crash();
+
+    var recovered = Wal.init(testing.allocator, env.disk.storage());
+    defer recovered.deinit();
+    try recovered.recover();
+
+    var records_buf: [64]wal_mod.Record = undefined;
+    var payload_buf: [16 * 1024]u8 = undefined;
+    const decoded = try recovered.readFromInto(1, &records_buf, &payload_buf);
+    const records = records_buf[0..decoded.records_len];
+
+    var creates: usize = 0;
+    var relinks: usize = 0;
+    var unlinks: usize = 0;
+    var reclaims: usize = 0;
+    for (records) |rec| {
+        switch (rec.record_type) {
+            .overflow_chain_create => {
+                _ = try decodeOverflowChainRecordMeta(rec.payload);
+                creates += 1;
+            },
+            .overflow_chain_relink => {
+                const meta = try decodeOverflowRelinkRecordMeta(rec.payload);
+                try testing.expect(meta.new_first_page_id != 0);
+                relinks += 1;
+            },
+            .overflow_chain_unlink => {
+                _ = try decodeOverflowChainRecordMeta(rec.payload);
+                unlinks += 1;
+            },
+            .overflow_chain_reclaim => {
+                const meta = try decodeOverflowChainRecordMeta(rec.payload);
+                try testing.expect(meta.page_count > 0);
+                reclaims += 1;
+            },
+            else => {},
+        }
+    }
+    try testing.expectEqual(@as(usize, 2), creates);
+    try testing.expectEqual(@as(usize, 2), relinks);
+    try testing.expectEqual(@as(usize, 2), unlinks);
+    try testing.expectEqual(@as(usize, 2), reclaims);
+}
+
+test "reclaim drain fails closed on cyclic overflow chain corruption" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.catalog.overflow_page_allocator = try overflow_mod.PageIdAllocator.initWithBounds(9_000, 2);
+
+    {
+        var first = try PinnedMutationPage.pin(&env.pool, 9_000);
+        defer first.release();
+        OverflowPage.init(first.page);
+        try OverflowPage.writeChunk(first.page, "x", 9_001);
+        first.markDirty();
+    }
+    {
+        var second = try PinnedMutationPage.pin(&env.pool, 9_001);
+        defer second.release();
+        OverflowPage.init(second.page);
+        try OverflowPage.writeChunk(second.page, "y", 9_000);
+        second.markDirty();
+    }
+
+    try env.catalog.overflow_reclaim_queue.enqueue(9_000);
+    const tx = try env.tm.begin();
+    try testing.expectError(
+        error.Corruption,
+        drainOverflowReclaimQueue(&env.catalog, &env.pool, &env.wal, tx, 1),
+    );
 }
 
 test "update pushes undo entry" {

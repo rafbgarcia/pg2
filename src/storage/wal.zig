@@ -15,6 +15,10 @@ pub const RecordType = enum(u8) {
     btree_split_leaf = 10,
     btree_split_internal = 11,
     btree_new_root = 12,
+    overflow_chain_create = 13,
+    overflow_chain_relink = 14,
+    overflow_chain_unlink = 15,
+    overflow_chain_reclaim = 16,
 };
 
 /// A single WAL record.

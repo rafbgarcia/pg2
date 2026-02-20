@@ -20,6 +20,11 @@ Status labels:
 - `supported`: `where(...) |> delete`
 - `supported`: model scan reads (`User`) and filtered reads (`User |> where(...)`)
 
+String storage behavior (current):
+- `supported`: strings above 1024 bytes are stored through overflow chains transparently.
+- `supported`: replace/delete of spilled strings use deterministic logical unlink + reclaim pipeline.
+- `supported`: malformed overflow chain reads fail closed as corruption-class errors.
+
 ## Read Pipeline Operators
 
 - `supported`: `where(...)`

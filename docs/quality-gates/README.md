@@ -42,5 +42,6 @@ Each artifact answers the mandatory checklist in `docs/QUALITY_GATES.md`:
 - `docs/quality-gates/202602200004-overflow-inline-pointer-spill-read-path.md`
 - `docs/quality-gates/202602200005-overflow-page-foundation.md`
 - `docs/quality-gates/202602200006-row-growth-update-crud-fix.md`
+- `docs/quality-gates/202602201230-overflow-reclaim-wal-lifecycle.md`
 - `docs/quality-gates/README.md`
 - `docs/quality-gates/TEMPLATE.md`

@@ -15,6 +15,13 @@ pub const OverflowAllocatorError = error{
     RegionExhausted,
 };
 
+pub const OverflowReclaimError = error{
+    InvalidChainRoot,
+    QueueFull,
+    QueueEmpty,
+    DuplicateChainRoot,
+};
+
 /// Dedicated page-id region for overflow chains.
 /// This region is intentionally disjoint from low heap page-id ranges and
 /// from WAL's high page-id region.
@@ -25,6 +32,7 @@ pub const default_region_end_page_id: u64 =
 
 /// String payloads at or below this threshold stay inline in row bytes.
 pub const string_inline_threshold_bytes: usize = 1024;
+pub const reclaim_queue_capacity: usize = 256;
 
 pub const PageIdAllocator = struct {
     region_start_page_id: u64 = default_region_start_page_id,
@@ -64,6 +72,46 @@ pub const PageIdAllocator = struct {
 
     pub fn capacity(self: *const PageIdAllocator) u64 {
         return self.region_end_page_id - self.region_start_page_id;
+    }
+};
+
+pub const ReclaimQueue = struct {
+    entries: [reclaim_queue_capacity]u64 = [_]u64{0} ** reclaim_queue_capacity,
+    head: usize = 0,
+    tail: usize = 0,
+    len: usize = 0,
+
+    pub fn enqueue(self: *ReclaimQueue, first_page_id: u64) OverflowReclaimError!void {
+        if (first_page_id == 0) return error.InvalidChainRoot;
+        if (self.contains(first_page_id)) return error.DuplicateChainRoot;
+        if (self.len >= reclaim_queue_capacity) return error.QueueFull;
+        self.entries[self.tail] = first_page_id;
+        self.tail = (self.tail + 1) % reclaim_queue_capacity;
+        self.len += 1;
+    }
+
+    pub fn dequeue(self: *ReclaimQueue) OverflowReclaimError!u64 {
+        if (self.len == 0) return error.QueueEmpty;
+        const out = self.entries[self.head];
+        self.entries[self.head] = 0;
+        self.head = (self.head + 1) % reclaim_queue_capacity;
+        self.len -= 1;
+        return out;
+    }
+
+    pub fn isEmpty(self: *const ReclaimQueue) bool {
+        return self.len == 0;
+    }
+
+    pub fn contains(self: *const ReclaimQueue, first_page_id: u64) bool {
+        if (first_page_id == 0) return false;
+        var idx = self.head;
+        var remaining = self.len;
+        while (remaining > 0) : (remaining -= 1) {
+            if (self.entries[idx] == first_page_id) return true;
+            idx = (idx + 1) % reclaim_queue_capacity;
+        }
+        return false;
     }
 };
 
@@ -230,4 +278,15 @@ test "page-id allocator allocates monotonically and exhausts fail-closed" {
 
 test "page-id allocator rejects invalid region" {
     try std.testing.expectError(error.InvalidRegion, PageIdAllocator.initWithBounds(10, 0));
+}
+
+test "reclaim queue is FIFO and rejects duplicates" {
+    var queue: ReclaimQueue = .{};
+    try queue.enqueue(50);
+    try queue.enqueue(60);
+    try std.testing.expectError(error.DuplicateChainRoot, queue.enqueue(50));
+    try std.testing.expectEqual(@as(u64, 50), try queue.dequeue());
+    try std.testing.expectEqual(@as(u64, 60), try queue.dequeue());
+    try std.testing.expect(queue.isEmpty());
+    try std.testing.expectError(error.QueueEmpty, queue.dequeue());
 }

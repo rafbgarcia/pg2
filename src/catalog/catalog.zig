@@ -6,6 +6,7 @@ const ColumnType = row_mod.ColumnType;
 const RowSchema = row_mod.RowSchema;
 const Value = row_mod.Value;
 const OverflowPageIdAllocator = overflow_mod.PageIdAllocator;
+const OverflowReclaimQueue = overflow_mod.ReclaimQueue;
 
 /// Capacity limits.
 pub const max_models = 256;
@@ -137,6 +138,7 @@ pub const Catalog = struct {
     sealed: bool = false,
     overflow_page_allocator: OverflowPageIdAllocator =
         OverflowPageIdAllocator.initDefault(),
+    overflow_reclaim_queue: OverflowReclaimQueue = .{},
 
     name_buffer: [max_name_bytes]u8 = undefined,
     name_buffer_len: u32 = 0,

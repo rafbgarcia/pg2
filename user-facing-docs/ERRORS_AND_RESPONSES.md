@@ -42,6 +42,17 @@ Current error classes:
 - For `ERR class=corruption ...`: treat as operational incident.
 - For `ERR class=fatal ...`: treat as deterministic invalid operation/configuration unless docs state retry behavior.
 
+## Current Overflow-Related Error Codes
+
+When surfaced through `ERR query: ... class=<x>; code=<CodeName>`:
+
+- `OverflowRegionExhausted` (`resource_exhausted`):
+  - overflow page-id region cannot allocate new chain pages.
+- `OverflowReclaimQueueFull` (`resource_exhausted`):
+  - deterministic reclaim backlog reached configured queue capacity.
+- `Corruption` (`corruption`):
+  - malformed overflow pointer/page/chain detected (fail-closed).
+
 ## Stability Note
 
 Error prefix format and class/code boundary format are the stable integration points for clients.

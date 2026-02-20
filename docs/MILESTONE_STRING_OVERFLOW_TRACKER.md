@@ -63,7 +63,7 @@ These are confirmed in chat with the user:
   - `ScanResult` now owns string storage for allocator-returning scan APIs (`tableScan`, `indexRange`) to guarantee lifetime safety.
   - Executor read path threads per-query arena to `tableScanInto` calls (including nested relation scans).
 
-### Implemented in current increment (`76598c4`)
+### Implemented in committed chunk `76598c4`
 
 - Dedicated overflow page-id region allocator:
   - Added deterministic allocator state in `src/storage/overflow.zig` with default dedicated region bounds, ownership checks, and fail-closed `RegionExhausted`.
@@ -90,33 +90,65 @@ These are confirmed in chat with the user:
   - Mutation/scan roundtrip for spilled insert and spilled update.
   - Deterministic overflow-region exhaustion rejection.
 
+### Implemented in current increment (this session, pending commit)
+
+- Deterministic overflow reclaim pipeline:
+  - Added catalog-owned deterministic reclaim queue (`catalog.overflow_reclaim_queue`).
+  - Update/delete paths now:
+    - decode old-row overflow roots,
+    - append logical unlink records,
+    - enqueue reclaim work deterministically,
+    - drain reclaim with fixed per-mutation budget (1 chain).
+  - Reclaim rewrites overflow pages back to `.free` with zeroed content.
+- Overflow WAL lifecycle contract:
+  - Added explicit WAL record types for overflow lifecycle:
+    - `overflow_chain_create`
+    - `overflow_chain_relink`
+    - `overflow_chain_unlink`
+    - `overflow_chain_reclaim`
+  - Chain metadata payload contract is explicit and bounded for create/unlink/reclaim.
+  - Relink metadata payload contract is explicit and bounded for row-pointer publication events.
+- Crash/restart deterministic coverage:
+  - Added mutation deterministic tests for:
+    - replace path WAL ordering,
+    - delete path unlink/reclaim ordering,
+    - crash + restart WAL recover decode coverage for spill/replace/delete lifecycle.
+  - Added server-path E2E coverage for overflow insert/update/read and delete.
+- Malformed/extreme hardening:
+  - Reclaim traversal is fail-closed on:
+    - out-of-region ids,
+    - non-overflow page type in chain,
+    - malformed page format,
+    - excessive hop count / cyclic chain behavior.
+  - Added deterministic corruption test for cyclic overflow chain reclaim.
+
 ## Known Test State
 
-- `zig build test` passes for this increment.
+- `zig build test` passes for this increment (including overflow reclaim and new E2E overflow tests).
 
 ## Next Logical Chunk
 
-1. Overflow reclaim pipeline:
-   - Define deterministic unlink + reclaim queue behavior for replaced/deleted overflow chains.
-   - Ensure reclaim ordering is deterministic and fail-closed under corruption.
-2. Durability/WAL contract:
-   - Add explicit WAL payload contract for overflow chain create/relink/unlink.
-   - Define redo/undo ordering for row-pointer publication and reclaim lifecycle.
-3. Crash/restart deterministic coverage:
-   - Add simulation/fault tests for spill, replace, delete, and restart recovery visibility.
-4. Read/write safety hardening:
-   - Add bounds checks for extreme chain lengths and malformed on-disk chains in recovery/read paths.
+1. Durable replay integration:
+   - Integrate overflow lifecycle records into a full data-page WAL replay path (not only WAL envelope+decode recovery).
+2. Overflow reclaim backlog observability:
+   - Expose queue depth and reclaim throughput in inspect/ops surfaces.
+3. Tx-level abort semantics:
+   - Define and test overflow lifecycle behavior under transaction abort/rollback with explicit undo/reclaim ordering.
 
 ## Next-Session Kickoff (Concrete)
 
-Completed in increment `76598c4` (all items 1..6). Next focus should move to:
+Completed in this session (pending commit):
 
-1. Overflow reclaim pipeline:
-   - Define deterministic unlink + reclaim queue behavior for replaced/deleted overflow chains.
-2. WAL durability contract for overflow chain lifecycle:
-   - Define create/relink/unlink redo+undo payload contract.
-3. Crash/restart deterministic fault matrix:
-   - Add spill/update/delete crash points and recovery assertions.
+1. Overflow reclaim pipeline.
+2. WAL lifecycle contract for create/relink/unlink/reclaim.
+3. Deterministic crash/restart coverage for spill/replace/delete.
+4. Malformed/cyclic chain fail-closed reclaim coverage.
+
+Next session should move to:
+
+1. Integrate overflow lifecycle WAL into full page replay/recovery.
+2. Add tx-abort lifecycle tests for overflow create/relink/unlink/reclaim.
+3. Add inspect-level reclaim backlog visibility for ops/debuggability.
 
 ## Fresh Codex Handoff Commands
 
@@ -124,6 +156,6 @@ Use these first in a new session:
 
 1. `git status --short`
 2. `zig build test`
-3. `git show --name-only --stat 76598c4`
-4. `rg -n "OverflowRegionExhausted|decodeColumnStorageChecked|string_inline_threshold_bytes|overflow_page_allocator" src/storage src/executor src/catalog src/tiger`
+3. `git log -1 --stat`
+4. `rg -n "overflow_chain_create|overflow_chain_relink|overflow_chain_unlink|overflow_chain_reclaim|overflow_reclaim_queue" src docs user-facing-docs`
 5. Continue from "Next Logical Chunk" above.
