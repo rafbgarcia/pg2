@@ -1,7 +1,7 @@
 # Quality Gate Artifact: 202602202000-insert-default-values
 
 - Artifact ID: `202602202000-insert-default-values`
-- Commit: `pending`
+- Commit: `186e6e0`
 - Release: `0.2.0`
 - Title: `Insert omitted-field default values`
 - Scope: `Support typed schema defaults and apply them only for omitted insert fields through server session path.`
