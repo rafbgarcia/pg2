@@ -1,8 +1,16 @@
 # pg2 Next Milestones
 
 This checklist is for fresh Codex sessions to continue high-priority implementation work in order.
+Release-readiness gates live in `V1_READINESS_CHECKLIST.md`.
 
-- [ ] Milestone 1: Foreign keys with explicit referential actions
+## Milestone to Gate Mapping
+
+- Milestone 1 (FK + referential actions) -> Gate 4, Gate 8
+- Milestone 2 (MVCC + recovery hardening) -> Gate 5, Gate 8
+- Milestone 3 (introspection expansion) -> Gate 3, Gate 7, Gate 8
+- Milestone 4 (Tiger Style PR gate) -> Release Decision (Tiger Style artifacts)
+
+- [x] Milestone 1: Foreign keys with explicit referential actions
   - Scope: Add FK declaration/validation and enforce explicit `ON DELETE` / `ON UPDATE` semantics with fail-closed behavior for missing or unsupported actions.
   - Deliverables:
     - Parser + catalog support for FK metadata and actions.

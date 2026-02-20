@@ -4,6 +4,10 @@ A database built from scratch in Zig, focused on developer experience and transp
 
 pg2's mission is to make the database the complete data system without leaking data responsibilities to the application layer (e.g. pg2 handles online data and schema migrations, partitions, etc.).
 
+## Guidelines
+
+- [CRITICAL] Do not make design assumptions - always confirm with the user.
+
 ## Project Principles
 
 - **One obvious way for common tasks.** Prefer a single clear default path for schema design, querying, and operations; advanced controls are explicit opt-ins.
@@ -43,6 +47,13 @@ zig build              # Build the project
 zig build test         # Run unit tests
 zig build sim          # Run deterministic simulation tests (takes a seed argument)
 ```
+
+## Planning References
+
+Before starting the next implementation task, reference both:
+
+- `TODO.md` for milestone sequencing and scope.
+- `V1_READINESS_CHECKLIST.md` for release-readiness gates and acceptance criteria.
 
 ## Conventions
 
