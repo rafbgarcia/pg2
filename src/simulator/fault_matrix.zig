@@ -11,6 +11,7 @@ const SimulatedDisk = disk_mod.SimulatedDisk;
 const Wal = wal_mod.Wal;
 const BufferPool = buffer_pool_mod.BufferPool;
 const BTree = btree_mod.BTree;
+const HeapPage = heap_mod.HeapPage;
 const RowId = heap_mod.RowId;
 const TxManager = tx_mod.TxManager;
 const UndoLog = undo_mod.UndoLog;
@@ -956,6 +957,151 @@ fn runRollbackVisibilityEdge(seed: u64) !ScenarioOutcome {
     return .{ .signature = h.final() };
 }
 
+fn runWalUndoCrashVisibilityConsistency(seed: u64) !ScenarioOutcome {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rand = prng.random();
+
+    const page_id: u64 = 1400 + rand.uintLessThan(u64, 32);
+    const wal_fixed_capacity: usize = 32;
+
+    var old_row: [48]u8 = undefined;
+    const old_row_len = 12 + rand.uintLessThan(usize, 12);
+    rand.bytes(old_row[0..old_row_len]);
+
+    var failed_new_row: [48]u8 = undefined;
+    const failed_new_row_len = if (old_row_len > 1)
+        1 + rand.uintLessThan(usize, old_row_len)
+    else
+        @as(usize, 1);
+    rand.bytes(failed_new_row[0..failed_new_row_len]);
+
+    var slot: u16 = 0;
+    var visible_before_crash_len: usize = 0;
+    var visible_before_crash: [48]u8 = undefined;
+
+    var disk = SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    {
+        var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 8);
+        defer pool.deinit();
+
+        var wal = Wal.init(std.testing.allocator, disk.storage());
+        defer wal.deinit();
+        pool.wal = &wal;
+
+        var tm = TxManager.init(std.testing.allocator);
+        defer tm.deinit();
+        var undo_log = try UndoLog.init(std.testing.allocator, 128, 8 * 1024);
+        defer undo_log.deinit();
+
+        const page = try pool.pin(page_id);
+        HeapPage.init(page);
+        pool.unpin(page_id, true);
+
+        const tx_insert = try tm.begin();
+        _ = try wal.beginTx(tx_insert);
+        const insert_lsn = try wal.append(tx_insert, .insert, page_id, old_row[0..old_row_len]);
+        {
+            const insert_page = try pool.pin(page_id);
+            slot = try HeapPage.insert(insert_page, old_row[0..old_row_len]);
+            insert_page.header.lsn = insert_lsn;
+            pool.unpin(page_id, true);
+        }
+        try tm.commit(tx_insert);
+        _ = try wal.commitTx(tx_insert);
+        try pool.flushAll();
+
+        try wal.reserveBufferCapacity(wal_fixed_capacity);
+
+        const tx_failed_update = try tm.begin();
+        _ = try wal.beginTx(tx_failed_update);
+        {
+            const update_page = try pool.pin(page_id);
+            defer pool.unpin(page_id, true);
+            const old_visible = HeapPage.read(update_page, slot) catch return error.StorageRead;
+            _ = try undo_log.push(tx_failed_update, page_id, slot, old_visible);
+            try HeapPage.update(update_page, slot, failed_new_row[0..failed_new_row_len]);
+            try std.testing.expectError(
+                error.OutOfMemory,
+                wal.append(tx_failed_update, .update, page_id, failed_new_row[0..failed_new_row_len]),
+            );
+        }
+        try tm.abort(tx_failed_update);
+
+        const tx_reader = try tm.begin();
+        defer tm.commit(tx_reader) catch {};
+        var snap = try tm.snapshot(tx_reader);
+        defer snap.deinit();
+        const visible = undo_log.findVisible(page_id, slot, &snap, &tm) orelse {
+            return error.Corruption;
+        };
+        visible_before_crash_len = visible.len;
+        @memcpy(
+            visible_before_crash[0..visible_before_crash_len],
+            visible,
+        );
+
+        try std.testing.expectEqualSlices(
+            u8,
+            old_row[0..old_row_len],
+            visible_before_crash[0..visible_before_crash_len],
+        );
+    }
+
+    disk.crash();
+
+    var recovered_row_len: usize = 0;
+    var recovered_row: [48]u8 = undefined;
+    var recovered_records_len: usize = 0;
+    var recovered_tx2_records: usize = 0;
+    var recovered_flushed_lsn: u64 = 0;
+
+    {
+        var recovered_wal = Wal.init(std.testing.allocator, disk.storage());
+        defer recovered_wal.deinit();
+        try recovered_wal.recover();
+        recovered_flushed_lsn = recovered_wal.flushed_lsn;
+
+        var recovered_records_buf: [8]wal_mod.Record = undefined;
+        var recovered_payload_buf: [256]u8 = undefined;
+        const decoded = try recovered_wal.readFromInto(
+            1,
+            &recovered_records_buf,
+            &recovered_payload_buf,
+        );
+        recovered_records_len = decoded.records_len;
+        for (recovered_records_buf[0..decoded.records_len]) |rec| {
+            if (rec.tx_id == 2) recovered_tx2_records += 1;
+        }
+
+        var recovered_pool = try BufferPool.init(std.testing.allocator, disk.storage(), 8);
+        defer recovered_pool.deinit();
+        const page = try recovered_pool.pin(page_id);
+        const row = HeapPage.read(page, slot) catch return error.StorageRead;
+        recovered_row_len = row.len;
+        @memcpy(recovered_row[0..recovered_row_len], row);
+        recovered_pool.unpin(page_id, false);
+    }
+
+    try std.testing.expectEqualSlices(
+        u8,
+        visible_before_crash[0..visible_before_crash_len],
+        recovered_row[0..recovered_row_len],
+    );
+    try std.testing.expectEqual(@as(usize, 0), recovered_tx2_records);
+
+    var h = std.hash.Wyhash.init(seed ^ 0xA11CE00E);
+    h.update(std.mem.asBytes(&page_id));
+    h.update(std.mem.asBytes(&slot));
+    h.update(std.mem.asBytes(&recovered_records_len));
+    h.update(std.mem.asBytes(&recovered_tx2_records));
+    h.update(std.mem.asBytes(&recovered_flushed_lsn));
+    h.update(visible_before_crash[0..visible_before_crash_len]);
+    h.update(recovered_row[0..recovered_row_len]);
+    return .{ .signature = h.final() };
+}
+
 const seed_set = [_]u64{
     0xC0FFEE01,
     0xC0FFEEA5,
@@ -1052,6 +1198,14 @@ test "seeded schedule: rollback visibility edge remains replay-deterministic" {
     }
 }
 
+test "seeded schedule: WAL+undo crash visibility consistency remains replay-deterministic" {
+    for (seed_set) |seed| {
+        const first = try runWalUndoCrashVisibilityConsistency(seed);
+        const second = try runWalUndoCrashVisibilityConsistency(seed);
+        try std.testing.expectEqual(first.signature, second.signature);
+    }
+}
+
 test "seeded schedule: btree split flush crash interleaving remains replay-deterministic" {
     for (seed_set) |seed| {
         const first = try runBTreeSplitFlushCrashInterleaving(seed);
@@ -1114,6 +1268,11 @@ test "ci seed sweep: extended deterministic replay coverage for short schedules"
         "rollback_visibility_edge",
         ci_short_seed_set[0..],
         runRollbackVisibilityEdge,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "wal_undo_crash_visibility_consistency",
+        ci_short_seed_set[0..],
+        runWalUndoCrashVisibilityConsistency,
     );
 }
 
