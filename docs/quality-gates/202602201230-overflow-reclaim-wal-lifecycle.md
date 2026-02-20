@@ -1,7 +1,7 @@
 # Quality Gate Artifact: 202602201230-overflow-reclaim-wal-lifecycle
 
 - Artifact ID: `202602201230-overflow-reclaim-wal-lifecycle`
-- Commit: `TBD (this increment commit)`
+- Commit: `c5548a03c75d33f0b2e739145a3c098e290889d4`
 - Title: `Deterministic overflow reclaim queue + overflow WAL lifecycle contract`
 - Scope: `Adds deterministic unlink/reclaim queue semantics, explicit overflow WAL lifecycle records (create/relink/unlink/reclaim), crash/restart coverage, and malformed-chain hardening.`
 

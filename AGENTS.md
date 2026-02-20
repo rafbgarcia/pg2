@@ -67,7 +67,13 @@ For each implementation increment, follow this sequence:
 2. If core DB code changed (`src/storage`, `src/mvcc`, `src/executor`, `src/parser`, `src/server`, `src/replication`, `src/catalog`), create or update a quality gate artifact in `docs/quality-gates/` using `docs/quality-gates/TEMPLATE.md`.
 3. Update progress tracking docs to reflect what is now complete
 4. Commit the implementation, quality artifact update (if required), and tracking updates together.
-5. Ask the user whether to proceed to the next recommended task.
+5. Finalize fresh-session handoff docs in the same increment:
+   - Update the active milestone tracker (for current milestone) with:
+     - committed SHA(s) for this increment,
+     - "Next-Session Kickoff (Concrete)" with ordered next tasks,
+     - a "Fresh Codex Handoff Commands" block that starts from current HEAD.
+   - Ensure any new quality artifact `Commit:` field references the real commit SHA.
+6. Ask the user whether to proceed to the next recommended task.
 
 ### User-Facing Docs Rule
 

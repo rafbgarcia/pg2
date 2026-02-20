@@ -90,7 +90,7 @@ These are confirmed in chat with the user:
   - Mutation/scan roundtrip for spilled insert and spilled update.
   - Deterministic overflow-region exhaustion rejection.
 
-### Implemented in current increment (this session, pending commit)
+### Implemented in committed chunk `c5548a0`
 
 - Deterministic overflow reclaim pipeline:
   - Added catalog-owned deterministic reclaim queue (`catalog.overflow_reclaim_queue`).
@@ -137,7 +137,7 @@ These are confirmed in chat with the user:
 
 ## Next-Session Kickoff (Concrete)
 
-Completed in this session (pending commit):
+Completed in committed chunk `c5548a0`:
 
 1. Overflow reclaim pipeline.
 2. WAL lifecycle contract for create/relink/unlink/reclaim.
@@ -157,5 +157,6 @@ Use these first in a new session:
 1. `git status --short`
 2. `zig build test`
 3. `git log -1 --stat`
-4. `rg -n "overflow_chain_create|overflow_chain_relink|overflow_chain_unlink|overflow_chain_reclaim|overflow_reclaim_queue" src docs user-facing-docs`
-5. Continue from "Next Logical Chunk" above.
+4. `git show --name-only --stat c5548a0`
+5. `rg -n "overflow_chain_create|overflow_chain_relink|overflow_chain_unlink|overflow_chain_reclaim|overflow_reclaim_queue" src docs user-facing-docs`
+6. Continue from "Next Logical Chunk" above.
