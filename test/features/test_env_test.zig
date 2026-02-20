@@ -1,20 +1,22 @@
-//! Shared E2E harness for server session-path tests.
+//! Shared feature-test harness for server session-path tests.
 //!
 //! Responsibilities in this file:
 //! - Builds deterministic in-memory runtime/disk/catalog test fixtures.
 //! - Applies schema definitions and initializes heap pages for models.
 //! - Provides a thin request executor over `Session` + `ConnectionPool`.
 const std = @import("std");
-const bootstrap_mod = @import("../../runtime/bootstrap.zig");
-const catalog_mod = @import("../../catalog/catalog.zig");
-const schema_loader_mod = @import("../../catalog/schema_loader.zig");
-const parser_mod = @import("../../parser/parser.zig");
-const tokenizer_mod = @import("../../parser/tokenizer.zig");
-const heap_mod = @import("../../storage/heap.zig");
-const disk_mod = @import("../../simulator/disk.zig");
-const session_mod = @import("../session.zig");
-const pool_mod = @import("../pool.zig");
-const mutation_mod = @import("../../executor/mutation.zig");
+const pg2 = @import("pg2");
+
+const bootstrap_mod = pg2.runtime.bootstrap;
+const catalog_mod = pg2.catalog.meta;
+const schema_loader_mod = pg2.catalog.schema_loader;
+const parser_mod = pg2.parser.parse;
+const tokenizer_mod = pg2.parser.tokenizer;
+const heap_mod = pg2.storage.heap;
+const disk_mod = pg2.simulator.disk;
+const session_mod = pg2.server.session;
+const pool_mod = pg2.server.pool;
+const mutation_mod = pg2.executor.mutation;
 
 const BootstrappedRuntime = bootstrap_mod.BootstrappedRuntime;
 const Catalog = catalog_mod.Catalog;

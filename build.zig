@@ -34,11 +34,19 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run pg2");
     run_step.dependOn(&run_cmd.step);
 
-    // --- Unit tests (single root that transitively tests all modules) ---
-    const test_step = b.step("test", "Run unit tests");
+    // --- Unit + feature tests ---
+    const test_step = b.step("test", "Run unit and feature tests");
 
+    const all_tests_mod = b.createModule(.{
+        .root_source_file = b.path("test/all_tests_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "pg2", .module = pg2_mod },
+        },
+    });
     const t = b.addTest(.{
-        .root_module = pg2_mod,
+        .root_module = all_tests_mod,
     });
     const run_t = b.addRunArtifact(t);
     test_step.dependOn(&run_t.step);

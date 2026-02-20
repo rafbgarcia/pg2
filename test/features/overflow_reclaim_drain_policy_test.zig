@@ -4,7 +4,8 @@
 //! - Verifies reclaim drain executes only on successful write commit boundaries.
 //! - Validates fixed one-chain drain budget progression across committed writes.
 const std = @import("std");
-const overflow_mod = @import("../../storage/overflow.zig");
+const pg2 = @import("pg2");
+const overflow_mod = pg2.storage.overflow;
 const e2e = @import("test_env_test.zig");
 
 test "e2e overflow multi-chain unlink drains one committed chain per successful write commit boundary" {

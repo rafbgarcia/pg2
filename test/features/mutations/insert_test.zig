@@ -1,6 +1,7 @@
 //! E2E coverage for insert behavior through server session path.
 const std = @import("std");
-const overflow_mod = @import("../../../storage/overflow.zig");
+const pg2 = @import("pg2");
+const overflow_mod = pg2.storage.overflow;
 const e2e = @import("../test_env_test.zig");
 
 const wide_field_count: usize = 127;

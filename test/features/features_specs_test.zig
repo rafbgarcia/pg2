@@ -1,8 +1,8 @@
-//! Server session-path E2E test suite entrypoint.
+//! Server session-path feature test suite entrypoint.
 //!
 //! Responsibilities in this file:
-//! - Aggregates all server E2E spec modules for test discovery.
-//! - Defines the canonical milestone-focused E2E scope under one import root.
+//! - Aggregates all feature scenario modules for test discovery.
+//! - Defines the canonical milestone-focused feature scope under one import root.
 comptime {
     _ = @import("constraints/default_values_test.zig");
     _ = @import("constraints/duplicate_key_test.zig");

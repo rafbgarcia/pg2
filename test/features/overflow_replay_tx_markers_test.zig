@@ -4,10 +4,11 @@
 //! - Exercises server session path writes that emit overflow lifecycle WAL.
 //! - Verifies recovery replay fails closed on legacy overflow WAL without tx markers.
 const std = @import("std");
-const buffer_pool_mod = @import("../../storage/buffer_pool.zig");
-const overflow_mod = @import("../../storage/overflow.zig");
-const recovery_mod = @import("../../storage/recovery.zig");
-const wal_mod = @import("../../storage/wal.zig");
+const pg2 = @import("pg2");
+const buffer_pool_mod = pg2.storage.buffer_pool;
+const overflow_mod = pg2.storage.overflow;
+const recovery_mod = pg2.storage.recovery;
+const wal_mod = pg2.storage.wal;
 const e2e = @import("test_env_test.zig");
 
 const Record = wal_mod.Record;

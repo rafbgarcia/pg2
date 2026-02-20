@@ -5,11 +5,12 @@
 //! - Validates reclaim queue accounting and inspect surface output.
 //! - Exercises crash-recovery WAL replay behavior for overflow reclaim paths.
 const std = @import("std");
-const buffer_pool_mod = @import("../../storage/buffer_pool.zig");
-const overflow_mod = @import("../../storage/overflow.zig");
-const page_mod = @import("../../storage/page.zig");
-const recovery_mod = @import("../../storage/recovery.zig");
-const wal_mod = @import("../../storage/wal.zig");
+const pg2 = @import("pg2");
+const buffer_pool_mod = pg2.storage.buffer_pool;
+const overflow_mod = pg2.storage.overflow;
+const page_mod = pg2.storage.page;
+const recovery_mod = pg2.storage.recovery;
+const wal_mod = pg2.storage.wal;
 const e2e = @import("test_env_test.zig");
 
 test "e2e overflow insert update and read via session path" {
