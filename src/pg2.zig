@@ -27,6 +27,7 @@ pub const parser = struct {
     pub const ast = @import("parser/ast.zig");
     pub const expression = @import("parser/expression.zig");
     pub const parse = @import("parser/parser.zig");
+    pub const tests = @import("parser/parser_test.zig");
 };
 
 pub const catalog = struct {
@@ -86,6 +87,7 @@ comptime {
     _ = parser.ast;
     _ = parser.expression;
     _ = parser.parse;
+    _ = parser.tests;
     _ = catalog.meta;
     _ = catalog.schema_loader;
     _ = executor.exec;
