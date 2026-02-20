@@ -1,7 +1,7 @@
 # Quality Gate Artifact: 202602201500-overflow-lifecycle-replay-recovery
 
 - Artifact ID: `202602201500-overflow-lifecycle-replay-recovery`
-- Commit: `0000000` (required real committed SHA)
+- Commit: `505fff1` (required real committed SHA)
 - Title: `overflow lifecycle replay recovery`
 - Scope: `Adds deterministic replay of overflow lifecycle WAL records into recovered page state with idempotent reclaim semantics and crash/restart E2E coverage.`
 

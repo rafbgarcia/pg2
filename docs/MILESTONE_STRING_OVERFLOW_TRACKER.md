@@ -52,7 +52,7 @@ This milestone is done only when all conditions below are true:
 
 ## Next Logical Chunk
 
-1. Durable replay integration (completed in `0000000`):
+1. Durable replay integration (completed in `505fff1`):
    - Added `src/storage/recovery.zig` replay path for committed/legacy-replayable overflow lifecycle WAL.
    - Added crash/restart validation through server session E2E and replay idempotence checks.
 2. Tx-level abort semantics (open):
@@ -68,7 +68,7 @@ This milestone is done only when all conditions below are true:
 
 ## Next-Session Kickoff (Concrete)
 
-Completed in committed chunks `c5548a0`, `fd81f61`, `ad8ccd7`, and `0000000`:
+Completed in committed chunks `c5548a0`, `fd81f61`, `ad8ccd7`, and `505fff1`:
 
 1. Overflow reclaim pipeline.
 2. WAL lifecycle contract for create/relink/unlink/reclaim.
@@ -92,7 +92,7 @@ Use these first in a new session:
 1. `git status --short`
 2. `zig build test`
 3. `git log -6 --stat`
-4. `git show --name-only --stat 0000000`
+4. `git show --name-only --stat 505fff1`
 5. `git show --name-only --stat ad8ccd7`
 6. `git show --name-only --stat fd81f61`
 7. `git show --name-only --stat c5548a0`
