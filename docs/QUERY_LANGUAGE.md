@@ -108,6 +108,12 @@ Update actions:
 - `onUpdateSetNull`
 - `onUpdateSetDefault`
 
+Current implementation status (fail-closed):
+
+- `onDeleteRestrict`, `onDeleteCascade`, `onDeleteSetNull` are supported.
+- `onUpdateRestrict`, `onUpdateCascade`, `onUpdateSetNull` are supported.
+- `onDeleteSetDefault` and `onUpdateSetDefault` are currently rejected as invalid configuration.
+
 #### Semantics
 
 - `withoutReferentialIntegrity`:

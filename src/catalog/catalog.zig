@@ -538,6 +538,20 @@ pub const Catalog = struct {
                     {
                         return error.InvalidAssociationConfig;
                     }
+                    if (assoc.on_delete == .set_default or assoc.on_update == .set_default) {
+                        return error.InvalidAssociationConfig;
+                    }
+
+                    const local_col = &self.models[mi].columns[assoc.local_column_id];
+                    const foreign_col = &self.models[target_id].columns[assoc.foreign_key_column_id];
+                    if (local_col.column_type != foreign_col.column_type) {
+                        return error.InvalidAssociationConfig;
+                    }
+                    if ((assoc.on_delete == .set_null or assoc.on_update == .set_null) and
+                        !local_col.nullable)
+                    {
+                        return error.InvalidAssociationConfig;
+                    }
                 }
                 if (assoc.referential_integrity_mode == .without_referential_integrity) {
                     if (assoc.on_delete != .unspecified or
@@ -815,4 +829,73 @@ test "resolve associations fails when inferred key columns are missing" {
     _ = try cat.addModel("Post");
     _ = try cat.addAssociation(user_id, "posts", .has_many, "Post");
     try testing.expectError(error.ColumnNotFound, cat.resolveAssociations());
+}
+
+test "resolve associations rejects unsupported referential set_default actions" {
+    var cat = Catalog{};
+    const user_id = try cat.addModel("User");
+    const user_pk = try cat.addColumn(user_id, "id", .bigint, false);
+    cat.setColumnPrimaryKey(user_id, user_pk);
+
+    const post_id = try cat.addModel("Post");
+    _ = try cat.addColumn(post_id, "id", .bigint, false);
+    _ = try cat.addColumn(post_id, "user_id", .bigint, true);
+
+    const assoc_id = try cat.addAssociation(post_id, "author", .belongs_to, "User");
+    try cat.setAssociationKeys(post_id, assoc_id, "user_id", "id");
+    try cat.setAssociationReferentialIntegrity(
+        post_id,
+        assoc_id,
+        .with_referential_integrity,
+        .set_default,
+        .restrict,
+    );
+
+    try testing.expectError(error.InvalidAssociationConfig, cat.resolveAssociations());
+}
+
+test "resolve associations rejects set_null for non-null local foreign key columns" {
+    var cat = Catalog{};
+    const user_id = try cat.addModel("User");
+    const user_pk = try cat.addColumn(user_id, "id", .bigint, false);
+    cat.setColumnPrimaryKey(user_id, user_pk);
+
+    const post_id = try cat.addModel("Post");
+    _ = try cat.addColumn(post_id, "id", .bigint, false);
+    _ = try cat.addColumn(post_id, "user_id", .bigint, false);
+
+    const assoc_id = try cat.addAssociation(post_id, "author", .belongs_to, "User");
+    try cat.setAssociationKeys(post_id, assoc_id, "user_id", "id");
+    try cat.setAssociationReferentialIntegrity(
+        post_id,
+        assoc_id,
+        .with_referential_integrity,
+        .set_null,
+        .restrict,
+    );
+
+    try testing.expectError(error.InvalidAssociationConfig, cat.resolveAssociations());
+}
+
+test "resolve associations rejects referential key type mismatch" {
+    var cat = Catalog{};
+    const user_id = try cat.addModel("User");
+    const user_pk = try cat.addColumn(user_id, "id", .bigint, false);
+    cat.setColumnPrimaryKey(user_id, user_pk);
+
+    const post_id = try cat.addModel("Post");
+    _ = try cat.addColumn(post_id, "id", .bigint, false);
+    _ = try cat.addColumn(post_id, "user_id", .string, true);
+
+    const assoc_id = try cat.addAssociation(post_id, "author", .belongs_to, "User");
+    try cat.setAssociationKeys(post_id, assoc_id, "user_id", "id");
+    try cat.setAssociationReferentialIntegrity(
+        post_id,
+        assoc_id,
+        .with_referential_integrity,
+        .restrict,
+        .restrict,
+    );
+
+    try testing.expectError(error.InvalidAssociationConfig, cat.resolveAssociations());
 }

@@ -1913,77 +1913,12 @@ test "update set null clears child foreign keys" {
     try testing.expect(post_rows.rows[0].values[1] == .null_value);
 }
 
-test "update set default fails closed as unsupported" {
+test "set default referential action is rejected at configuration time" {
     var env: ReferentialTestEnv = undefined;
     try env.init();
     defer env.deinit();
-    try env.configureReference(.restrict, .set_default);
-
-    const tx = try env.tm.begin();
-    var snap = try env.tm.snapshot(tx);
-    defer snap.deinit();
-
-    const user_insert_src = "User |> insert(id = 1)";
-    const user_insert_tok = tokenizer_mod.tokenize(user_insert_src);
-    const user_insert_parsed = parser_mod.parse(&user_insert_tok, user_insert_src);
-    const user_insert_root = user_insert_parsed.ast.getNode(user_insert_parsed.ast.root);
-    const user_insert_pipeline = user_insert_parsed.ast.getNode(user_insert_root.data.unary);
-    const user_insert_op = user_insert_parsed.ast.getNode(user_insert_pipeline.data.binary.rhs);
-    _ = try executeInsert(
-        &env.catalog,
-        &env.pool,
-        &env.wal,
-        tx,
-        env.user_model_id,
-        &user_insert_parsed.ast,
-        &user_insert_tok,
-        user_insert_src,
-        user_insert_op.data.unary,
-    );
-
-    const post_insert_src = "Post |> insert(id = 10, user_id = 1)";
-    const post_insert_tok = tokenizer_mod.tokenize(post_insert_src);
-    const post_insert_parsed = parser_mod.parse(&post_insert_tok, post_insert_src);
-    const post_insert_root = post_insert_parsed.ast.getNode(post_insert_parsed.ast.root);
-    const post_insert_pipeline = post_insert_parsed.ast.getNode(post_insert_root.data.unary);
-    const post_insert_op = post_insert_parsed.ast.getNode(post_insert_pipeline.data.binary.rhs);
-    _ = try executeInsert(
-        &env.catalog,
-        &env.pool,
-        &env.wal,
-        tx,
-        env.post_model_id,
-        &post_insert_parsed.ast,
-        &post_insert_tok,
-        post_insert_src,
-        post_insert_op.data.unary,
-    );
-
-    const update_src = "User |> where(id = 1) |> update(id = 2)";
-    const update_tok = tokenizer_mod.tokenize(update_src);
-    const update_parsed = parser_mod.parse(&update_tok, update_src);
-    const update_root = update_parsed.ast.getNode(update_parsed.ast.root);
-    const update_pipeline = update_parsed.ast.getNode(update_root.data.unary);
-    const where_op = update_parsed.ast.getNode(update_pipeline.data.binary.rhs);
-    const update_op = update_parsed.ast.getNode(where_op.next);
-
     try testing.expectError(
-        error.UnsupportedReferentialAction,
-        executeUpdate(
-            &env.catalog,
-            &env.pool,
-            &env.wal,
-            &env.undo_log,
-            tx,
-            &snap,
-            &env.tm,
-            env.user_model_id,
-            &update_parsed.ast,
-            &update_tok,
-            update_src,
-            where_op.data.unary,
-            update_op.data.unary,
-            testing.allocator,
-        ),
+        error.InvalidAssociationConfig,
+        env.configureReference(.restrict, .set_default),
     );
 }

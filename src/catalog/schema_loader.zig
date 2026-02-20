@@ -478,6 +478,28 @@ test "load schema with reference and explicit RI config" {
     try testing.expectEqual(catalog_mod.ReferentialAction.cascade, post_author.on_update);
 }
 
+test "load schema rejects unsupported referential set default actions" {
+    const source =
+        \\User {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\}
+        \\Post {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(user_id, bigint, notNull)
+        \\  reference(author, user_id, User.id, withReferentialIntegrity(onDeleteSetDefault, onUpdateRestrict))
+        \\}
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const parsed = parser_mod.parse(&tokens, source);
+    try testing.expect(!parsed.has_error);
+
+    var catalog = Catalog{};
+    try testing.expectError(
+        error.InvalidAssociationConfig,
+        loadSchema(&catalog, &parsed.ast, &tokens, source),
+    );
+}
+
 test "load schema with index" {
     const source =
         \\User {
