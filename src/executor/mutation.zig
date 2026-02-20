@@ -6,6 +6,7 @@ const heap_mod = @import("../storage/heap.zig");
 const buffer_pool_mod = @import("../storage/buffer_pool.zig");
 const wal_mod = @import("../storage/wal.zig");
 const row_mod = @import("../storage/row.zig");
+const overflow_mod = @import("../storage/overflow.zig");
 const btree_mod = @import("../storage/btree.zig");
 const catalog_mod = @import("../catalog/catalog.zig");
 const tx_mod = @import("../mvcc/transaction.zig");
@@ -26,6 +27,8 @@ const BufferPool = buffer_pool_mod.BufferPool;
 const Wal = wal_mod.Wal;
 const Value = row_mod.Value;
 const RowSchema = row_mod.RowSchema;
+const OverflowPage = overflow_mod.OverflowPage;
+const OverflowPageIdAllocator = overflow_mod.PageIdAllocator;
 const BTree = btree_mod.BTree;
 const Catalog = catalog_mod.Catalog;
 const ModelId = catalog_mod.ModelId;
@@ -64,6 +67,7 @@ pub const MutationError = error{
     UnknownFunction,
     NullInPredicate,
     ResultOverflow,
+    OverflowRegionExhausted,
     // WAL errors
     WalWriteError,
     WalFsyncError,
@@ -140,22 +144,45 @@ pub fn executeInsert(
         values[0..schema.column_count],
     );
 
-    // Encode row.
-    var row_buf: [max_row_buf_size]u8 = undefined;
-    const row_len = row_mod.encodeRow(
+    var overflow_page_ids: [max_assignments]u64 = [_]u64{0} ** max_assignments;
+    markOversizedStringSlots(
         schema,
         values[0..schema.column_count],
+        overflow_page_ids[0..schema.column_count],
+    );
+
+    // Dry-run encode to size/select target heap page before allocating overflow pages.
+    var row_buf: [max_row_buf_size]u8 = undefined;
+    const dry_row_len = row_mod.encodeRowWithOverflow(
+        schema,
+        values[0..schema.column_count],
+        overflow_page_ids[0..schema.column_count],
         &row_buf,
     ) catch |e| return mapEncodeError(e);
-    std.debug.assert(row_len > 0);
+    std.debug.assert(dry_row_len > 0);
 
     // Find a page with space.
     const page_id = try findPageWithSpace(
         pool,
         model.heap_first_page_id,
         model.total_pages,
-        row_len,
+        dry_row_len,
     );
+
+    try spillOversizedStrings(
+        pool,
+        &catalog.overflow_page_allocator,
+        schema,
+        values[0..schema.column_count],
+        overflow_page_ids[0..schema.column_count],
+    );
+
+    const row_len = row_mod.encodeRowWithOverflow(
+        schema,
+        values[0..schema.column_count],
+        overflow_page_ids[0..schema.column_count],
+        &row_buf,
+    ) catch |e| return mapEncodeError(e);
 
     // Insert into heap page.
     var pinned = try PinnedMutationPage.pin(pool, page_id);
@@ -212,9 +239,11 @@ pub fn executeUpdate(
     allocator: Allocator,
 ) MutationError!u32 {
     std.debug.assert(model_id < catalog.model_count);
-    _ = allocator;
     const model = &catalog.models[model_id];
     const schema = &model.row_schema;
+    _ = allocator;
+    var string_decode_bytes: [max_row_buf_size]u8 = undefined;
+    var string_arena = scan_mod.StringArena.init(string_decode_bytes[0..]);
 
     var updated_count: u32 = 0;
     const first_page = model.heap_first_page_id;
@@ -242,8 +271,15 @@ pub fn executeUpdate(
             var row = scan_mod.ResultRow.init();
             row.row_id = .{ .page_id = page_id, .slot = slot_idx };
             row.column_count = schema.column_count;
-            row_mod.decodeRowChecked(schema, data_to_decode, &row.values) catch
-                return error.Corruption;
+            string_arena.reset();
+            decodeRowWithOverflow(
+                schema,
+                data_to_decode,
+                pool,
+                &catalog.overflow_page_allocator,
+                &string_arena,
+                &row.values,
+            ) catch |e| return e;
 
             // Apply predicate filter.
             if (predicate_node != null_node) {
@@ -288,6 +324,7 @@ pub fn executeUpdate(
                 new_values[0..row.column_count],
             );
             try updateRowWithValues(
+                catalog,
                 pool,
                 wal,
                 undo_log,
@@ -325,6 +362,8 @@ pub fn executeDelete(
 ) MutationError!u32 {
     std.debug.assert(model_id < catalog.model_count);
     _ = allocator;
+    var string_decode_bytes: [max_row_buf_size]u8 = undefined;
+    var string_arena = scan_mod.StringArena.init(string_decode_bytes[0..]);
 
     const model = &catalog.models[model_id];
     const schema = &model.row_schema;
@@ -355,8 +394,15 @@ pub fn executeDelete(
             var row = scan_mod.ResultRow.init();
             row.row_id = .{ .page_id = page_id, .slot = slot_idx };
             row.column_count = schema.column_count;
-            row_mod.decodeRowChecked(schema, data_to_decode, &row.values) catch
-                return error.Corruption;
+            string_arena.reset();
+            decodeRowWithOverflow(
+                schema,
+                data_to_decode,
+                pool,
+                &catalog.overflow_page_allocator,
+                &string_arena,
+                &row.values,
+            ) catch |e| return e;
 
             // Apply predicate filter.
             if (predicate_node != null_node) {
@@ -429,6 +475,7 @@ fn deleteSingleRow(
 }
 
 fn updateRowWithValues(
+    catalog: *Catalog,
     pool: *BufferPool,
     wal: *Wal,
     undo_log: *UndoLog,
@@ -445,9 +492,42 @@ fn updateRowWithValues(
     _ = undo_log.push(tx_id, row_id.page_id, row_id.slot, old_data) catch
         return error.UndoLogFull;
 
+    var overflow_page_ids: [max_assignments]u64 = [_]u64{0} ** max_assignments;
+    markOversizedStringSlots(
+        schema,
+        new_values,
+        overflow_page_ids[0..schema.column_count],
+    );
+
     var row_buf: [max_row_buf_size]u8 = undefined;
-    const row_len = row_mod.encodeRow(schema, new_values, &row_buf) catch |e|
-        return mapEncodeError(e);
+    const dry_row_len = row_mod.encodeRowWithOverflow(
+        schema,
+        new_values,
+        overflow_page_ids[0..schema.column_count],
+        &row_buf,
+    ) catch |e| return mapEncodeError(e);
+
+    if (!canUpdateFitInPage(
+        pinned.page,
+        row_id.slot,
+        dry_row_len,
+    )) return error.PageFull;
+
+    try spillOversizedStrings(
+        pool,
+        &catalog.overflow_page_allocator,
+        schema,
+        new_values,
+        overflow_page_ids[0..schema.column_count],
+    );
+
+    const row_len = row_mod.encodeRowWithOverflow(
+        schema,
+        new_values,
+        overflow_page_ids[0..schema.column_count],
+        &row_buf,
+    ) catch |e| return mapEncodeError(e);
+
     HeapPage.update(pinned.page, row_id.slot, row_buf[0..row_len]) catch |e|
         return mapHeapError(e);
     pinned.markDirty();
@@ -455,6 +535,156 @@ fn updateRowWithValues(
     const lsn = wal.append(tx_id, .update, row_id.page_id, row_buf[0..row_len]) catch |e|
         return mapWalAppendError(e);
     pinned.page.header.lsn = lsn;
+}
+
+fn canUpdateFitInPage(page: *const Page, slot_idx: u16, new_len: u16) bool {
+    const old_row = HeapPage.read(page, slot_idx) catch return false;
+    if (new_len <= old_row.len) return true;
+
+    const free = HeapPage.free_space(page);
+    if (free >= new_len) return true;
+    const fragmented = HeapPage.fragmented_bytes(page);
+    return @as(u32, free) + @as(u32, fragmented) >= new_len;
+}
+
+fn markOversizedStringSlots(
+    schema: *const RowSchema,
+    values: []const Value,
+    overflow_page_ids: []u64,
+) void {
+    std.debug.assert(values.len >= schema.column_count);
+    std.debug.assert(overflow_page_ids.len >= schema.column_count);
+    for (0..schema.column_count) |i| {
+        if (values[i] == .null_value) continue;
+        const col = schema.columns[i];
+        if (col.column_type != .string) continue;
+        if (values[i].string.len > overflow_mod.string_inline_threshold_bytes) {
+            // Non-zero sentinel to force pointer-sized dry-run encoding.
+            overflow_page_ids[i] = 1;
+        }
+    }
+}
+
+fn spillOversizedStrings(
+    pool: *BufferPool,
+    overflow_allocator: *OverflowPageIdAllocator,
+    schema: *const RowSchema,
+    values: []const Value,
+    overflow_page_ids: []u64,
+) MutationError!void {
+    std.debug.assert(values.len >= schema.column_count);
+    std.debug.assert(overflow_page_ids.len >= schema.column_count);
+    for (0..schema.column_count) |i| {
+        if (overflow_page_ids[i] == 0) continue;
+        if (values[i] == .null_value) continue;
+        const col = schema.columns[i];
+        if (col.column_type != .string) continue;
+        overflow_page_ids[i] = try writeOverflowChain(
+            pool,
+            overflow_allocator,
+            values[i].string,
+        );
+    }
+}
+
+fn writeOverflowChain(
+    pool: *BufferPool,
+    overflow_allocator: *OverflowPageIdAllocator,
+    payload: []const u8,
+) MutationError!u64 {
+    std.debug.assert(payload.len > overflow_mod.string_inline_threshold_bytes);
+    const chunk_capacity = OverflowPage.max_payload_len();
+    std.debug.assert(chunk_capacity > 0);
+
+    const first_page_id = overflow_allocator.allocate() catch |e|
+        return mapOverflowAllocatorError(e);
+
+    var payload_offset: usize = 0;
+    var current_page_id = first_page_id;
+    while (payload_offset < payload.len) {
+        const remaining = payload.len - payload_offset;
+        const chunk_len = @min(remaining, chunk_capacity);
+        const next_page_id = if (chunk_len == remaining)
+            OverflowPage.null_page_id
+        else
+            overflow_allocator.allocate() catch |e| return mapOverflowAllocatorError(e);
+
+        var pinned = try PinnedMutationPage.pin(pool, current_page_id);
+        defer pinned.release();
+        if (pinned.page.header.page_type == .free) {
+            OverflowPage.init(pinned.page);
+        } else if (pinned.page.header.page_type != .overflow) {
+            return error.Corruption;
+        }
+        OverflowPage.writeChunk(
+            pinned.page,
+            payload[payload_offset..][0..chunk_len],
+            next_page_id,
+        ) catch |e| return mapOverflowPageError(e);
+        pinned.markDirty();
+
+        payload_offset += chunk_len;
+        current_page_id = next_page_id;
+    }
+    return first_page_id;
+}
+
+fn decodeRowWithOverflow(
+    schema: *const RowSchema,
+    row_data: []const u8,
+    pool: *BufferPool,
+    overflow_allocator: *const OverflowPageIdAllocator,
+    string_arena: *scan_mod.StringArena,
+    out: []Value,
+) MutationError!void {
+    std.debug.assert(out.len >= schema.column_count);
+    var col_idx: u16 = 0;
+    while (col_idx < schema.column_count) : (col_idx += 1) {
+        const decoded = row_mod.decodeColumnStorageChecked(
+            schema,
+            row_data,
+            col_idx,
+        ) catch return error.Corruption;
+        out[col_idx] = switch (decoded) {
+            .value => |v| v,
+            .string_overflow_page_id => |first_page_id| .{
+                .string = try resolveOverflowStringIntoArena(
+                    pool,
+                    overflow_allocator,
+                    first_page_id,
+                    string_arena,
+                ),
+            },
+        };
+    }
+}
+
+fn resolveOverflowStringIntoArena(
+    pool: *BufferPool,
+    overflow_allocator: *const OverflowPageIdAllocator,
+    first_page_id: u64,
+    string_arena: *scan_mod.StringArena,
+) MutationError![]const u8 {
+    if (!overflow_allocator.ownsPageId(first_page_id)) return error.Corruption;
+    const start = string_arena.startString();
+    var current = first_page_id;
+    var hops: u64 = 0;
+    const max_hops = overflow_allocator.capacity();
+    while (true) {
+        if (hops >= max_hops) return error.Corruption;
+        hops += 1;
+
+        var pinned = try PinnedMutationPage.pin(pool, current);
+        defer pinned.release();
+        if (pinned.page.header.page_type != .overflow) return error.Corruption;
+
+        const chunk = OverflowPage.readChunk(pinned.page) catch return error.Corruption;
+        string_arena.appendChunk(chunk.payload) catch return error.OutOfMemory;
+        if (chunk.next_page_id == OverflowPage.null_page_id) break;
+        if (!overflow_allocator.ownsPageId(chunk.next_page_id)) return error.Corruption;
+        current = chunk.next_page_id;
+    }
+    return string_arena.finishString(start);
 }
 
 fn enforceOutgoingReferentialIntegrity(
@@ -699,6 +929,7 @@ fn setReferencingRowsValue(
 
             decoded[col_idx] = new_value;
             try updateRowWithValues(
+                @constCast(catalog),
                 pool,
                 wal,
                 undo_log,
@@ -942,6 +1173,21 @@ fn mapEncodeError(err: row_mod.EncodeError) MutationError {
     };
 }
 
+fn mapOverflowAllocatorError(err: overflow_mod.OverflowAllocatorError) MutationError {
+    return switch (err) {
+        error.InvalidRegion => error.Corruption,
+        error.RegionExhausted => error.OverflowRegionExhausted,
+    };
+}
+
+fn mapOverflowPageError(err: overflow_mod.OverflowError) MutationError {
+    return switch (err) {
+        error.PageFull => error.RowTooLarge,
+        error.InvalidPageFormat => error.Corruption,
+        error.UnsupportedPageVersion => error.Corruption,
+    };
+}
+
 fn mapHeapError(err: heap_mod.HeapError) MutationError {
     return switch (err) {
         error.PageFull => error.PageFull,
@@ -1101,6 +1347,120 @@ test "insert and scan back" {
         u8,
         "Alice",
         result.rows[0].values[1].string,
+    );
+}
+
+test "insert spills oversized string and scan resolves overflow payload" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.catalog.overflow_page_allocator = try overflow_mod.PageIdAllocator.initWithBounds(2_000, 4);
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    var name_buf: [1200]u8 = undefined;
+    @memset(name_buf[0..], 'x');
+    var src_buf: [1400]u8 = undefined;
+    const src = try std.fmt.bufPrint(
+        src_buf[0..],
+        "User |> insert(id = 1, name = \"{s}\")",
+        .{name_buf[0..]},
+    );
+    const tok = tokenizer_mod.tokenize(src);
+    const parsed = parser_mod.parse(&tok, src);
+    std.debug.assert(!parsed.has_error);
+    const root = parsed.ast.getNode(parsed.ast.root);
+    const pipeline = parsed.ast.getNode(root.data.unary);
+    const insert_op = parsed.ast.getNode(pipeline.data.binary.rhs);
+
+    _ = try executeInsert(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx,
+        env.model_id,
+        &parsed.ast,
+        &tok,
+        src,
+        insert_op.data.unary,
+    );
+
+    var result = try scan_mod.tableScan(
+        &env.catalog,
+        &env.pool,
+        &env.undo_log,
+        &snap,
+        &env.tm,
+        env.model_id,
+        testing.allocator,
+    );
+    defer result.deinit();
+
+    try testing.expectEqual(@as(u16, 1), result.row_count);
+    try testing.expectEqualSlices(u8, name_buf[0..], result.rows[0].values[1].string);
+}
+
+test "insert fails deterministically when overflow region is exhausted" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.catalog.overflow_page_allocator = try overflow_mod.PageIdAllocator.initWithBounds(3_000, 1);
+
+    const tx = try env.tm.begin();
+    var name_buf: [1200]u8 = undefined;
+    @memset(name_buf[0..], 'y');
+
+    var src1_buf: [1400]u8 = undefined;
+    const src1 = try std.fmt.bufPrint(
+        src1_buf[0..],
+        "User |> insert(id = 1, name = \"{s}\")",
+        .{name_buf[0..]},
+    );
+    const tok1 = tokenizer_mod.tokenize(src1);
+    const p1 = parser_mod.parse(&tok1, src1);
+    std.debug.assert(!p1.has_error);
+    const r1 = p1.ast.getNode(p1.ast.root);
+    const pipe1 = p1.ast.getNode(r1.data.unary);
+    const ins1 = p1.ast.getNode(pipe1.data.binary.rhs);
+    _ = try executeInsert(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx,
+        env.model_id,
+        &p1.ast,
+        &tok1,
+        src1,
+        ins1.data.unary,
+    );
+
+    var src2_buf: [1400]u8 = undefined;
+    const src2 = try std.fmt.bufPrint(
+        src2_buf[0..],
+        "User |> insert(id = 2, name = \"{s}\")",
+        .{name_buf[0..]},
+    );
+    const tok2 = tokenizer_mod.tokenize(src2);
+    const p2 = parser_mod.parse(&tok2, src2);
+    std.debug.assert(!p2.has_error);
+    const r2 = p2.ast.getNode(p2.ast.root);
+    const pipe2 = p2.ast.getNode(r2.data.unary);
+    const ins2 = p2.ast.getNode(pipe2.data.binary.rhs);
+    try testing.expectError(
+        error.OverflowRegionExhausted,
+        executeInsert(
+            &env.catalog,
+            &env.pool,
+            &env.wal,
+            tx,
+            env.model_id,
+            &p2.ast,
+            &tok2,
+            src2,
+            ins2.data.unary,
+        ),
     );
 }
 
@@ -1346,6 +1706,82 @@ test "update modifies row" {
         "Bob",
         result.rows[0].values[1].string,
     );
+}
+
+test "update spills oversized string and read resolves overflow payload" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.catalog.overflow_page_allocator = try overflow_mod.PageIdAllocator.initWithBounds(4_000, 4);
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const src1 = "User |> insert(id = 1, name = \"short\")";
+    const tok1 = tokenizer_mod.tokenize(src1);
+    const p1 = parser_mod.parse(&tok1, src1);
+    const r1 = p1.ast.getNode(p1.ast.root);
+    const pipe1 = p1.ast.getNode(r1.data.unary);
+    const ins1 = p1.ast.getNode(pipe1.data.binary.rhs);
+    _ = try executeInsert(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx,
+        env.model_id,
+        &p1.ast,
+        &tok1,
+        src1,
+        ins1.data.unary,
+    );
+
+    var long_name: [1200]u8 = undefined;
+    @memset(long_name[0..], 'z');
+    var src2_buf: [1500]u8 = undefined;
+    const src2 = try std.fmt.bufPrint(
+        src2_buf[0..],
+        "User |> where(id = 1) |> update(name = \"{s}\")",
+        .{long_name[0..]},
+    );
+    const tok2 = tokenizer_mod.tokenize(src2);
+    const p2 = parser_mod.parse(&tok2, src2);
+    const r2 = p2.ast.getNode(p2.ast.root);
+    const pipe2 = p2.ast.getNode(r2.data.unary);
+    const where_op = p2.ast.getNode(pipe2.data.binary.rhs);
+    const update_op = p2.ast.getNode(where_op.next);
+
+    const updated = try executeUpdate(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        &env.undo_log,
+        tx,
+        &snap,
+        &env.tm,
+        env.model_id,
+        &p2.ast,
+        &tok2,
+        src2,
+        where_op.data.unary,
+        update_op.data.unary,
+        testing.allocator,
+    );
+    try testing.expectEqual(@as(u32, 1), updated);
+
+    var result = try scan_mod.tableScan(
+        &env.catalog,
+        &env.pool,
+        &env.undo_log,
+        &snap,
+        &env.tm,
+        env.model_id,
+        testing.allocator,
+    );
+    defer result.deinit();
+
+    try testing.expectEqual(@as(u16, 1), result.row_count);
+    try testing.expectEqualSlices(u8, long_name[0..], result.rows[0].values[1].string);
 }
 
 test "update pushes undo entry" {

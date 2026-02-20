@@ -63,15 +63,36 @@ These are confirmed in chat with the user:
   - `ScanResult` now owns string storage for allocator-returning scan APIs (`tableScan`, `indexRange`) to guarantee lifetime safety.
   - Executor read path threads per-query arena to `tableScanInto` calls (including nested relation scans).
 
-### Not implemented yet
+### Implemented in current increment (`<pending-commit>`)
 
-- No overflow pointer integration in row format yet.
-- No reclaim queue/GC path yet.
-- No mutation/WAL integration for overflow chains yet.
+- Dedicated overflow page-id region allocator:
+  - Added deterministic allocator state in `src/storage/overflow.zig` with default dedicated region bounds, ownership checks, and fail-closed `RegionExhausted`.
+  - Catalog now owns allocator state (`catalog.overflow_page_allocator`) so allocation is explicit and deterministic across mutation/read paths.
+- Row format inline-vs-overflow pointer encoding:
+  - Bumped row format version to v2 (`src/storage/row.zig`).
+  - String fixed slot now encodes explicit storage kind:
+    - inline tag + in-row var-data offset, or
+    - overflow tag + first overflow page id.
+  - Added `decodeColumnStorageChecked` to expose overflow references to higher layers.
+  - Kept legacy v1 inline-string decode compatibility for already-encoded rows.
+- Insert/update spill path with 1024-byte threshold:
+  - Mutation path now marks oversized strings (>1024 bytes) for spill.
+  - Overflow chains are written into dedicated region pages and row encoding stores overflow pointers.
+  - Added bounded pre-check for update fit before spill to fail closed on page-capacity shortfall.
+- Read-path overflow resolution into bounded arena:
+  - Scan decode now resolves overflow chains into `StringArena` using bounded per-query bytes.
+  - Overflow chain traversal is fail-closed on:
+    - out-of-region page ids,
+    - unexpected page type/format,
+    - excessive traversal hops (cycle/corruption guard).
+- Deterministic tests added:
+  - Row encode/decode coverage for overflow pointer slot and legacy v1 compatibility.
+  - Mutation/scan roundtrip for spilled insert and spilled update.
+  - Deterministic overflow-region exhaustion rejection.
 
 ## Known Test State
 
-- `zig build test` passes through commit `a3970a5`.
+- `zig build test` passes for this increment.
 
 ## Next Logical Chunk
 
@@ -96,22 +117,14 @@ Confirmed: overflow page-id allocation strategy is `dedicated page-id region` fo
 
 ## Next-Session Kickoff (Concrete)
 
-Start here in the next Codex session:
+Completed in this increment (all items 1..6). Next focus should move to:
 
-1. Implement dedicated overflow page-id region allocator (deterministic):
-   - Add constants and helpers for overflow page-id range ownership.
-   - Ensure allocator is bounded and fail-closed when region is exhausted.
-2. Extend row string encoding to support inline vs overflow-pointer variants.
-3. Wire mutation insert/update path:
-   - Apply 1024-byte inline threshold.
-   - Spill oversized string payloads into overflow chain pages from the dedicated region.
-4. Wire read path:
-   - Resolve overflow pointers into bounded query string arena bytes.
-5. Add tests:
-   - Row encode/decode inline vs overflow pointer cases.
-   - Mutation/read roundtrip for spilled strings.
-   - Deterministic failure when overflow region is exhausted.
-6. Add Tiger artifact + readiness/doc updates and commit as one increment.
+1. Overflow reclaim pipeline:
+   - Define deterministic unlink + reclaim queue behavior for replaced/deleted overflow chains.
+2. WAL durability contract for overflow chain lifecycle:
+   - Define create/relink/unlink redo+undo payload contract.
+3. Crash/restart deterministic fault matrix:
+   - Add spill/update/delete crash points and recovery assertions.
 
 ## Fresh Codex Handoff Commands
 

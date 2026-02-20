@@ -26,6 +26,7 @@ Each artifact answers the mandatory checklist in `docs/TIGER_STYLE.md`:
 - `docs/tiger-gates/2026-02-20-e2e-spec-03-filter-sort-limit-offset-server-path.md`
 - `docs/tiger-gates/2026-02-20-heap-auto-compaction-threshold.md`
 - `docs/tiger-gates/2026-02-20-overflow-page-foundation.md`
+- `docs/tiger-gates/2026-02-20-overflow-inline-pointer-spill-read-path.md`
 - `docs/tiger-gates/2026-02-20-row-growth-update-crud-fix.md`
 - `docs/tiger-gates/2d15cb5-ri-mode-rename-fail-closed.md`
 - `docs/tiger-gates/560dd3b-deterministic-fk-crash-restart.md`

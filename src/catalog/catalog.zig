@@ -1,9 +1,11 @@
 const std = @import("std");
 const row_mod = @import("../storage/row.zig");
+const overflow_mod = @import("../storage/overflow.zig");
 
 const ColumnType = row_mod.ColumnType;
 const RowSchema = row_mod.RowSchema;
 const Value = row_mod.Value;
+const OverflowPageIdAllocator = overflow_mod.PageIdAllocator;
 
 /// Capacity limits.
 pub const max_models = 256;
@@ -133,6 +135,8 @@ pub const Catalog = struct {
     models: [max_models]ModelInfo = undefined,
     model_count: u16 = 0,
     sealed: bool = false,
+    overflow_page_allocator: OverflowPageIdAllocator =
+        OverflowPageIdAllocator.initDefault(),
 
     name_buffer: [max_name_bytes]u8 = undefined,
     name_buffer_len: u32 = 0,

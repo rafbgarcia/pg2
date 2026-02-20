@@ -176,8 +176,18 @@ pub const DecodeError = error{
 };
 
 pub const row_format_magic: u16 = 0x5232; // "R2"
-pub const row_format_version: u8 = 1;
+pub const row_format_version: u8 = 2;
+pub const row_format_version_legacy: u8 = 1;
 const row_header_size: usize = 3; // magic:u16 + version:u8
+const string_fixed_slot_size_legacy: usize = 2;
+const string_fixed_slot_size: usize = 10;
+const string_slot_inline_tag: u8 = 1;
+const string_slot_overflow_tag: u8 = 2;
+
+pub const DecodedColumn = union(enum) {
+    value: Value,
+    string_overflow_page_id: u64,
+};
 
 /// Encode a row of values into a byte buffer.
 ///
@@ -195,73 +205,93 @@ pub fn encodeRow(
     values: []const Value,
     buf: []u8,
 ) EncodeError!u16 {
+    return encodeRowInternal(schema, values, null, buf);
+}
+
+/// Encode row values with optional per-column overflow page pointers.
+///
+/// `string_overflow_page_ids` must have `schema.column_count` entries.
+/// For each non-null string column:
+/// - `0` means inline string payload in row bytes.
+/// - non-zero means store an overflow pointer to that first page id.
+pub fn encodeRowWithOverflow(
+    schema: *const RowSchema,
+    values: []const Value,
+    string_overflow_page_ids: []const u64,
+    buf: []u8,
+) EncodeError!u16 {
+    if (string_overflow_page_ids.len < schema.column_count) return error.BufferTooSmall;
+    return encodeRowInternal(schema, values, string_overflow_page_ids, buf);
+}
+
+fn encodeRowInternal(
+    schema: *const RowSchema,
+    values: []const Value,
+    string_overflow_page_ids: ?[]const u64,
+    buf: []u8,
+) EncodeError!u16 {
     std.debug.assert(values.len == schema.column_count);
 
-    // First pass: compute total size needed.
     var total: usize = row_header_size + schema.null_bitmap_bytes;
     for (0..schema.column_count) |i| {
         const col = schema.columns[i];
         if (values[i] == .null_value) {
             if (!col.nullable) return error.NullNotAllowed;
-            // Null columns still occupy their fixed slot (zeroed).
-            total += if (col.column_type == .string) 2 else fixedSize(col.column_type);
+            total += if (col.column_type == .string) string_fixed_slot_size else fixedSize(col.column_type);
+            continue;
+        }
+        if (values[i].columnType()) |vt| {
+            if (vt != col.column_type) return error.TypeMismatch;
+        }
+        if (col.column_type == .string) {
+            total += string_fixed_slot_size;
+            const overflow_page_id = if (string_overflow_page_ids) |ids|
+                ids[i]
+            else
+                0;
+            if (overflow_page_id == 0) {
+                if (values[i].string.len > std.math.maxInt(u16)) return error.BufferTooSmall;
+                total += 2 + values[i].string.len;
+            }
         } else {
-            if (values[i].columnType()) |vt| {
-                if (vt != col.column_type) return error.TypeMismatch;
-            }
-            if (col.column_type == .string) {
-                // Fixed slot: 2 bytes (offset). Var data: 2 + string len.
-                total += 2; // offset in fixed area
-                total += 2 + values[i].string.len; // length prefix + data
-            } else {
-                total += fixedSize(col.column_type);
-            }
+            total += fixedSize(col.column_type);
         }
     }
 
     if (total > buf.len) return error.BufferTooSmall;
     if (total > std.math.maxInt(u16)) return error.BufferTooSmall;
 
-    // Zero the buffer region.
     @memset(buf[0..total], 0);
-
-    // Write row format header.
     @memcpy(
         buf[0..2],
         std.mem.asBytes(&std.mem.nativeToLittle(u16, row_format_magic)),
     );
     buf[2] = row_format_version;
 
-    // Write null bitmap.
     for (0..schema.column_count) |i| {
         if (values[i] == .null_value) {
             buf[row_header_size + i / 8] |= @as(u8, 1) << @intCast(i % 8);
         }
     }
 
-    // Second pass: write fixed columns, track variable data offset.
     var fixed_offset: usize = row_header_size + schema.null_bitmap_bytes;
-    // Variable data starts after all fixed columns.
     var var_data_start: usize = row_header_size + schema.null_bitmap_bytes;
     for (0..schema.column_count) |i| {
         const col = schema.columns[i];
-        if (col.column_type == .string) {
-            var_data_start += 2; // offset slot
-        } else {
-            var_data_start += fixedSize(col.column_type);
-        }
+        var_data_start += if (col.column_type == .string)
+            string_fixed_slot_size
+        else
+            fixedSize(col.column_type);
     }
     var var_offset: usize = var_data_start;
 
     for (0..schema.column_count) |i| {
         const col = schema.columns[i];
         if (values[i] == .null_value) {
-            // Leave zeroed.
-            if (col.column_type == .string) {
-                fixed_offset += 2;
-            } else {
-                fixed_offset += fixedSize(col.column_type);
-            }
+            fixed_offset += if (col.column_type == .string)
+                string_fixed_slot_size
+            else
+                fixedSize(col.column_type);
             continue;
         }
 
@@ -294,20 +324,30 @@ pub fn encodeRow(
             },
             .string => {
                 const str = values[i].string;
-                const str_len: u16 = @intCast(str.len);
-                // Write offset into fixed slot.
-                const off_u16: u16 = @intCast(var_offset);
-                @memcpy(buf[fixed_offset..][0..2], std.mem.asBytes(
-                    &std.mem.nativeToLittle(u16, off_u16),
-                ));
-                fixed_offset += 2;
-                // Write length-prefixed string data.
-                @memcpy(buf[var_offset..][0..2], std.mem.asBytes(
-                    &std.mem.nativeToLittle(u16, str_len),
-                ));
-                var_offset += 2;
-                @memcpy(buf[var_offset..][0..str.len], str);
-                var_offset += str.len;
+                const overflow_page_id = if (string_overflow_page_ids) |ids|
+                    ids[i]
+                else
+                    0;
+                if (overflow_page_id == 0) {
+                    const str_len: u16 = @intCast(str.len);
+                    buf[fixed_offset] = string_slot_inline_tag;
+                    const off_u16: u16 = @intCast(var_offset);
+                    @memcpy(buf[fixed_offset + 2 ..][0..2], std.mem.asBytes(
+                        &std.mem.nativeToLittle(u16, off_u16),
+                    ));
+                    @memcpy(buf[var_offset..][0..2], std.mem.asBytes(
+                        &std.mem.nativeToLittle(u16, str_len),
+                    ));
+                    var_offset += 2;
+                    @memcpy(buf[var_offset..][0..str.len], str);
+                    var_offset += str.len;
+                } else {
+                    buf[fixed_offset] = string_slot_overflow_tag;
+                    @memcpy(buf[fixed_offset + 2 ..][0..8], std.mem.asBytes(
+                        &std.mem.nativeToLittle(u64, overflow_page_id),
+                    ));
+                }
+                fixed_offset += string_fixed_slot_size;
             },
             .timestamp => {
                 const v = values[i].timestamp;
@@ -323,28 +363,26 @@ pub fn encodeRow(
 }
 
 /// Decode a single column value from encoded row data.
-pub fn decodeColumnChecked(
+pub fn decodeColumnStorageChecked(
     schema: *const RowSchema,
     row_data: []const u8,
     col_index: u16,
-) DecodeError!Value {
+) DecodeError!DecodedColumn {
     if (col_index >= schema.column_count) return error.Corruption;
-    try validateRowHeader(row_data);
+    const row_version = try validateRowHeader(row_data);
 
-    // Check null bitmap.
     const byte_idx = row_header_size + col_index / 8;
     try requireRange(row_data, byte_idx, 1);
     const bit_idx: u3 = @intCast(col_index % 8);
     if (row_data[byte_idx] & (@as(u8, 1) << bit_idx) != 0) {
-        return .{ .null_value = {} };
+        return .{ .value = .{ .null_value = {} } };
     }
 
-    // Compute offset to this column's fixed slot.
     var offset: usize = row_header_size + schema.null_bitmap_bytes;
     for (0..col_index) |i| {
         const col = schema.columns[i];
         const slot_size: usize = if (col.column_type == .string)
-            2
+            stringSlotSizeForVersion(row_version)
         else
             fixedSize(col.column_type);
         offset = std.math.add(usize, offset, slot_size) catch
@@ -356,62 +394,115 @@ pub fn decodeColumnChecked(
         .bigint => blk: {
             try requireRange(row_data, offset, 8);
             break :blk .{
-                .bigint = std.mem.littleToNative(
-                    i64,
-                    std.mem.bytesAsValue(i64, row_data[offset..][0..8]).*,
-                ),
+                .value = .{
+                    .bigint = std.mem.littleToNative(
+                        i64,
+                        std.mem.bytesAsValue(i64, row_data[offset..][0..8]).*,
+                    ),
+                },
             };
         },
         .int => blk: {
             try requireRange(row_data, offset, 4);
             break :blk .{
-                .int = std.mem.littleToNative(
-                    i32,
-                    std.mem.bytesAsValue(i32, row_data[offset..][0..4]).*,
-                ),
+                .value = .{
+                    .int = std.mem.littleToNative(
+                        i32,
+                        std.mem.bytesAsValue(i32, row_data[offset..][0..4]).*,
+                    ),
+                },
             };
         },
         .float => blk: {
             try requireRange(row_data, offset, 8);
             break :blk .{
-                .float = @bitCast(std.mem.littleToNative(
-                    u64,
-                    std.mem.bytesAsValue(u64, row_data[offset..][0..8]).*,
-                )),
+                .value = .{
+                    .float = @bitCast(std.mem.littleToNative(
+                        u64,
+                        std.mem.bytesAsValue(u64, row_data[offset..][0..8]).*,
+                    )),
+                },
             };
         },
         .boolean => blk: {
             try requireRange(row_data, offset, 1);
-            break :blk .{ .boolean = row_data[offset] != 0 };
+            break :blk .{ .value = .{ .boolean = row_data[offset] != 0 } };
         },
         .string => blk: {
-            try requireRange(row_data, offset, 2);
-            const str_offset = std.mem.littleToNative(
-                u16,
-                std.mem.bytesAsValue(u16, row_data[offset..][0..2]).*,
-            );
-            const str_offset_usize: usize = str_offset;
-            try requireRange(row_data, str_offset_usize, 2);
-            const str_len = std.mem.littleToNative(
-                u16,
-                std.mem.bytesAsValue(u16, row_data[str_offset_usize..][0..2]).*,
-            );
-            const str_data_start = std.math.add(usize, str_offset_usize, 2) catch
-                return error.Corruption;
-            try requireRange(row_data, str_data_start, str_len);
-            break :blk .{
-                .string = row_data[str_data_start..][0..str_len],
-            };
+            if (row_version == row_format_version_legacy) {
+                try requireRange(row_data, offset, 2);
+                const str_offset = std.mem.littleToNative(
+                    u16,
+                    std.mem.bytesAsValue(u16, row_data[offset..][0..2]).*,
+                );
+                const str_offset_usize: usize = str_offset;
+                try requireRange(row_data, str_offset_usize, 2);
+                const str_len = std.mem.littleToNative(
+                    u16,
+                    std.mem.bytesAsValue(u16, row_data[str_offset_usize..][0..2]).*,
+                );
+                const str_data_start = std.math.add(usize, str_offset_usize, 2) catch
+                    return error.Corruption;
+                try requireRange(row_data, str_data_start, str_len);
+                break :blk .{
+                    .value = .{ .string = row_data[str_data_start..][0..str_len] },
+                };
+            }
+
+            try requireRange(row_data, offset, string_fixed_slot_size);
+            const tag = row_data[offset];
+            if (tag == string_slot_inline_tag) {
+                const str_offset = std.mem.littleToNative(
+                    u16,
+                    std.mem.bytesAsValue(u16, row_data[offset + 2 ..][0..2]).*,
+                );
+                const str_offset_usize: usize = str_offset;
+                try requireRange(row_data, str_offset_usize, 2);
+                const str_len = std.mem.littleToNative(
+                    u16,
+                    std.mem.bytesAsValue(u16, row_data[str_offset_usize..][0..2]).*,
+                );
+                const str_data_start = std.math.add(usize, str_offset_usize, 2) catch
+                    return error.Corruption;
+                try requireRange(row_data, str_data_start, str_len);
+                break :blk .{
+                    .value = .{ .string = row_data[str_data_start..][0..str_len] },
+                };
+            }
+            if (tag == string_slot_overflow_tag) {
+                const overflow_page_id = std.mem.littleToNative(
+                    u64,
+                    std.mem.bytesAsValue(u64, row_data[offset + 2 ..][0..8]).*,
+                );
+                if (overflow_page_id == 0) return error.Corruption;
+                break :blk .{ .string_overflow_page_id = overflow_page_id };
+            }
+            return error.Corruption;
         },
         .timestamp => blk: {
             try requireRange(row_data, offset, 8);
             break :blk .{
-                .timestamp = std.mem.littleToNative(
-                    i64,
-                    std.mem.bytesAsValue(i64, row_data[offset..][0..8]).*,
-                ),
+                .value = .{
+                    .timestamp = std.mem.littleToNative(
+                        i64,
+                        std.mem.bytesAsValue(i64, row_data[offset..][0..8]).*,
+                    ),
+                },
             };
         },
+    };
+}
+
+/// Decode a single column value from encoded row data.
+pub fn decodeColumnChecked(
+    schema: *const RowSchema,
+    row_data: []const u8,
+    col_index: u16,
+) DecodeError!Value {
+    const decoded = try decodeColumnStorageChecked(schema, row_data, col_index);
+    return switch (decoded) {
+        .value => |v| v,
+        .string_overflow_page_id => error.Corruption,
     };
 }
 
@@ -444,14 +535,25 @@ fn requireRange(row_data: []const u8, start: usize, len: usize) DecodeError!void
     if (end > row_data.len) return error.Corruption;
 }
 
-fn validateRowHeader(row_data: []const u8) DecodeError!void {
+fn validateRowHeader(row_data: []const u8) DecodeError!u8 {
     try requireRange(row_data, 0, row_header_size);
     const magic = std.mem.littleToNative(
         u16,
         std.mem.bytesAsValue(u16, row_data[0..2]).*,
     );
     if (magic != row_format_magic) return error.InvalidRowFormat;
-    if (row_data[2] != row_format_version) return error.UnsupportedRowVersion;
+    const version = row_data[2];
+    if (version != row_format_version and version != row_format_version_legacy) {
+        return error.UnsupportedRowVersion;
+    }
+    return version;
+}
+
+fn stringSlotSizeForVersion(version: u8) usize {
+    return if (version == row_format_version_legacy)
+        string_fixed_slot_size_legacy
+    else
+        string_fixed_slot_size;
 }
 
 // --- Tests ---
@@ -482,8 +584,9 @@ test "row encode/decode matches golden vector" {
         .{ .boolean = true },
     };
     const expected = [_]u8{
-        0x32, 0x52, 0x01, 0x00, 0x2A, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x0F, 0x00, 0x01, 0x03,
+        0x32, 0x52, 0x02, 0x00, 0x2A, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x17, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x03,
         0x00, 0x42, 0x6F, 0x62,
     };
 
@@ -732,4 +835,32 @@ test "decode rejects invalid row format magic" {
 
     const result = decodeColumnChecked(&schema, buf[0..written], 0);
     try testing.expectError(error.InvalidRowFormat, result);
+}
+
+test "encode/decode string overflow pointer slot" {
+    var schema = RowSchema{};
+    _ = try schema.addColumn("id", .bigint, false);
+    _ = try schema.addColumn("name", .string, false);
+
+    const values = [_]Value{
+        .{ .bigint = 1 },
+        .{ .string = "large payload stored in overflow pages" },
+    };
+    const overflow_ids = [_]u64{ 0, 10_000_123 };
+
+    var buf: [256]u8 = undefined;
+    const written = try encodeRowWithOverflow(&schema, &values, &overflow_ids, &buf);
+    const decoded_id = try decodeColumnStorageChecked(&schema, buf[0..written], 1);
+    try testing.expect(decoded_id == .string_overflow_page_id);
+    try testing.expectEqual(@as(u64, 10_000_123), decoded_id.string_overflow_page_id);
+}
+
+test "decode supports legacy v1 row format for inline string" {
+    var schema = RowSchema{};
+    _ = try schema.addColumn("name", .string, false);
+
+    // [magic:u16][version:u8][null_bitmap:u8][offset:u16][len:u16]["ok"]
+    const legacy_row = [_]u8{ 0x32, 0x52, 0x01, 0x00, 0x06, 0x00, 0x02, 0x00, 0x6F, 0x6B };
+    const decoded = try decodeColumnChecked(&schema, &legacy_row, 0);
+    try testing.expectEqualSlices(u8, "ok", decoded.string);
 }

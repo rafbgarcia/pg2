@@ -3,6 +3,7 @@ const page_mod = @import("../storage/page.zig");
 const heap_mod = @import("../storage/heap.zig");
 const buffer_pool_mod = @import("../storage/buffer_pool.zig");
 const row_mod = @import("../storage/row.zig");
+const overflow_mod = @import("../storage/overflow.zig");
 const btree_mod = @import("../storage/btree.zig");
 const catalog_mod = @import("../catalog/catalog.zig");
 const tx_mod = @import("../mvcc/transaction.zig");
@@ -15,6 +16,7 @@ const RowId = heap_mod.RowId;
 const BufferPool = buffer_pool_mod.BufferPool;
 const Value = row_mod.Value;
 const RowSchema = row_mod.RowSchema;
+const OverflowPage = overflow_mod.OverflowPage;
 const BTree = btree_mod.BTree;
 const Catalog = catalog_mod.Catalog;
 const ModelId = catalog_mod.ModelId;
@@ -118,14 +120,29 @@ pub const StringArena = struct {
         self.used = 0;
     }
 
-    pub fn copyString(self: *StringArena, source: []const u8) error{OutOfMemory}![]const u8 {
-        if (source.len == 0) return "";
+    pub fn startString(self: *const StringArena) usize {
+        return self.used;
+    }
+
+    pub fn appendChunk(self: *StringArena, source: []const u8) error{OutOfMemory}!void {
+        if (source.len == 0) return;
         if (self.used + source.len > self.bytes.len) return error.OutOfMemory;
         const start = self.used;
         const end = start + source.len;
         @memcpy(self.bytes[start..end], source);
         self.used = end;
-        return self.bytes[start..end];
+    }
+
+    pub fn finishString(self: *const StringArena, start: usize) []const u8 {
+        std.debug.assert(start <= self.used);
+        return self.bytes[start..self.used];
+    }
+
+    pub fn copyString(self: *StringArena, source: []const u8) error{OutOfMemory}![]const u8 {
+        if (source.len == 0) return "";
+        const start = self.startString();
+        try self.appendChunk(source);
+        return self.finishString(start);
     }
 };
 
@@ -208,6 +225,8 @@ pub fn tableScanInto(
         while (slot_idx < slot_count) : (slot_idx += 1) {
             if (@as(usize, row_count) >= out_rows.len) break;
             try scanSlotInto(
+                catalog,
+                pool,
                 page, page_id, slot_idx, schema,
                 undo_log,
                 snapshot,
@@ -225,6 +244,8 @@ pub fn tableScanInto(
 
 /// Process a single slot during table scan.
 fn scanSlotInto(
+    catalog: *const Catalog,
+    pool: *BufferPool,
     page: *const Page,
     page_id: u64,
     slot_idx: u16,
@@ -263,7 +284,14 @@ fn scanSlotInto(
     // Decode and append to result.
     var row = ResultRow.init();
     row.row_id = .{ .page_id = page_id, .slot = slot_idx };
-    try decodeRowIntoResult(schema, data_to_decode, &row, string_arena);
+    try decodeRowIntoResult(
+        catalog,
+        pool,
+        schema,
+        data_to_decode,
+        &row,
+        string_arena,
+    );
     out_rows[@as(usize, row_count.*)] = row;
     row_count.* += 1;
 }
@@ -302,7 +330,14 @@ pub fn indexFind(
 
     var row = ResultRow.init();
     row.row_id = row_id;
-    try decodeRowIntoResult(schema, data_to_decode, &row, string_arena);
+    try decodeRowIntoResult(
+        catalog,
+        pool,
+        schema,
+        data_to_decode,
+        &row,
+        string_arena,
+    );
     return row;
 }
 
@@ -354,7 +389,14 @@ pub fn indexRange(
 
         var row = ResultRow.init();
         row.row_id = row_id;
-        try decodeRowIntoResult(schema, data_to_decode, &row, &string_arena);
+        try decodeRowIntoResult(
+            catalog,
+            pool,
+            schema,
+            data_to_decode,
+            &row,
+            &string_arena,
+        );
         result.appendRow(row);
     }
 
@@ -363,6 +405,8 @@ pub fn indexRange(
 }
 
 fn decodeRowIntoResult(
+    catalog: *const Catalog,
+    pool: *BufferPool,
     schema: *const RowSchema,
     row_data: []const u8,
     out_row: *ResultRow,
@@ -371,13 +415,57 @@ fn decodeRowIntoResult(
     out_row.column_count = schema.column_count;
     var col_idx: u16 = 0;
     while (col_idx < schema.column_count) : (col_idx += 1) {
-        const value = row_mod.decodeColumnChecked(schema, row_data, col_idx) catch
-            return error.Corruption;
-        out_row.values[col_idx] = switch (value) {
-            .string => |s| .{ .string = string_arena.copyString(s) catch return error.OutOfMemory },
-            else => value,
+        const decoded = row_mod.decodeColumnStorageChecked(
+            schema,
+            row_data,
+            col_idx,
+        ) catch return error.Corruption;
+        out_row.values[col_idx] = switch (decoded) {
+            .value => |v| switch (v) {
+                .string => |s| .{ .string = string_arena.copyString(s) catch return error.OutOfMemory },
+                else => v,
+            },
+            .string_overflow_page_id => |first_page_id| .{
+                .string = resolveOverflowStringIntoArena(
+                    catalog,
+                    pool,
+                    first_page_id,
+                    string_arena,
+                ) catch |e| return e,
+            },
         };
     }
+}
+
+fn resolveOverflowStringIntoArena(
+    catalog: *const Catalog,
+    pool: *BufferPool,
+    first_page_id: u64,
+    string_arena: *StringArena,
+) ScanError![]const u8 {
+    const overflow_allocator = &catalog.overflow_page_allocator;
+    if (!overflow_allocator.ownsPageId(first_page_id)) return error.Corruption;
+
+    const start = string_arena.startString();
+    var current = first_page_id;
+    var hops: u64 = 0;
+    const max_hops = overflow_allocator.capacity();
+    while (true) {
+        if (hops >= max_hops) return error.Corruption;
+        hops += 1;
+
+        const page = pool.pin(current) catch |e| return mapPoolError(e);
+        defer pool.unpin(current, false);
+        if (page.header.page_type != .overflow) return error.Corruption;
+
+        const chunk = OverflowPage.readChunk(page) catch return error.Corruption;
+        string_arena.appendChunk(chunk.payload) catch return error.OutOfMemory;
+        if (chunk.next_page_id == OverflowPage.null_page_id) break;
+        if (!overflow_allocator.ownsPageId(chunk.next_page_id)) return error.Corruption;
+        current = chunk.next_page_id;
+    }
+
+    return string_arena.finishString(start);
 }
 
 /// Resolve the visible version of a row for the given snapshot.
