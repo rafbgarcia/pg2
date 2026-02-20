@@ -33,7 +33,7 @@ Release-readiness gates live in `V1_READINESS_CHECKLIST.md`.
     - [x] `zig build test` and `zig build sim` include new regression cases.
     - [x] Replay after crash is deterministic and state-consistent across seeds.
 
-- [ ] Milestone 3: Planner/executor introspection expansion
+- [x] Milestone 3: Planner/executor introspection expansion
   - Scope: Improve `inspect` output to explain physical decisions (join strategy/order, materialization, sort/aggregation choices) in plain language.
   - Deliverables:
     - [x] Structured introspection data for key planner/executor decisions.
@@ -45,7 +45,7 @@ Release-readiness gates live in `V1_READINESS_CHECKLIST.md`.
     - Common query plans are explainable without reading internals.
     - Introspection output is deterministic and test-covered.
 
-- [ ] Milestone 4: Tiger Style PR gate completion for each milestone
+- [x] Milestone 4: Tiger Style PR gate completion for each milestone
   - Scope: Enforce project robustness standards on every milestone PR.
   - Deliverables:
     - Completed checklist from `docs/TIGER_STYLE.md` per PR:
@@ -58,6 +58,14 @@ Release-readiness gates live in `V1_READINESS_CHECKLIST.md`.
     - Artifact index and initial milestone coverage:
       - `docs/tiger-gates/README.md`
       - `docs/tiger-gates/TEMPLATE.md`
+      - `docs/tiger-gates/85de518-reference-ri-syntax.md`
+      - `docs/tiger-gates/eb64d65-index-bracketed-field-arrays.md`
+      - `docs/tiger-gates/e5de781-ri-enforcement-in-mutations.md`
+      - `docs/tiger-gates/2d15cb5-ri-mode-rename-fail-closed.md`
+      - `docs/tiger-gates/993fc8a-referential-update-regressions.md`
+      - `docs/tiger-gates/ace72c4-harden-fk-config-validation.md`
+      - `docs/tiger-gates/a1ebf01-fail-closed-implicit-belongs-to.md`
+      - `docs/tiger-gates/560dd3b-deterministic-fk-crash-restart.md`
       - `docs/tiger-gates/a1c44df-rollback-visibility-edge-matrix.md`
       - `docs/tiger-gates/e5c45f5-wal-undo-crash-visibility.md`
       - `docs/tiger-gates/890c767-write-write-visibility-matrix.md`

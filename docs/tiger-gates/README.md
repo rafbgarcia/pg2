@@ -22,6 +22,14 @@ Each artifact answers the mandatory checklist in `docs/TIGER_STYLE.md`:
 ## Artifacts
 
 - `docs/tiger-gates/TEMPLATE.md`
+- `docs/tiger-gates/85de518-reference-ri-syntax.md`
+- `docs/tiger-gates/eb64d65-index-bracketed-field-arrays.md`
+- `docs/tiger-gates/e5de781-ri-enforcement-in-mutations.md`
+- `docs/tiger-gates/2d15cb5-ri-mode-rename-fail-closed.md`
+- `docs/tiger-gates/993fc8a-referential-update-regressions.md`
+- `docs/tiger-gates/ace72c4-harden-fk-config-validation.md`
+- `docs/tiger-gates/a1ebf01-fail-closed-implicit-belongs-to.md`
+- `docs/tiger-gates/560dd3b-deterministic-fk-crash-restart.md`
 - `docs/tiger-gates/a1c44df-rollback-visibility-edge-matrix.md`
 - `docs/tiger-gates/e5c45f5-wal-undo-crash-visibility.md`
 - `docs/tiger-gates/890c767-write-write-visibility-matrix.md`
