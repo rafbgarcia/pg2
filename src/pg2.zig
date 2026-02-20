@@ -37,6 +37,7 @@ pub const simulator = struct {
     pub const disk = @import("simulator/disk.zig");
     pub const clock = @import("simulator/clock.zig");
     pub const fault_matrix = @import("simulator/fault_matrix.zig");
+    pub const fk_fault_matrix = @import("simulator/fk_fault_matrix.zig");
 };
 
 pub const runtime = struct {
@@ -83,6 +84,7 @@ comptime {
     _ = simulator.disk;
     _ = simulator.clock;
     _ = simulator.fault_matrix;
+    _ = simulator.fk_fault_matrix;
     _ = runtime.bootstrap;
     _ = runtime.config;
     _ = runtime.request;
