@@ -81,6 +81,10 @@ Roadmap sequencing lives in `TODO.md`.
 - [ ] Tiger Style PR gate artifacts completed for every gate-changing PR.
   - In progress: `docs/tiger-gates/README.md`
   - In progress: `docs/tiger-gates/TEMPLATE.md`
+  - In progress: `docs/tiger-gates/a1c44df-rollback-visibility-edge-matrix.md`
+  - In progress: `docs/tiger-gates/e5c45f5-wal-undo-crash-visibility.md`
+  - In progress: `docs/tiger-gates/890c767-write-write-visibility-matrix.md`
+  - In progress: `docs/tiger-gates/a22b91c-milestone2-recovery-invariant-tracking.md`
   - In progress: `docs/tiger-gates/810a60c-inspect-plan-metadata.md`
   - In progress: `docs/tiger-gates/fa983f5-inspect-sort-group-strategy.md`
   - Enforcement: `AGENTS.md` delivery workflow + stop condition

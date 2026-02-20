@@ -22,5 +22,9 @@ Each artifact answers the mandatory checklist in `docs/TIGER_STYLE.md`:
 ## Artifacts
 
 - `docs/tiger-gates/TEMPLATE.md`
+- `docs/tiger-gates/a1c44df-rollback-visibility-edge-matrix.md`
+- `docs/tiger-gates/e5c45f5-wal-undo-crash-visibility.md`
+- `docs/tiger-gates/890c767-write-write-visibility-matrix.md`
+- `docs/tiger-gates/a22b91c-milestone2-recovery-invariant-tracking.md`
 - `docs/tiger-gates/810a60c-inspect-plan-metadata.md`
 - `docs/tiger-gates/fa983f5-inspect-sort-group-strategy.md`
