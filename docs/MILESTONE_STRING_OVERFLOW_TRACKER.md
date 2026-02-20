@@ -49,6 +49,7 @@ This milestone is done only when all conditions below are true:
 ## Known Test State
 
 - `zig build test` passes for this increment (includes overflow lifecycle recovery replay unit + server E2E idempotence coverage).
+- Server E2E string-overflow spec file was renamed for clarity: `src/server/e2e/overflow.zig` -> `src/server/e2e/string_overflow.zig`.
 
 ## Next Logical Chunk
 
@@ -68,7 +69,7 @@ This milestone is done only when all conditions below are true:
 
 ## Next-Session Kickoff (Concrete)
 
-Completed in committed chunks `c5548a0`, `fd81f61`, `ad8ccd7`, `505fff1`, and `7ad8fc5`:
+Completed in committed chunks `c5548a0`, `fd81f61`, `ad8ccd7`, `505fff1`, `7ad8fc5`, and `0000000`:
 
 1. Overflow reclaim pipeline.
 2. WAL lifecycle contract for create/relink/unlink/reclaim.
@@ -76,6 +77,7 @@ Completed in committed chunks `c5548a0`, `fd81f61`, `ad8ccd7`, `505fff1`, and `7
 4. Malformed/cyclic chain fail-closed reclaim coverage.
 5. Inspect-level reclaim backlog/throughput visibility.
 6. Recovery replay application for overflow lifecycle WAL with idempotent reclaim semantics.
+7. Server E2E overflow test module rename for explicit string-overflow scope.
 
 Next session should execute in order:
 
@@ -93,11 +95,12 @@ Use these first in a new session:
 2. `zig build test`
 3. `git log -6 --stat`
 4. `git show --name-only --stat 505fff1`
-5. `git show --name-only --stat 7ad8fc5`
-6. `git show --name-only --stat ad8ccd7`
-7. `git show --name-only --stat fd81f61`
-8. `git show --name-only --stat c5548a0`
-9. `rg -n "overflow_chain_create|overflow_chain_relink|overflow_chain_unlink|overflow_chain_reclaim|replay|recover" src`
-10. `rg -n "INSPECT overflow|overflow_reclaim_stats|snapshotOverflowReclaimStats|overflow_reclaim_queue" src docs user-facing-docs`
-11. Run the AGENTS placeholder hygiene check command.
-12. Continue from "Next Logical Chunk" acceptance criteria above.
+5. `git show --name-only --stat 0000000`
+6. `git show --name-only --stat 7ad8fc5`
+7. `git show --name-only --stat ad8ccd7`
+8. `git show --name-only --stat fd81f61`
+9. `git show --name-only --stat c5548a0`
+10. `rg -n "overflow_chain_create|overflow_chain_relink|overflow_chain_unlink|overflow_chain_reclaim|replay|recover" src`
+11. `rg -n "INSPECT overflow|overflow_reclaim_stats|snapshotOverflowReclaimStats|overflow_reclaim_queue" src docs user-facing-docs`
+12. Run the AGENTS placeholder hygiene check command.
+13. Continue from "Next Logical Chunk" acceptance criteria above.
