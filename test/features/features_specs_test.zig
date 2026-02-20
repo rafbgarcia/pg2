@@ -16,10 +16,7 @@ comptime {
     _ = @import("field_types/string_test.zig");
     _ = @import("mutations/delete_test.zig");
     _ = @import("mutations/insert_test.zig");
-    _ = @import("overflow_reclaim_crash_matrix_test.zig");
-    _ = @import("overflow_reclaim_drain_policy_test.zig");
-    _ = @import("overflow_replay_tx_markers_test.zig");
-    _ = @import("string_overflow_test.zig");
+    _ = @import("large_values/string_overflow_test.zig");
     _ = @import("queries/select_test.zig");
     _ = @import("mutations/update_test.zig");
 }

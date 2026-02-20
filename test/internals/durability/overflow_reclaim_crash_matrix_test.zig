@@ -10,7 +10,7 @@ const overflow_mod = pg2.storage.overflow;
 const page_mod = pg2.storage.page;
 const recovery_mod = pg2.storage.recovery;
 const wal_mod = pg2.storage.wal;
-const e2e = @import("test_env_test.zig");
+const e2e = @import("../../features/test_env_test.zig");
 
 const PageType = page_mod.PageType;
 const Record = wal_mod.Record;

@@ -11,7 +11,7 @@ const overflow_mod = pg2.storage.overflow;
 const page_mod = pg2.storage.page;
 const recovery_mod = pg2.storage.recovery;
 const wal_mod = pg2.storage.wal;
-const e2e = @import("test_env_test.zig");
+const e2e = @import("../test_env_test.zig");
 
 test "e2e overflow insert update and read via session path" {
     var env: e2e.E2EEnv = undefined;

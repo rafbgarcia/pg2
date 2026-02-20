@@ -6,7 +6,7 @@
 const std = @import("std");
 const pg2 = @import("pg2");
 const overflow_mod = pg2.storage.overflow;
-const e2e = @import("test_env_test.zig");
+const e2e = @import("../../features/test_env_test.zig");
 
 test "e2e overflow multi-chain unlink drains one committed chain per successful write commit boundary" {
     var env: e2e.E2EEnv = undefined;
