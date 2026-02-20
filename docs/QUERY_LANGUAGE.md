@@ -308,4 +308,5 @@ User { abs_id: abs(id) }
 
 - Legacy association declarations (`hasMany`, `hasOne`, `belongsTo`) are considered legacy forms.
 - `reference(...)` is the canonical relationship declaration going forward.
+- `belongsTo` without explicit RI policy is rejected (fail-closed). Use `reference(...)` with an explicit policy.
 - Parenthesized field declarations are canonical.

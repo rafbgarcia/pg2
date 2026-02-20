@@ -560,6 +560,11 @@ pub const Catalog = struct {
                         return error.InvalidAssociationConfig;
                     }
                 }
+                if (assoc.kind == .belongs_to and
+                    assoc.referential_integrity_mode == .unspecified)
+                {
+                    return error.InvalidAssociationConfig;
+                }
             }
         }
     }
@@ -896,6 +901,21 @@ test "resolve associations rejects referential key type mismatch" {
         .restrict,
         .restrict,
     );
+
+    try testing.expectError(error.InvalidAssociationConfig, cat.resolveAssociations());
+}
+
+test "resolve associations rejects belongs_to without explicit RI mode" {
+    var cat = Catalog{};
+    const user_id = try cat.addModel("User");
+    _ = try cat.addColumn(user_id, "id", .bigint, false);
+
+    const post_id = try cat.addModel("Post");
+    _ = try cat.addColumn(post_id, "id", .bigint, false);
+    _ = try cat.addColumn(post_id, "user_id", .bigint, true);
+
+    const assoc_id = try cat.addAssociation(post_id, "author", .belongs_to, "User");
+    try cat.setAssociationKeys(post_id, assoc_id, "user_id", "id");
 
     try testing.expectError(error.InvalidAssociationConfig, cat.resolveAssociations());
 }

@@ -406,7 +406,7 @@ test "load simple schema" {
     try testing.expect(catalog.models[uid].columns[2].nullable); // default nullable
 }
 
-test "load schema with associations" {
+test "load schema rejects belongsTo without explicit RI config" {
     const source =
         \\User {
         \\  field id bigint primaryKey
@@ -423,18 +423,10 @@ test "load schema with associations" {
     try testing.expect(!parsed.has_error);
 
     var catalog = Catalog{};
-    try loadSchema(&catalog, &parsed.ast, &tokens, source);
-
-    try testing.expectEqual(@as(u16, 2), catalog.model_count);
-
-    const user_id: ModelId = 0;
-    const post_id: ModelId = 1;
-    try testing.expectEqual(@as(u16, 1), catalog.models[user_id].association_count);
-    try testing.expectEqual(@as(u16, 1), catalog.models[post_id].association_count);
-
-    // Association targets resolved.
-    try testing.expectEqual(post_id, catalog.models[user_id].associations[0].target_model_id);
-    try testing.expectEqual(user_id, catalog.models[post_id].associations[0].target_model_id);
+    try testing.expectError(
+        error.InvalidAssociationConfig,
+        loadSchema(&catalog, &parsed.ast, &tokens, source),
+    );
 }
 
 test "load schema with reference and explicit RI config" {
