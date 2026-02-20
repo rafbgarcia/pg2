@@ -55,5 +55,9 @@ Release-readiness gates live in `V1_READINESS_CHECKLIST.md`.
       - Persistent format/protocol impact
       - Deterministic crash/fault tests
       - Performance baseline/threshold impact
+    - Artifact index and initial milestone coverage:
+      - `docs/tiger-gates/README.md`
+      - `docs/tiger-gates/810a60c-inspect-plan-metadata.md`
+      - `docs/tiger-gates/fa983f5-inspect-sort-group-strategy.md`
   - Done when:
     - Every merged milestone links a completed Tiger Style gate artifact.
