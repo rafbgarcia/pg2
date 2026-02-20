@@ -26,6 +26,7 @@ String storage behavior (current):
 - `supported`: reclaim drain budget is fixed at one committed overflow chain per successful commit boundary; multi-chain unlinks advance backlog deterministically across subsequent committed transactions.
 - `supported`: malformed overflow chain reads fail closed as corruption-class errors.
 - `supported`: overflow lifecycle recovery replay requires strict transaction markers (`tx_begin` + terminal marker); legacy markerless lifecycle WAL fails closed as corruption.
+- `in_progress`: crash replay currently reclaims only chains with durable `overflow_chain_reclaim` WAL records; newly observed matrix coverage shows unlinked chains without durable reclaim records remain overflow after restart.
 
 ## Read Pipeline Operators
 

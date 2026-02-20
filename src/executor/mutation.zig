@@ -253,7 +253,6 @@ pub fn executeInsert(
         overflow_page_ids[0..schema.column_count],
         0,
     );
-    try drainOverflowReclaimQueue(catalog, pool, wal, tx_id, 1);
     return result;
 }
 
@@ -377,7 +376,6 @@ pub fn executeUpdate(
         }
     }
 
-    try drainOverflowReclaimQueue(catalog, pool, wal, tx_id, 1);
     return updated_count;
 }
 
@@ -483,8 +481,6 @@ pub fn executeDelete(
     if (deleted_count > 0) {
         catalog.decrementRowCount(model_id, deleted_count);
     }
-    try drainOverflowReclaimQueue(catalog, pool, wal, tx_id, 1);
-
     return deleted_count;
 }
 
@@ -535,7 +531,6 @@ fn deleteSingleRow(
     for (0..old_overflow_count) |i| {
         try enqueueOverflowChainForReclaim(catalog, wal, tx_id, old_overflow_roots[i]);
     }
-    try drainOverflowReclaimQueue(catalog, pool, wal, tx_id, 1);
 }
 
 fn updateRowWithValues(
