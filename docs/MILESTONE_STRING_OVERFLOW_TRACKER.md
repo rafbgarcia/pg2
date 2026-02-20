@@ -43,6 +43,26 @@ These are confirmed in chat with the user:
   - update auto-compacts when fragmented bytes cover growth shortfall.
   - insert auto-compacts when fragmented bytes cover insert shortfall.
 
+### Implemented in committed chunk `73e509b`
+
+- Overflow storage foundation:
+  - Added page type `.overflow` in `src/storage/page.zig`.
+  - Added `src/storage/overflow.zig` with:
+    - versioned overflow page header (`magic/version`),
+    - single-chunk payload + next-page pointer model,
+    - deterministic tests for init, roundtrip, capacity bounds, and corrupt format rejection.
+  - Wired module into test discovery via `src/pg2.zig`.
+
+### Implemented in committed chunk `a3970a5`
+
+- Bounded string materialization arena:
+  - Added per-query bounded string arena bytes in runtime bootstrap:
+    - `BootstrapConfig.query_string_arena_bytes_per_slot` (default 4 MiB).
+    - Query buffers now include `string_arena_bytes`.
+  - Added bounded `StringArena` in `src/executor/scan.zig`; scan decode copies strings into arena-backed memory.
+  - `ScanResult` now owns string storage for allocator-returning scan APIs (`tableScan`, `indexRange`) to guarantee lifetime safety.
+  - Executor read path threads per-query arena to `tableScanInto` calls (including nested relation scans).
+
 ### Not implemented yet
 
 - No overflow pointer integration in row format yet.
@@ -51,43 +71,21 @@ These are confirmed in chat with the user:
 
 ## Known Test State
 
-- `zig build test` passes for committed auto-compaction increment.
-- `zig build test` also passes after overflow page foundation module changes in this in-progress chunk.
-
-## New In-Progress Chunk: Overflow Storage Foundation
-
-Implemented (not yet committed in this tracker section):
-
-- Added page type `.overflow` in `src/storage/page.zig`.
-- Added `src/storage/overflow.zig` with:
-  - versioned overflow page header (`magic/version`),
-  - single-chunk payload + next-page pointer model,
-  - deterministic tests for init, roundtrip, capacity bounds, and corrupt format rejection.
-- Wired module into test discovery via `src/pg2.zig`.
-
-## New In-Progress Chunk: Bounded String Materialization Arena
-
-Implemented (not yet committed in this tracker section):
-
-- Added per-query bounded string arena bytes in runtime bootstrap:
-  - `BootstrapConfig.query_string_arena_bytes_per_slot` (default 4 MiB).
-  - Query buffers now include `string_arena_bytes`.
-- Added bounded `StringArena` in `src/executor/scan.zig` and switched scan decode path to copy string values into arena-backed storage (no dangling page slices after unpin).
-- `ScanResult` now owns its string storage for allocator-returning scan APIs (`tableScan`, `indexRange`) to guarantee lifetime safety.
-- Executor read path now threads a per-query arena to `tableScanInto` calls (including nested relation scans).
-- Full test suite passes after this change.
+- `zig build test` passes through commit `a3970a5`.
 
 ## Next Logical Chunk
 
-1. Commit overflow storage foundation with Tiger artifact.
-2. Commit bounded string materialization arena increment with Tiger artifact.
-3. Row format integration:
+1. Confirm overflow page-id allocation strategy:
+   - dedicated page-id region (recommended),
+   - global free-list allocator,
+   - per-model region allocator.
+2. Row format integration:
    - Extend string fixed-slot encoding to support inline vs overflow-pointer variants.
    - Keep backwards-compatible row format behavior decisions explicit (likely version bump).
-4. Mutation path integration:
+3. Mutation path integration:
    - On insert/update, apply 1024-byte inline policy for strings.
    - Allocate/write overflow pages and set in-row pointers when spilling.
-5. Durability integration:
+4. Durability integration:
    - Define WAL payload contract for overflow chain create/relink/unlink.
    - Add deterministic crash/fault tests for spill + update + unlink/recover.
 
@@ -101,5 +99,5 @@ Use these first in a new session:
 
 1. `git status --short`
 2. `zig build test`
-3. `rg -n "compact|fragmented_bytes|maybe_compact_for_required_space" src/storage/heap.zig`
+3. `rg -n "overflow|StringArena|query_string_arena_bytes_per_slot" src/storage src/executor src/runtime`
 4. Continue from "Next Logical Chunk" above.
