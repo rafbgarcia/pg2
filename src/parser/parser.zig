@@ -781,7 +781,7 @@ fn parseSchemaField(
             pos += 1;
             continue;
         }
-        if (ct == .kw_primary_key or ct == .kw_not_null) {
+        if (ct == .kw_primary_key or ct == .kw_not_null or ct == .kw_nullable) {
             pos += 1;
             continue;
         }
@@ -1107,9 +1107,9 @@ test "parse pipeline query" {
 test "parse schema definition" {
     const source =
         \\User {
-        \\  field id bigint primaryKey
+        \\  field id bigint notNull primaryKey
         \\  field email string notNull
-        \\  field name string
+        \\  field name string nullable
         \\  hasMany posts
         \\}
     ;
@@ -1219,8 +1219,8 @@ test "parse update mutation" {
 test "parse scope in schema" {
     const source =
         \\User {
-        \\  field id bigint primaryKey
-        \\  field active boolean
+        \\  field id bigint notNull primaryKey
+        \\  field active boolean nullable
         \\  scope active |> where(active = true)
         \\}
     ;

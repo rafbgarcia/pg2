@@ -10,6 +10,7 @@ Status labels:
 ## Schema
 
 - `supported`: model and field declarations (`field(...)`) through schema definitions.
+- `supported`: fail-closed explicit nullability on every field (`notNull` or `nullable` is required; implicit nullable is rejected).
 - `supported`: field defaults via `default` literal in schema definitions (for example `field(status, string, notNull, default, "pending")`).
 - `supported`: `reference(...)` metadata with explicit RI mode.
 - `supported`: fail-closed RI configuration for unsupported referential actions (`set default` rejected).

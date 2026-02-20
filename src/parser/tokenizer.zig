@@ -43,6 +43,7 @@ pub const TokenType = enum(u8) {
     kw_belongs_to,
     kw_primary_key,
     kw_not_null,
+    kw_nullable,
     kw_default,
     kw_index,
     kw_unique_index,
@@ -364,6 +365,7 @@ fn classifyWord(text: []const u8, starts_upper: bool) TokenType {
         .{ .word = "belongsTo", .tok = .kw_belongs_to },
         .{ .word = "primaryKey", .tok = .kw_primary_key },
         .{ .word = "notNull", .tok = .kw_not_null },
+        .{ .word = "nullable", .tok = .kw_nullable },
         .{ .word = "default", .tok = .kw_default },
         .{ .word = "index", .tok = .kw_index },
         .{ .word = "uniqueIndex", .tok = .kw_unique_index },
@@ -595,7 +597,7 @@ test "full pipeline tokenizes correctly" {
 test "schema definition tokenizes" {
     const source =
         \\User {
-        \\  field id bigint primaryKey
+        \\  field id bigint notNull primaryKey
         \\  field email string notNull
         \\  hasMany posts
         \\}
@@ -605,6 +607,13 @@ test "schema definition tokenizes" {
     try testing.expectEqual(TokenType.model_name, result.tokens[0].token_type);
     try testing.expectEqual(TokenType.left_brace, result.tokens[1].token_type);
     try testing.expectEqual(TokenType.kw_field, result.tokens[2].token_type);
+}
+
+test "nullable keyword tokenizes in schema field constraints" {
+    const source = "field bio string nullable";
+    const result = tokenize(source);
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(TokenType.kw_nullable, result.tokens[3].token_type);
 }
 
 test "logical operators" {

@@ -161,14 +161,12 @@ fn loadField(
     const col_type = tokenToColumnType(type_tok.token_type) orelse
         return error.InvalidSchema;
 
-    // Determine nullable: default true unless notNull constraint present.
-    // Constraints are encoded after the type token. We scan tokens after
-    // extra (type_tok) until we hit a non-constraint token. However, the
-    // parser already consumed constraints — we need to check the next
-    // member's position or look at consecutive tokens.
-    // For now, use a heuristic: check tokens after type_tok for constraints.
+    // Nullability must be explicitly declared per field (`notNull` or `nullable`).
+    // We scan tokens after type token until non-constraint token.
     const type_tok_idx = node.extra;
-    var nullable = true;
+    var nullable = false;
+    var saw_not_null = false;
+    var saw_nullable = false;
     var is_primary_key = false;
     var has_default = false;
     var default_token_idx: u16 = null_token_index;
@@ -182,7 +180,14 @@ fn loadField(
             is_primary_key = true;
             scan += 1;
         } else if (tt == .kw_not_null) {
+            if (saw_nullable or saw_not_null) return error.InvalidSchema;
+            saw_not_null = true;
             nullable = false;
+            scan += 1;
+        } else if (tt == .kw_nullable) {
+            if (saw_not_null or saw_nullable) return error.InvalidSchema;
+            saw_nullable = true;
+            nullable = true;
             scan += 1;
         } else if (tt == .kw_default) {
             scan += 1;
@@ -206,8 +211,8 @@ fn loadField(
         return error.InvalidSchema;
     }
 
-    // Primary key implies not null.
-    if (is_primary_key) nullable = false;
+    if (!saw_not_null and !saw_nullable) return error.InvalidSchema;
+    if (is_primary_key and saw_nullable) return error.InvalidSchema;
 
     const col_id = try catalog.addColumn(model_id, name, col_type, nullable);
     if (is_primary_key) {
@@ -507,9 +512,9 @@ const parser_mod = @import("../parser/parser.zig");
 test "load simple schema" {
     const source =
         \\User {
-        \\  field id bigint primaryKey
+        \\  field id bigint notNull primaryKey
         \\  field email string notNull
-        \\  field name string
+        \\  field name string nullable
         \\}
     ;
     const tokens = tokenizer_mod.tokenize(source);
@@ -527,7 +532,7 @@ test "load simple schema" {
     try testing.expect(catalog.models[uid].columns[0].is_primary_key);
     try testing.expect(!catalog.models[uid].columns[0].nullable);
     try testing.expect(!catalog.models[uid].columns[1].nullable); // notNull
-    try testing.expect(catalog.models[uid].columns[2].nullable); // default nullable
+    try testing.expect(catalog.models[uid].columns[2].nullable); // explicit nullable
 }
 
 test "load schema parses typed column defaults" {
@@ -572,14 +577,50 @@ test "load schema rejects non-null column default null" {
     );
 }
 
+test "load schema rejects field without explicit nullability constraint" {
+    const source =
+        \\User {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(name, string)
+        \\}
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const parsed = parser_mod.parse(&tokens, source);
+    try testing.expect(!parsed.has_error);
+
+    var catalog = Catalog{};
+    try testing.expectError(
+        error.InvalidSchema,
+        loadSchema(&catalog, &parsed.ast, &tokens, source),
+    );
+}
+
+test "load schema rejects field with conflicting nullability constraints" {
+    const source =
+        \\User {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(name, string, notNull, nullable)
+        \\}
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const parsed = parser_mod.parse(&tokens, source);
+    try testing.expect(!parsed.has_error);
+
+    var catalog = Catalog{};
+    try testing.expectError(
+        error.InvalidSchema,
+        loadSchema(&catalog, &parsed.ast, &tokens, source),
+    );
+}
+
 test "load schema rejects belongsTo without explicit RI config" {
     const source =
         \\User {
-        \\  field id bigint primaryKey
+        \\  field id bigint notNull primaryKey
         \\  hasMany Post
         \\}
         \\Post {
-        \\  field id bigint primaryKey
+        \\  field id bigint notNull primaryKey
         \\  field user_id bigint notNull
         \\  belongsTo User
         \\}
@@ -690,8 +731,8 @@ test "load schema with index" {
 test "load schema with scope" {
     const source =
         \\User {
-        \\  field id bigint primaryKey
-        \\  field active boolean
+        \\  field id bigint notNull primaryKey
+        \\  field active boolean nullable
         \\  scope active |> where(active = true)
         \\}
     ;
@@ -710,7 +751,7 @@ test "load schema with scope" {
 test "missing association target fails" {
     const source =
         \\User {
-        \\  field id bigint primaryKey
+        \\  field id bigint notNull primaryKey
         \\  hasMany Comment
         \\}
     ;
@@ -725,8 +766,8 @@ test "missing association target fails" {
 test "row schema mirrors catalog columns" {
     const source =
         \\User {
-        \\  field id bigint primaryKey
-        \\  field name string
+        \\  field id bigint notNull primaryKey
+        \\  field name string nullable
         \\}
     ;
     const tokens = tokenizer_mod.tokenize(source);
