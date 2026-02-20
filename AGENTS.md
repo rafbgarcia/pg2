@@ -123,4 +123,3 @@ For any PR touching core DB code, complete the mandatory checklist in `docs/QUAL
 - Store artifacts in `docs/quality-gates/`.
 - Use one file per gate-changing increment/commit.
 - Start from `docs/quality-gates/TEMPLATE.md`.
-- Keep `docs/quality-gates/README.md` updated with artifact links.
