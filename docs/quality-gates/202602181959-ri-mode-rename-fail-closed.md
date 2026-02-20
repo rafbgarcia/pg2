@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: 2d15cb5
+# Quality Gate Artifact: 2d15cb5
 
 - Commit: `2d15cb5`
 - Title: `rename ri mode field and codify fail-closed integrity principle`

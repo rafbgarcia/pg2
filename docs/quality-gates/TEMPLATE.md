@@ -1,5 +1,6 @@
-# Tiger Gate Artifact: <commit-or-task-id>
+# Quality Gate Artifact: <YYYYMMDDHHMM-short-slug>
 
+- Artifact ID: `<YYYYMMDDHHMM-short-slug>`
 - Commit: `<sha>`
 - Title: `<short title>`
 - Scope: `<one sentence>`

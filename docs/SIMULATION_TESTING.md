@@ -46,13 +46,13 @@ Everything runs in one OS thread. The scheduler uses a seeded PRNG to decide whi
 
 ## Allocation Rules for Simulation Code
 
-The Tiger Style static allocation rules apply to **production code** — the database engine itself. Simulation code (the harness, simulated disk, simulated network) is exempt because:
+The Quality Gates static allocation rules apply to **production code** — the database engine itself. Simulation code (the harness, simulated disk, simulated network) is exempt because:
 
 1. The simulation binary is a test tool, not deployed in production.
 2. Simulated components need to model arbitrary states (e.g., a hash map of pages to simulate a disk) which don't map to fixed-capacity structures.
 3. The simulation's purpose is to test production code behavior, not its own.
 
-Simulation code uses `std.testing.allocator` (which detects leaks) and standard library data structures. The production code under test uses the `StaticAllocator` and is subject to all Tiger Style constraints.
+Simulation code uses `std.testing.allocator` (which detects leaks) and standard library data structures. The production code under test uses the `StaticAllocator` and is subject to all Quality Gates constraints.
 
 ## Simulated Components
 

@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: 2026-02-20-bounded-query-string-arena
+# Quality Gate Artifact: 2026-02-20-bounded-query-string-arena
 
 - Commit: `<pending>`
 - Title: `Materialize query string values in bounded per-query arena`

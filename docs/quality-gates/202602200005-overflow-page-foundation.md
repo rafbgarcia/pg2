@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: 2026-02-20-overflow-page-foundation
+# Quality Gate Artifact: 2026-02-20-overflow-page-foundation
 
 - Commit: `<pending>`
 - Title: `Introduce versioned overflow page type and chunk primitives`

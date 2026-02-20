@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: fa983f5
+# Quality Gate Artifact: fa983f5
 
 - Commit: `fa983f5`
 - Title: `Expand inspect with sort and group strategy details`

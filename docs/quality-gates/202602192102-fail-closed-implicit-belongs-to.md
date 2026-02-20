@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: a1ebf01
+# Quality Gate Artifact: a1ebf01
 
 - Commit: `a1ebf01`
 - Title: `Fail closed on implicit belongs_to integrity`

@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: 993fc8a
+# Quality Gate Artifact: 993fc8a
 
 - Commit: `993fc8a`
 - Title: `expand referential update action regression coverage`

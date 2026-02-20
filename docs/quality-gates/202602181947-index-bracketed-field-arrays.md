@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: eb64d65
+# Quality Gate Artifact: eb64d65
 
 - Commit: `eb64d65`
 - Title: `schema: require bracketed index field arrays`

@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: 2026-02-20-row-growth-update-crud-fix
+# Quality Gate Artifact: 2026-02-20-row-growth-update-crud-fix
 
 - Commit: `<pending>`
 - Title: `Support row-growth updates in heap pages and lock with server E2E CRUD test`

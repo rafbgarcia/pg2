@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: e5de781
+# Quality Gate Artifact: e5de781
 
 - Commit: `e5de781`
 - Title: `enforce referential integrity actions in mutation paths`

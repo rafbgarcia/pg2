@@ -1,6 +1,6 @@
-# Tiger Style
+# Quality Gates
 
-Adapted from [TigerBeetle's Tiger Style](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md), with pg2-specific database rules.
+Adapted from the [TigerBeetle style guide](https://github.com/tigerbeetle/tigerbeetle/blob/main/docs/TIGER_STYLE.md), with pg2-specific database rules.
 
 These principles are mandatory for all pg2 code.
 

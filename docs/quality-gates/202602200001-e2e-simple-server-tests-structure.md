@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: 2026-02-20-e2e-simple-server-tests-structure
+# Quality Gate Artifact: 2026-02-20-e2e-simple-server-tests-structure
 
 - Commit: `<pending>`
 - Title: `Refactor server E2E tests to simple schema/insert/query examples`

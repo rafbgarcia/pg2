@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: 810a60c
+# Quality Gate Artifact: 810a60c
 
 - Commit: `810a60c`
 - Title: `Add deterministic inspect plan metadata`

@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: 2026-02-20-heap-auto-compaction-threshold
+# Quality Gate Artifact: 2026-02-20-heap-auto-compaction-threshold
 
 - Commit: `<pending>`
 - Title: `Auto-compact heap pages on insert/update contiguous-space shortfall`

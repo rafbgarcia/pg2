@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: 85de518
+# Quality Gate Artifact: 85de518
 
 - Commit: `85de518`
 - Title: `schema: add explicit reference RI syntax`

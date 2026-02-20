@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: a22b91c
+# Quality Gate Artifact: a22b91c
 
 - Commit: `a22b91c`
 - Title: `docs: track Milestone 2 gate progress and recovery invariants`

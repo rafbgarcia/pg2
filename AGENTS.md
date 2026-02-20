@@ -41,7 +41,7 @@ docs/
   REPLICATION.md
   CONNECTION_POOL.md
   REALTIME_SUBSCRIPTIONS.md
-  TIGER_STYLE.md
+  QUALITY_GATES.md
 ```
 
 ## Build & Test
@@ -59,22 +59,29 @@ ref spec: `src/server/e2e/e2e_specs.zig`
 - Focus exclusively on real-world E2E examples through the server session path until the user says otherwise.
 - The intention with this is to build a solid foundation for a production-grade database so we may have to refactor the codebase as we find issues.
 
-issue found:
-- [ ] Row growth update fails in CRUD flow: `User |> where(id = 1) |> update(name = "Alicia")` returns `ERR query: update failed; class=resource_exhausted; code=RowTooLarge`.
-
 ## Delivery Workflow
 
 For each implementation increment, follow this sequence:
 
 1. Implement the scoped code/tests change.
-2. If core DB code changed (`src/storage`, `src/mvcc`, `src/executor`, `src/parser`, `src/server`, `src/replication`, `src/catalog`), create or update a Tiger gate artifact in `docs/tiger-gates/` using `docs/tiger-gates/TEMPLATE.md`.
+2. If core DB code changed (`src/storage`, `src/mvcc`, `src/executor`, `src/parser`, `src/server`, `src/replication`, `src/catalog`), create or update a quality gate artifact in `docs/quality-gates/` using `docs/quality-gates/TEMPLATE.md`.
 3. Update progress tracking docs to reflect what is now complete
-4. Commit the implementation, Tiger artifact update (if required), and tracking updates together.
+4. Commit the implementation, quality artifact update (if required), and tracking updates together.
 5. Ask the user whether to proceed to the next recommended task.
+
+### User-Facing Docs Rule
+
+- Maintain minimal living user-facing docs as behavior lands. Do not wait for a final stabilization pass.
+- Keep baseline user-facing docs in `user-facing-docs/` (query surface, errors/responses, operations).
+- If a change alters user-visible behavior (syntax, semantics, error classes, supported/unsupported features, operational commands), update at least one relevant doc in the same commit.
+- Keep this lightweight during early stages:
+  - Required now: concise reference updates (facts, constraints, examples aligned with current behavior).
+  - Deferred until later milestones: long tutorials, deep walkthroughs, broad polish passes.
+- If behavior is intentionally unsupported or fail-closed, document that explicitly.
 
 ### Delivery Stop Condition
 
-- If a core DB increment lacks the required Tiger artifact update, do not proceed to the next task.
+- If a core DB increment lacks the required quality artifact update, do not proceed to the next task.
 
 ## Conventions
 
@@ -88,13 +95,13 @@ For each implementation increment, follow this sequence:
 - **Page size**: 8KB (matching PostgreSQL, allows direct comparison and reuse of research).
 - **File format**: All on-disk formats are explicitly versioned from day one.
 
-## Tiger Style
+## Quality Gates
 
-All Tiger Style and database-specific robustness rules live only in `docs/TIGER_STYLE.md`.
+All Quality Gates and database-specific robustness rules live only in `docs/QUALITY_GATES.md`.
 
 ### PR Gate (Summary)
 
-For any PR touching core DB code, complete the mandatory checklist in `docs/TIGER_STYLE.md`:
+For any PR touching core DB code, complete the mandatory checklist in `docs/QUALITY_GATES.md`:
 
 - Invariant changes.
 - Crash-consistency contract.
@@ -103,9 +110,9 @@ For any PR touching core DB code, complete the mandatory checklist in `docs/TIGE
 - Deterministic crash/fault tests.
 - Performance baseline/threshold impact.
 
-### Tiger Artifact Requirement
+### Quality Artifact Requirement
 
-- Store artifacts in `docs/tiger-gates/`.
+- Store artifacts in `docs/quality-gates/`.
 - Use one file per gate-changing increment/commit.
-- Start from `docs/tiger-gates/TEMPLATE.md`.
-- Keep `docs/tiger-gates/README.md` updated with artifact links.
+- Start from `docs/quality-gates/TEMPLATE.md`.
+- Keep `docs/quality-gates/README.md` updated with artifact links.

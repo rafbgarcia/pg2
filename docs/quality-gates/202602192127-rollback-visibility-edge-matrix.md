@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: a1c44df
+# Quality Gate Artifact: a1c44df
 
 - Commit: `a1c44df`
 - Title: `sim: add deterministic rollback visibility edge matrix scenario`

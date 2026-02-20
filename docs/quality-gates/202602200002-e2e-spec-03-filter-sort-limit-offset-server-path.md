@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: 2026-02-20-e2e-spec-03-filter-sort-limit-offset-server-path
+# Quality Gate Artifact: 2026-02-20-e2e-spec-03-filter-sort-limit-offset-server-path
 
 - Commit: `<pending>`
 - Title: `Mirror e2e/specs/03_filter_sort_limit_offset.spec in Zig server-path test`

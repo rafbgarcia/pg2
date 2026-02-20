@@ -144,7 +144,7 @@ pg2 uses undo-log MVCC with in-place updates.
 
 ## Memory Model
 
-All memory is statically allocated at startup. See CLAUDE.md "Tiger Style — Static memory allocation" for the full specification.
+All memory is statically allocated at startup. See CLAUDE.md "Quality Gates — Static memory allocation" for the full specification.
 
 Summary: on startup, pg2 `mmap`s a single contiguous region sized by the `--memory` flag (default: 512 MiB). All subsystem pools, buffers, and arenas are bump-allocated from this region. After initialization, the allocator is sealed — any allocation attempt is a panic.
 

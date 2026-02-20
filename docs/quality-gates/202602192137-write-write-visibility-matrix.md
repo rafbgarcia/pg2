@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: 890c767
+# Quality Gate Artifact: 890c767
 
 - Commit: `890c767`
 - Title: `sim: add write-write visibility matrix and mark Gate 5 complete`

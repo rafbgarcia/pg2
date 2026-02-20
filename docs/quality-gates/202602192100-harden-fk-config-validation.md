@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: ace72c4
+# Quality Gate Artifact: ace72c4
 
 - Commit: `ace72c4`
 - Title: `Harden foreign-key config validation`

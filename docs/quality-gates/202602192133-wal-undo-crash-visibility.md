@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: e5c45f5
+# Quality Gate Artifact: e5c45f5
 
 - Commit: `e5c45f5`
 - Title: `sim: add WAL+undo crash visibility consistency scenario`

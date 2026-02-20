@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: 560dd3b
+# Quality Gate Artifact: 560dd3b
 
 - Commit: `560dd3b`
 - Title: `Add deterministic FK crash/restart simulator coverage`

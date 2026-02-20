@@ -1,4 +1,4 @@
-# Tiger Gate Artifact: 2026-02-20-overflow-inline-pointer-spill-read-path
+# Quality Gate Artifact: 2026-02-20-overflow-inline-pointer-spill-read-path
 
 - Commit: `76598c4`
 - Title: `Implement dedicated overflow region allocator + row pointer encoding + spill/read integration`
