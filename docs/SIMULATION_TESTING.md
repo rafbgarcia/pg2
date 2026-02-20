@@ -168,14 +168,17 @@ After every tick (or every N ticks for expensive checks), the simulator verifies
 ## Running Simulations
 
 ```bash
-# Run with a specific seed (reproducible)
-zig build sim -- --seed 12345 --ticks 1000000
+# Run deterministic simulation regression tests
+zig build sim
+
+# Run simulator executable with a specific seed (reproducible)
+zig build sim-run -- --seed 12345 --ticks 1000000
 
 # Run with random seeds in a loop (fuzzing)
-zig build sim -- --fuzz --iterations 1000
+zig build sim-run -- --fuzz --iterations 1000
 
 # Run with aggressive fault injection
-zig build sim -- --seed 12345 --crash-probability 0.01 --partial-write-probability 0.05
+zig build sim-run -- --seed 12345 --crash-probability 0.01 --partial-write-probability 0.05
 ```
 
 When a simulation fails, it prints the seed. Re-running with that seed reproduces the exact failure.

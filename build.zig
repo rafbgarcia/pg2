@@ -44,6 +44,22 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_t.step);
 
     // --- Simulation tests ---
+    const sim_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/simulator/tests.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "pg2", .module = pg2_mod },
+        },
+    });
+    const sim_t = b.addTest(.{
+        .root_module = sim_test_mod,
+    });
+    const run_sim_t = b.addRunArtifact(sim_t);
+    const sim_step = b.step("sim", "Run deterministic simulation tests");
+    sim_step.dependOn(&run_sim_t.step);
+
+    // --- Simulation executable ---
     const sim_mod = b.createModule(.{
         .root_source_file = b.path("src/simulator/main.zig"),
         .target = target,
@@ -63,6 +79,6 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| {
         sim_cmd.addArgs(args);
     }
-    const sim_step = b.step("sim", "Run deterministic simulation tests");
-    sim_step.dependOn(&sim_cmd.step);
+    const sim_run_step = b.step("sim-run", "Run simulator executable");
+    sim_run_step.dependOn(&sim_cmd.step);
 }
