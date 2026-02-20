@@ -52,6 +52,8 @@ Post {
 field(name, type, nullability[, modifier...])
 ```
 
+`field` is parenthesized-only. Non-parenthesized forms (for example `field id bigint notNull`) are rejected.
+
 Examples:
 
 ```pg2
@@ -151,6 +153,8 @@ index(idx_email, [email], unique)
 index(idx_created_at, [created_at])
 index(idx_author_created, [author_id, created_at])
 ```
+
+`index` and `uniqueIndex` are parenthesized-only. Non-parenthesized forms (for example `index email`) are rejected.
 
 Rules:
 

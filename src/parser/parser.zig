@@ -753,22 +753,18 @@ fn parseSchemaField(
     start_pos: u16,
 ) ParseError!NodeResult {
     var pos = start_pos + 1; // skip 'field'
-    var has_parens = false;
-
-    if (pos < tokens.count and tokens.tokens[pos].token_type == .left_paren) {
-        has_parens = true;
-        pos += 1;
+    if (pos >= tokens.count or tokens.tokens[pos].token_type != .left_paren) {
+        return error.UnexpectedToken;
     }
+    pos += 1;
 
     if (pos >= tokens.count) return error.UnexpectedToken;
     const name_tok = pos;
     pos += 1;
-    if (has_parens) {
-        if (pos >= tokens.count or tokens.tokens[pos].token_type != .comma) {
-            return error.UnexpectedToken;
-        }
-        pos += 1;
+    if (pos >= tokens.count or tokens.tokens[pos].token_type != .comma) {
+        return error.UnexpectedToken;
     }
+    pos += 1;
 
     if (pos >= tokens.count) return error.UnexpectedToken;
     const type_tok = pos;
@@ -796,12 +792,10 @@ fn parseSchemaField(
         break;
     }
 
-    if (has_parens) {
-        if (pos >= tokens.count or tokens.tokens[pos].token_type != .right_paren) {
-            return error.UnexpectedToken;
-        }
-        pos += 1;
+    if (pos >= tokens.count or tokens.tokens[pos].token_type != .right_paren) {
+        return error.UnexpectedToken;
     }
+    pos += 1;
 
     const node = try ast.addNodeFull(
         .schema_field,
@@ -946,69 +940,29 @@ fn parseSchemaIndex(
     var first_col: NodeIndex = null_node;
     var last_col: NodeIndex = null_node;
 
-    if (pos < tokens.count and tokens.tokens[pos].token_type == .left_paren) {
-        pos += 1;
-        if (pos >= tokens.count or tokens.tokens[pos].token_type != .identifier) {
-            return error.UnexpectedToken;
-        }
-        index_name_tok = pos;
-        pos += 1;
-        if (pos >= tokens.count or tokens.tokens[pos].token_type != .comma) {
-            return error.UnexpectedToken;
-        }
-        pos += 1;
-        if (pos >= tokens.count or tokens.tokens[pos].token_type != .left_bracket) {
-            return error.UnexpectedToken;
-        }
-        pos += 1;
+    if (pos >= tokens.count or tokens.tokens[pos].token_type != .left_paren) {
+        return error.UnexpectedToken;
+    }
+    pos += 1;
+    if (pos >= tokens.count or tokens.tokens[pos].token_type != .identifier) {
+        return error.UnexpectedToken;
+    }
+    index_name_tok = pos;
+    pos += 1;
+    if (pos >= tokens.count or tokens.tokens[pos].token_type != .comma) {
+        return error.UnexpectedToken;
+    }
+    pos += 1;
+    if (pos >= tokens.count or tokens.tokens[pos].token_type != .left_bracket) {
+        return error.UnexpectedToken;
+    }
+    pos += 1;
 
-        var expect_column = true;
-        while (pos < tokens.count and tokens.tokens[pos].token_type != .right_bracket) {
-            const tt = tokens.tokens[pos].token_type;
-            if (expect_column) {
-                if (tt != .identifier) return error.UnexpectedToken;
-                const col_node = try ast.addNode(.expr_column_ref, .{ .token = pos });
-                pos += 1;
-                if (first_col == null_node) {
-                    first_col = col_node;
-                    last_col = col_node;
-                } else {
-                    ast.setNext(last_col, col_node);
-                    last_col = col_node;
-                }
-                expect_column = false;
-                continue;
-            }
-            if (tt == .comma) {
-                pos += 1;
-                expect_column = true;
-                continue;
-            }
-            return error.UnexpectedToken;
-        }
-
-        if (first_col == null_node) return error.UnexpectedToken;
-        if (expect_column) return error.UnexpectedToken;
-        if (pos >= tokens.count or tokens.tokens[pos].token_type != .right_bracket) {
-            return error.UnexpectedToken;
-        }
-        pos += 1;
-
-        if (pos < tokens.count and tokens.tokens[pos].token_type == .comma) {
-            pos += 1;
-            if (pos >= tokens.count or tokens.tokens[pos].token_type != .kw_unique) {
-                return error.UnexpectedToken;
-            }
-            if (tag == .schema_index) index_tag = .schema_unique_index;
-            pos += 1;
-        }
-
-        if (pos >= tokens.count or tokens.tokens[pos].token_type != .right_paren) {
-            return error.UnexpectedToken;
-        }
-        pos += 1;
-    } else {
-        while (pos < tokens.count and tokens.tokens[pos].token_type == .identifier) {
+    var expect_column = true;
+    while (pos < tokens.count and tokens.tokens[pos].token_type != .right_bracket) {
+        const tt = tokens.tokens[pos].token_type;
+        if (expect_column) {
+            if (tt != .identifier) return error.UnexpectedToken;
             const col_node = try ast.addNode(.expr_column_ref, .{ .token = pos });
             pos += 1;
             if (first_col == null_node) {
@@ -1018,9 +972,37 @@ fn parseSchemaIndex(
                 ast.setNext(last_col, col_node);
                 last_col = col_node;
             }
-            if (pos < tokens.count and tokens.tokens[pos].token_type == .comma) pos += 1;
+            expect_column = false;
+            continue;
         }
+        if (tt == .comma) {
+            pos += 1;
+            expect_column = true;
+            continue;
+        }
+        return error.UnexpectedToken;
     }
+
+    if (first_col == null_node) return error.UnexpectedToken;
+    if (expect_column) return error.UnexpectedToken;
+    if (pos >= tokens.count or tokens.tokens[pos].token_type != .right_bracket) {
+        return error.UnexpectedToken;
+    }
+    pos += 1;
+
+    if (pos < tokens.count and tokens.tokens[pos].token_type == .comma) {
+        pos += 1;
+        if (pos >= tokens.count or tokens.tokens[pos].token_type != .kw_unique) {
+            return error.UnexpectedToken;
+        }
+        if (tag == .schema_index) index_tag = .schema_unique_index;
+        pos += 1;
+    }
+
+    if (pos >= tokens.count or tokens.tokens[pos].token_type != .right_paren) {
+        return error.UnexpectedToken;
+    }
+    pos += 1;
 
     const node = try ast.addNodeFull(
         index_tag,
@@ -1107,9 +1089,9 @@ test "parse pipeline query" {
 test "parse schema definition" {
     const source =
         \\User {
-        \\  field id bigint notNull primaryKey
-        \\  field email string notNull
-        \\  field name string nullable
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(email, string, notNull)
+        \\  field(name, string, nullable)
         \\  hasMany posts
         \\}
     ;
@@ -1219,8 +1201,8 @@ test "parse update mutation" {
 test "parse scope in schema" {
     const source =
         \\User {
-        \\  field id bigint notNull primaryKey
-        \\  field active boolean nullable
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(active, boolean, nullable)
         \\  scope active |> where(active = true)
         \\}
     ;
@@ -1276,6 +1258,29 @@ test "parse schema index rejects missing field array brackets" {
         \\User {
         \\  field(id, bigint, notNull, primaryKey)
         \\  index(idx_email, email, unique)
+        \\}
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(result.has_error);
+}
+
+test "parse schema field rejects non-parenthesized syntax" {
+    const source =
+        \\User {
+        \\  field id bigint notNull primaryKey
+        \\}
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(result.has_error);
+}
+
+test "parse schema index rejects non-parenthesized syntax" {
+    const source =
+        \\User {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  index email
         \\}
     ;
     const tokens = tokenizer_mod.tokenize(source);

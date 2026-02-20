@@ -512,9 +512,9 @@ const parser_mod = @import("../parser/parser.zig");
 test "load simple schema" {
     const source =
         \\User {
-        \\  field id bigint notNull primaryKey
-        \\  field email string notNull
-        \\  field name string nullable
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(email, string, notNull)
+        \\  field(name, string, nullable)
         \\}
     ;
     const tokens = tokenizer_mod.tokenize(source);
@@ -616,12 +616,12 @@ test "load schema rejects field with conflicting nullability constraints" {
 test "load schema rejects belongsTo without explicit RI config" {
     const source =
         \\User {
-        \\  field id bigint notNull primaryKey
+        \\  field(id, bigint, notNull, primaryKey)
         \\  hasMany Post
         \\}
         \\Post {
-        \\  field id bigint notNull primaryKey
-        \\  field user_id bigint notNull
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(user_id, bigint, notNull)
         \\  belongsTo User
         \\}
     ;
@@ -731,8 +731,8 @@ test "load schema with index" {
 test "load schema with scope" {
     const source =
         \\User {
-        \\  field id bigint notNull primaryKey
-        \\  field active boolean nullable
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(active, boolean, nullable)
         \\  scope active |> where(active = true)
         \\}
     ;
@@ -751,7 +751,7 @@ test "load schema with scope" {
 test "missing association target fails" {
     const source =
         \\User {
-        \\  field id bigint notNull primaryKey
+        \\  field(id, bigint, notNull, primaryKey)
         \\  hasMany Comment
         \\}
     ;
@@ -766,8 +766,8 @@ test "missing association target fails" {
 test "row schema mirrors catalog columns" {
     const source =
         \\User {
-        \\  field id bigint notNull primaryKey
-        \\  field name string nullable
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(name, string, nullable)
         \\}
     ;
     const tokens = tokenizer_mod.tokenize(source);

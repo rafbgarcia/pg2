@@ -597,8 +597,8 @@ test "full pipeline tokenizes correctly" {
 test "schema definition tokenizes" {
     const source =
         \\User {
-        \\  field id bigint notNull primaryKey
-        \\  field email string notNull
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(email, string, notNull)
         \\  hasMany posts
         \\}
     ;
@@ -610,10 +610,10 @@ test "schema definition tokenizes" {
 }
 
 test "nullable keyword tokenizes in schema field constraints" {
-    const source = "field bio string nullable";
+    const source = "field(bio, string, nullable)";
     const result = tokenize(source);
     try testing.expect(!result.has_error);
-    try testing.expectEqual(TokenType.kw_nullable, result.tokens[3].token_type);
+    try testing.expectEqual(TokenType.kw_nullable, result.tokens[6].token_type);
 }
 
 test "logical operators" {
