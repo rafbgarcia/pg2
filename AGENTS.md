@@ -55,6 +55,17 @@ Before starting the next implementation task, reference both:
 - `TODO.md` for milestone sequencing and scope.
 - `V1_READINESS_CHECKLIST.md` for release-readiness gates and acceptance criteria.
 
+## Delivery Workflow
+
+For each implementation increment, follow this sequence:
+
+1. Implement the scoped code/tests change.
+2. Update progress tracking docs to reflect what is now complete:
+   - `TODO.md`
+   - `V1_READINESS_CHECKLIST.md`
+3. Commit the implementation and tracking updates together.
+4. Ask the user whether to proceed to the next recommended task.
+
 ## Conventions
 
 - **Zig version**: Use latest stable Zig (0.15.2).
