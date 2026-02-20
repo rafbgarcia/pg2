@@ -77,3 +77,10 @@ Release-readiness gates live in `V1_READINESS_CHECKLIST.md`.
       - Stop condition prevents progressing without artifact updates.
   - Done when:
     - Every merged milestone links a completed Tiger Style gate artifact.
+
+## Current Execution Focus (Gate 3 / Gate 8)
+
+- [ ] Mirror `e2e/specs/02_basic_crud.spec` in Zig through the server session path.
+  - Blocked by current update-path behavior on row growth (`ERR query: update failed; class=resource_exhausted; code=RowTooLarge`) when changing `"Alice"` -> `"Alicia"`.
+- [x] Mirror `e2e/specs/03_filter_sort_limit_offset.spec` in Zig through the server session path.
+- [ ] Mirror `e2e/specs/04_group_aggregates.spec` in Zig through the server session path.

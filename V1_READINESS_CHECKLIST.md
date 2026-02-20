@@ -64,7 +64,7 @@ Roadmap sequencing lives in `TODO.md`.
 - [ ] Gate 8: V1 E2E specification suite passes
   - [ ] `e2e/specs/01_schema_bootstrap.spec`
   - [ ] `e2e/specs/02_basic_crud.spec`
-  - [ ] `e2e/specs/03_filter_sort_limit_offset.spec`
+  - [x] `e2e/specs/03_filter_sort_limit_offset.spec` (mirrored via `src/server/e2e_specs.zig`)
   - [ ] `e2e/specs/04_group_aggregates.spec`
   - [ ] `e2e/specs/05_referential_restrict.spec`
   - [ ] `e2e/specs/06_referential_cascade.spec`
@@ -97,4 +97,5 @@ Roadmap sequencing lives in `TODO.md`.
   - Milestone 3 coverage:
     - `docs/tiger-gates/810a60c-inspect-plan-metadata.md`
     - `docs/tiger-gates/fa983f5-inspect-sort-group-strategy.md`
+    - `docs/tiger-gates/2026-02-20-e2e-spec-03-filter-sort-limit-offset-server-path.md`
   - Enforcement: `AGENTS.md` delivery workflow + stop condition.
