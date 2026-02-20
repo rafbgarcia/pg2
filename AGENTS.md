@@ -9,7 +9,6 @@ You are an expert database engineer building a new database (`pg2`) in Zig.
 # pg2
 
 A database built from scratch in Zig, focused on developer experience and transparency.
-
 pg2's mission is to make the database the complete data system without leaking data responsibilities to the application layer (e.g. pg2 handles online data and schema migrations, partitions, etc.).
 
 ## Project Principles
@@ -34,14 +33,7 @@ src/
   replication/   # WAL streaming, replica sync
   server/        # Wire protocol, connection handling
 docs/
-  ARCHITECTURE.md
-  STORAGE_ENGINE.md
-  QUERY_LANGUAGE.md
-  SIMULATION_TESTING.md
-  REPLICATION.md
-  CONNECTION_POOL.md
-  REALTIME_SUBSCRIPTIONS.md
-  QUALITY_GATES.md
+  ...
 ```
 
 ## Build & Test
@@ -52,30 +44,22 @@ zig build test         # Run unit tests
 zig build sim          # Run deterministic simulation tests (takes a seed argument)
 ```
 
-## Current Milestone Focus
+## Current Focus
 
-ref spec: `src/server/e2e/e2e_specs.zig`
+To build a library of real-world E2E tests exercising the server session path to ensure end-users code paths are covered.
+Think carefully about real-world scenarios when designing test examples.
+Each functionality should have its own test file and tests for real-world scenarios, edge cases, etc.
 
-- Focus exclusively on real-world E2E examples through the server session path until the user says otherwise.
-- The intention with this is to build a solid foundation for a production-grade database so we may have to refactor the codebase as we find issues.
+refs: `src/server/e2e/e2e_specs.zig`, `src/server/e2e/insert.zig`
 
 ## Delivery Workflow
 
 For each implementation increment, follow this sequence:
 
 1. Implement the scoped code/tests change.
-2. If core DB code changed (`src/storage`, `src/mvcc`, `src/executor`, `src/parser`, `src/server`, `src/replication`, `src/catalog`), create or update a quality gate artifact in `docs/quality-gates/` using `docs/quality-gates/TEMPLATE.md`.
-3. Update progress tracking docs to reflect what is now complete
-4. Commit the implementation, quality artifact update (if required), and tracking updates together.
-5. Finalize fresh-session handoff docs in the same increment:
-   - Update the active milestone tracker (for current milestone) with:
-     - committed SHA(s) for this increment,
-     - "Next-Session Kickoff (Concrete)" with ordered next tasks,
-     - a "Fresh Codex Handoff Commands" block that starts from current HEAD.
-   - Ensure any new quality artifact `Commit:` field references the real commit SHA and never stays as `TBD`.
-   - Run: `rg -n 'Commit: .*TBD|pending commit|TBD \\(this increment commit\\)' docs/quality-gates docs/MILESTONE_*`
-     - If any match exists, fix docs before final response.
-6. End every session by summarizing what was done and outputting a ready-to-paste **Fresh Codex Prompt** block for the next fresh Codex session.
+2. If core DB code changed, create or update a release-scoped quality gate artifact in `docs/releases/<latest-version>/gates/` using `docs/releases/GATE_TEMPLATE.md`.
+3. Update `docs/releases/<latest-version>.md` as needed.
+4. End every session by summarizing what was done and outputting a ready-to-paste **Fresh Codex Prompt** block for the next fresh Codex session.
 
 ### User-Facing Docs Rule
 
@@ -84,12 +68,8 @@ For each implementation increment, follow this sequence:
 - If a change alters user-visible behavior (syntax, semantics, error classes, supported/unsupported features, operational commands), update at least one relevant doc in the same commit.
 - Keep this lightweight during early stages:
   - Required now: concise reference updates (facts, constraints, examples aligned with current behavior).
-  - Deferred until later milestones: long tutorials, deep walkthroughs, broad polish passes.
+  - Deferred until later releases: long tutorials, deep walkthroughs, broad polish passes.
 - If behavior is intentionally unsupported or fail-closed, document that explicitly.
-
-### Delivery Stop Condition
-
-- If a core DB increment lacks the required quality artifact update, do not proceed to the next task.
 
 ## Conventions
 
@@ -106,20 +86,3 @@ For each implementation increment, follow this sequence:
 ## Quality Gates
 
 All Quality Gates and database-specific robustness rules live only in `docs/QUALITY_GATES.md`.
-
-### PR Gate (Summary)
-
-For any PR touching core DB code, complete the mandatory checklist in `docs/QUALITY_GATES.md`:
-
-- Invariant changes.
-- Crash-consistency contract.
-- Error class changes.
-- Persistent format/protocol impact.
-- Deterministic crash/fault tests.
-- Performance baseline/threshold impact.
-
-### Quality Artifact Requirement
-
-- Store artifacts in `docs/quality-gates/`.
-- Use one file per gate-changing increment/commit.
-- Start from `docs/quality-gates/TEMPLATE.md`.

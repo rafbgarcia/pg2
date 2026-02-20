@@ -3,7 +3,7 @@
 Purpose: keep pg2 safe and shippable without growing process docs forever.
 
 This file is the stable policy. It should stay short.
-Change-specific detail belongs in `docs/quality-gates/*.md` artifacts.
+Change-specific detail belongs in release-scoped artifacts under `docs/releases/<x.y.z>/gates/*.md`.
 
 ## Scope
 
@@ -55,6 +55,7 @@ Use the smallest evidence set that proves safety:
 - Filename: `YYYYMMDDHHMM-<short-slug>.md`.
 - `Commit:` must be a real SHA (never `TBD`/`<pending>` after session close).
 - Artifact must include concrete file references for tests/evidence.
+- Artifact must be stored under the active release path: `docs/releases/<active-version>/gates/`.
 
 ## Keep This Sustainable
 
@@ -71,7 +72,7 @@ Run these before closing a gate-changing increment:
 
 ```bash
 zig build test
-rg -n 'Commit: .*TBD|Commit: <pending>|<sha>|<answer>|<none or details>' docs/quality-gates
+rg -n 'Commit: .*TBD|Commit: <pending>|<sha>|<answer>|<none or details>' docs/releases
 ```
 
-If matches exist outside `docs/quality-gates/TEMPLATE.md`, fix them before finalizing.
+If matches exist outside `docs/releases/GATE_TEMPLATE.md`, fix them before finalizing.

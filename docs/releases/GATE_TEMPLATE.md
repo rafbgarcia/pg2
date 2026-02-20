@@ -2,6 +2,7 @@
 
 - Artifact ID: `<YYYYMMDDHHMM-short-slug>`
 - Commit: `<sha>` (required real committed SHA)
+- Release: `<x.y.z>`
 - Title: `<short title>`
 - Scope: `<one sentence>`
 
