@@ -60,11 +60,16 @@ Before starting the next implementation task, reference both:
 For each implementation increment, follow this sequence:
 
 1. Implement the scoped code/tests change.
-2. Update progress tracking docs to reflect what is now complete:
+2. If core DB code changed (`src/storage`, `src/mvcc`, `src/executor`, `src/parser`, `src/server`, `src/replication`, `src/catalog`), create or update a Tiger gate artifact in `docs/tiger-gates/` using `docs/tiger-gates/TEMPLATE.md`.
+3. Update progress tracking docs to reflect what is now complete:
    - `TODO.md`
    - `V1_READINESS_CHECKLIST.md`
-3. Commit the implementation and tracking updates together.
-4. Ask the user whether to proceed to the next recommended task.
+4. Commit the implementation, Tiger artifact update (if required), and tracking updates together.
+5. Ask the user whether to proceed to the next recommended task.
+
+### Delivery Stop Condition
+
+- If a core DB increment lacks the required Tiger artifact update, do not proceed to the next task.
 
 ## Conventions
 
@@ -92,3 +97,10 @@ For any PR touching core DB code, complete the mandatory checklist in `docs/TIGE
 - Persistent format/protocol impact.
 - Deterministic crash/fault tests.
 - Performance baseline/threshold impact.
+
+### Tiger Artifact Requirement
+
+- Store artifacts in `docs/tiger-gates/`.
+- Use one file per gate-changing increment/commit.
+- Start from `docs/tiger-gates/TEMPLATE.md`.
+- Keep `docs/tiger-gates/README.md` updated with artifact links.

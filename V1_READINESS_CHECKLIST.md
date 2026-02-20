@@ -80,5 +80,7 @@ Roadmap sequencing lives in `TODO.md`.
 - [ ] `zig build sim` passes with deterministic crash/recovery assertions.
 - [ ] Tiger Style PR gate artifacts completed for every gate-changing PR.
   - In progress: `docs/tiger-gates/README.md`
+  - In progress: `docs/tiger-gates/TEMPLATE.md`
   - In progress: `docs/tiger-gates/810a60c-inspect-plan-metadata.md`
   - In progress: `docs/tiger-gates/fa983f5-inspect-sort-group-strategy.md`
+  - Enforcement: `AGENTS.md` delivery workflow + stop condition

@@ -57,7 +57,11 @@ Release-readiness gates live in `V1_READINESS_CHECKLIST.md`.
       - Performance baseline/threshold impact
     - Artifact index and initial milestone coverage:
       - `docs/tiger-gates/README.md`
+      - `docs/tiger-gates/TEMPLATE.md`
       - `docs/tiger-gates/810a60c-inspect-plan-metadata.md`
       - `docs/tiger-gates/fa983f5-inspect-sort-group-strategy.md`
+    - Delivery workflow enforcement in `AGENTS.md`:
+      - Core DB increments must include Tiger artifact updates.
+      - Stop condition prevents progressing without artifact updates.
   - Done when:
     - Every merged milestone links a completed Tiger Style gate artifact.
