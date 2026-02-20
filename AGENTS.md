@@ -75,7 +75,7 @@ For each implementation increment, follow this sequence:
    - Ensure any new quality artifact `Commit:` field references the real commit SHA and never stays as `TBD`.
    - Run: `rg -n 'Commit: .*TBD|pending commit|TBD \\(this increment commit\\)' docs/quality-gates docs/MILESTONE_*`
      - If any match exists, fix docs before final response.
-6. End every session by outputting a ready-to-paste **Fresh Codex Prompt** block for the next session (do not ask whether to proceed).
+6. End every session by summarizing what was done and outputting a ready-to-paste **Fresh Codex Prompt** block for the next fresh Codex session.
 
 ### User-Facing Docs Rule
 
