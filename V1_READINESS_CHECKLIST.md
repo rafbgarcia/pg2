@@ -37,6 +37,7 @@ Roadmap sequencing lives in `TODO.md`.
     - Covered in `src/server/e2e/insert.zig`, `src/server/e2e/update.zig`, `src/server/e2e/delete.zig`, `src/server/e2e/select.zig`.
     - Heap mutation foundation now includes deterministic auto-compaction-on-shortfall tests in `src/storage/heap.zig` for update growth and insert retry paths.
     - Overflow storage foundation page type landed in `src/storage/overflow.zig`; row/mutation integration is pending.
+    - Read-path string materialization now uses bounded per-query arena bytes (runtime-configured), eliminating page-slice lifetime hazards in scan results.
   - [ ] `where`, `sort`, `limit`, `offset`, `group` are covered by E2E tests.
   - [x] `inspect` output is deterministic and documented.
   - [ ] Query boundary errors are stable and classified.

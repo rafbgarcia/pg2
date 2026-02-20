@@ -194,6 +194,7 @@ pub const ExecContext = struct {
     result_rows: []ResultRow,
     scratch_rows_a: []ResultRow,
     scratch_rows_b: []ResultRow,
+    string_arena_bytes: []u8,
 };
 
 /// Operator kind extracted from the AST.
@@ -214,6 +215,8 @@ const OpDescriptor = struct {
 pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
     var result = QueryResult.init(ctx.result_rows);
     errdefer result.deinit();
+    var string_arena = scan_mod.StringArena.init(ctx.string_arena_bytes);
+    string_arena.reset();
 
     // Find pipeline from AST root.
     const pipeline_idx = findPipeline(ctx.ast) orelse {
@@ -266,6 +269,7 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
         model_id,
         &ops,
         op_count,
+        &string_arena,
     );
 
     std.debug.assert(result.row_count <= scan_mod.max_result_rows);
@@ -280,6 +284,7 @@ fn executeReadPipeline(
     model_id: ModelId,
     ops: *const [max_operators]OpDescriptor,
     op_count: u16,
+    string_arena: *scan_mod.StringArena,
 ) void {
     const caps = capacity_mod.OperatorCapacities.defaults();
 
@@ -291,6 +296,7 @@ fn executeReadPipeline(
         ctx.tx_manager,
         model_id,
         result.rows[0..scan_mod.max_result_rows],
+        string_arena,
     ) catch |err| {
         setBoundaryError(
             result,
@@ -320,6 +326,7 @@ fn executeReadPipeline(
         pipeline_node,
         model_id,
         &caps,
+        string_arena,
     )) {
         return;
     }
@@ -387,6 +394,7 @@ fn applyNestedSelectionJoin(
     pipeline_node: NodeIndex,
     source_model_id: ModelId,
     caps: *const capacity_mod.OperatorCapacities,
+    string_arena: *scan_mod.StringArena,
 ) bool {
     const selection = getPipelineSelection(ctx.ast, pipeline_node) orelse
         return true;
@@ -400,6 +408,7 @@ fn applyNestedSelectionJoin(
                 source_model_id,
                 field,
                 caps,
+                string_arena,
             )) return false;
         }
         field = node.next;
@@ -426,6 +435,7 @@ fn applySingleNestedSelectionJoin(
     source_model_id: ModelId,
     nested: NodeIndex,
     caps: *const capacity_mod.OperatorCapacities,
+    string_arena: *scan_mod.StringArena,
 ) bool {
     const relation_name = ctx.tokens.getText(
         ctx.ast.getNode(nested).extra,
@@ -456,6 +466,7 @@ fn applySingleNestedSelectionJoin(
         ctx.tx_manager,
         target_model_id,
         right_result.rows[0..scan_mod.max_result_rows],
+        string_arena,
     ) catch |err| {
         setBoundaryError(
             result,
@@ -1826,6 +1837,7 @@ const ExecTestEnv = struct {
     result_rows: []ResultRow,
     scratch_rows_a: []ResultRow,
     scratch_rows_b: []ResultRow,
+    string_arena_bytes: []u8,
 
     /// Initialize in-place so that disk.storage() captures a stable pointer.
     fn init(self: *ExecTestEnv) !void {
@@ -1853,6 +1865,11 @@ const ExecTestEnv = struct {
             scan_mod.max_result_rows,
         );
         errdefer testing.allocator.free(self.scratch_rows_b);
+        self.string_arena_bytes = try testing.allocator.alloc(
+            u8,
+            scan_mod.default_string_arena_bytes,
+        );
+        errdefer testing.allocator.free(self.string_arena_bytes);
 
         self.catalog = Catalog{};
         self.model_id = try self.catalog.addModel("User");
@@ -1891,6 +1908,7 @@ const ExecTestEnv = struct {
         testing.allocator.free(self.scratch_rows_b);
         testing.allocator.free(self.scratch_rows_a);
         testing.allocator.free(self.result_rows);
+        testing.allocator.free(self.string_arena_bytes);
     }
 
     fn makeCtx(
@@ -1916,6 +1934,7 @@ const ExecTestEnv = struct {
             .result_rows = self.result_rows,
             .scratch_rows_a = self.scratch_rows_a,
             .scratch_rows_b = self.scratch_rows_b,
+            .string_arena_bytes = self.string_arena_bytes,
         };
     }
 };

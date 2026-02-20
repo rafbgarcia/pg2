@@ -33,6 +33,7 @@ pub const BootstrapConfig = struct {
     undo_max_data_bytes: u32 = 64 * 1024,
     wal_buffer_capacity_bytes: usize = io_mod.page_size,
     max_query_slots: u16 = 8,
+    query_string_arena_bytes_per_slot: usize = 4 * 1024 * 1024,
 };
 
 pub const QueryBuffers = struct {
@@ -40,6 +41,7 @@ pub const QueryBuffers = struct {
     result_rows: []ResultRow,
     scratch_rows_a: []ResultRow,
     scratch_rows_b: []ResultRow,
+    string_arena_bytes: []u8,
 };
 
 /// Core runtime composition built in allocator init phase and sealed before
@@ -54,6 +56,7 @@ pub const BootstrappedRuntime = struct {
     query_result_rows: []ResultRow,
     query_scratch_rows_a: []ResultRow,
     query_scratch_rows_b: []ResultRow,
+    query_string_arenas: []u8,
     max_query_slots: u16,
 
     pub fn init(
@@ -67,6 +70,7 @@ pub const BootstrappedRuntime = struct {
         if (config.buffer_pool_frames == 0) return error.InvalidConfig;
         if (config.undo_max_entries == 0) return error.InvalidConfig;
         if (config.undo_max_data_bytes == 0) return error.InvalidConfig;
+        if (config.query_string_arena_bytes_per_slot == 0) return error.InvalidConfig;
         try validateMemoryBudget(memory_region, storage, config);
 
         var runtime: BootstrappedRuntime = undefined;
@@ -120,6 +124,16 @@ pub const BootstrappedRuntime = struct {
             total_rows,
         ) catch return error.OutOfMemory;
         errdefer allocator.free(runtime.query_scratch_rows_b);
+        const total_string_arena_bytes = std.math.mul(
+            usize,
+            @as(usize, config.max_query_slots),
+            config.query_string_arena_bytes_per_slot,
+        ) catch return error.InvalidConfig;
+        runtime.query_string_arenas = allocator.alloc(
+            u8,
+            total_string_arena_bytes,
+        ) catch return error.OutOfMemory;
+        errdefer allocator.free(runtime.query_string_arenas);
 
         runtime.tx_manager = TxManager.init(allocator);
 
@@ -149,6 +163,7 @@ pub const BootstrappedRuntime = struct {
                         self.query_scratch_rows_b,
                         slot_index,
                     ),
+                    .string_arena_bytes = self.stringArenaForSlot(slot_index),
                 };
             }
         }
@@ -174,6 +189,7 @@ pub const BootstrappedRuntime = struct {
         allocator.free(self.query_scratch_rows_b);
         allocator.free(self.query_scratch_rows_a);
         allocator.free(self.query_result_rows);
+        allocator.free(self.query_string_arenas);
         allocator.free(self.query_slot_in_use);
         self.undo_log.deinit();
         self.tx_manager.deinit();
@@ -193,6 +209,18 @@ pub const BootstrappedRuntime = struct {
         std.debug.assert(end <= rows.len);
         return rows[start..end];
     }
+
+    fn stringArenaForSlot(
+        self: *BootstrappedRuntime,
+        slot_index: u16,
+    ) []u8 {
+        std.debug.assert(slot_index < self.max_query_slots);
+        const per_slot = self.query_string_arenas.len / self.max_query_slots;
+        const start = @as(usize, slot_index) * per_slot;
+        const end = start + per_slot;
+        std.debug.assert(end <= self.query_string_arenas.len);
+        return self.query_string_arenas[start..end];
+    }
 };
 
 fn validateMemoryBudget(
@@ -206,6 +234,7 @@ fn validateMemoryBudget(
     if (config.buffer_pool_frames == 0) return error.InvalidConfig;
     if (config.undo_max_entries == 0) return error.InvalidConfig;
     if (config.undo_max_data_bytes == 0) return error.InvalidConfig;
+    if (config.query_string_arena_bytes_per_slot == 0) return error.InvalidConfig;
 
     var preflight = StaticAllocator.init(memory_region);
     const allocator = preflight.allocator();
@@ -238,6 +267,13 @@ fn validateMemoryBudget(
     _ = allocator.alloc(ResultRow, total_rows) catch
         return error.InsufficientMemoryBudget;
     _ = allocator.alloc(ResultRow, total_rows) catch
+        return error.InsufficientMemoryBudget;
+    const total_string_arena_bytes = std.math.mul(
+        usize,
+        @as(usize, config.max_query_slots),
+        config.query_string_arena_bytes_per_slot,
+    ) catch return error.InvalidConfig;
+    _ = allocator.alloc(u8, total_string_arena_bytes) catch
         return error.InsufficientMemoryBudget;
 }
 

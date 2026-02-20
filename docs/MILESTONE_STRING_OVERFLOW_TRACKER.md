@@ -65,16 +65,29 @@ Implemented (not yet committed in this tracker section):
   - deterministic tests for init, roundtrip, capacity bounds, and corrupt format rejection.
 - Wired module into test discovery via `src/pg2.zig`.
 
+## New In-Progress Chunk: Bounded String Materialization Arena
+
+Implemented (not yet committed in this tracker section):
+
+- Added per-query bounded string arena bytes in runtime bootstrap:
+  - `BootstrapConfig.query_string_arena_bytes_per_slot` (default 4 MiB).
+  - Query buffers now include `string_arena_bytes`.
+- Added bounded `StringArena` in `src/executor/scan.zig` and switched scan decode path to copy string values into arena-backed storage (no dangling page slices after unpin).
+- `ScanResult` now owns its string storage for allocator-returning scan APIs (`tableScan`, `indexRange`) to guarantee lifetime safety.
+- Executor read path now threads a per-query arena to `tableScanInto` calls (including nested relation scans).
+- Full test suite passes after this change.
+
 ## Next Logical Chunk
 
 1. Commit overflow storage foundation with Tiger artifact.
-2. Row format integration:
+2. Commit bounded string materialization arena increment with Tiger artifact.
+3. Row format integration:
    - Extend string fixed-slot encoding to support inline vs overflow-pointer variants.
    - Keep backwards-compatible row format behavior decisions explicit (likely version bump).
-3. Mutation path integration:
+4. Mutation path integration:
    - On insert/update, apply 1024-byte inline policy for strings.
    - Allocate/write overflow pages and set in-row pointers when spilling.
-4. Durability integration:
+5. Durability integration:
    - Define WAL payload contract for overflow chain create/relink/unlink.
    - Add deterministic crash/fault tests for spill + update + unlink/recover.
 

@@ -51,6 +51,7 @@ fn makeExecContext(
         .result_rows = request.pool_conn.query_buffers.result_rows,
         .scratch_rows_a = request.pool_conn.query_buffers.scratch_rows_a,
         .scratch_rows_b = request.pool_conn.query_buffers.scratch_rows_b,
+        .string_arena_bytes = request.pool_conn.query_buffers.string_arena_bytes,
     };
 }
 

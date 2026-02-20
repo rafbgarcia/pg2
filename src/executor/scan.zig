@@ -28,6 +28,8 @@ pub const max_result_rows = 4096;
 pub const max_row_size_bytes = 8000;
 /// Maximum columns per row.
 pub const max_columns = 128;
+/// Default temporary bytes for string materialization in allocator-based scans.
+pub const default_string_arena_bytes: usize = 4 * 1024 * 1024;
 
 pub const ScanError = error{
     AllFramesPinned,
@@ -64,6 +66,7 @@ pub const ScanResult = struct {
     row_count: u16,
     pages_read: u32,
     allocator: Allocator,
+    string_storage: []u8,
 
     pub fn init(allocator: Allocator) ScanError!ScanResult {
         const rows = allocator.alloc(ResultRow, max_result_rows) catch
@@ -73,6 +76,7 @@ pub const ScanResult = struct {
             .row_count = 0,
             .pages_read = 0,
             .allocator = allocator,
+            .string_storage = &.{},
         };
         std.debug.assert(result.row_count == 0);
         std.debug.assert(result.rows.len == max_result_rows);
@@ -80,6 +84,9 @@ pub const ScanResult = struct {
     }
 
     pub fn deinit(self: *ScanResult) void {
+        if (self.string_storage.len > 0) {
+            self.allocator.free(self.string_storage);
+        }
         self.allocator.free(self.rows);
         self.* = undefined;
     }
@@ -97,6 +104,29 @@ pub const ScanResult = struct {
 pub const ScanIntoResult = struct {
     row_count: u16,
     pages_read: u32,
+};
+
+pub const StringArena = struct {
+    bytes: []u8,
+    used: usize = 0,
+
+    pub fn init(bytes: []u8) StringArena {
+        return .{ .bytes = bytes, .used = 0 };
+    }
+
+    pub fn reset(self: *StringArena) void {
+        self.used = 0;
+    }
+
+    pub fn copyString(self: *StringArena, source: []const u8) error{OutOfMemory}![]const u8 {
+        if (source.len == 0) return "";
+        if (self.used + source.len > self.bytes.len) return error.OutOfMemory;
+        const start = self.used;
+        const end = start + source.len;
+        @memcpy(self.bytes[start..end], source);
+        self.used = end;
+        return self.bytes[start..end];
+    }
 };
 
 /// Full table scan with MVCC visibility.
@@ -119,9 +149,19 @@ pub fn tableScan(
 
     var result = try ScanResult.init(allocator);
     errdefer result.deinit();
+    result.string_storage = allocator.alloc(u8, default_string_arena_bytes) catch
+        return error.OutOfMemory;
+    var string_arena = StringArena.init(result.string_storage);
 
     const scan_into = try tableScanInto(
-        catalog, pool, undo_log, snapshot, tx_manager, model_id, result.rows,
+        catalog,
+        pool,
+        undo_log,
+        snapshot,
+        tx_manager,
+        model_id,
+        result.rows,
+        &string_arena,
     );
     result.row_count = scan_into.row_count;
     result.pages_read = scan_into.pages_read;
@@ -140,6 +180,7 @@ pub fn tableScanInto(
     tx_manager: *const TxManager,
     model_id: ModelId,
     out_rows: []ResultRow,
+    string_arena: *StringArena,
 ) ScanError!ScanIntoResult {
     std.debug.assert(model_id < catalog.model_count);
     std.debug.assert(out_rows.len <= std.math.maxInt(u16));
@@ -168,7 +209,12 @@ pub fn tableScanInto(
             if (@as(usize, row_count) >= out_rows.len) break;
             try scanSlotInto(
                 page, page_id, slot_idx, schema,
-                undo_log, snapshot, tx_manager, out_rows, &row_count,
+                undo_log,
+                snapshot,
+                tx_manager,
+                out_rows,
+                &row_count,
+                string_arena,
             );
         }
     }
@@ -188,6 +234,7 @@ fn scanSlotInto(
     tx_manager: *const TxManager,
     out_rows: []ResultRow,
     row_count: *u16,
+    string_arena: *StringArena,
 ) ScanError!void {
     std.debug.assert(@as(usize, row_count.*) < out_rows.len);
 
@@ -216,9 +263,7 @@ fn scanSlotInto(
     // Decode and append to result.
     var row = ResultRow.init();
     row.row_id = .{ .page_id = page_id, .slot = slot_idx };
-    row.column_count = schema.column_count;
-    row_mod.decodeRowChecked(schema, data_to_decode, &row.values) catch
-        return error.Corruption;
+    try decodeRowIntoResult(schema, data_to_decode, &row, string_arena);
     out_rows[@as(usize, row_count.*)] = row;
     row_count.* += 1;
 }
@@ -233,6 +278,7 @@ pub fn indexFind(
     btree: *BTree,
     model_id: ModelId,
     key: []const u8,
+    string_arena: *StringArena,
 ) ScanError!?ResultRow {
     std.debug.assert(model_id < catalog.model_count);
     std.debug.assert(key.len > 0);
@@ -256,9 +302,7 @@ pub fn indexFind(
 
     var row = ResultRow.init();
     row.row_id = row_id;
-    row.column_count = schema.column_count;
-    row_mod.decodeRowChecked(schema, data_to_decode, &row.values) catch
-        return error.Corruption;
+    try decodeRowIntoResult(schema, data_to_decode, &row, string_arena);
     return row;
 }
 
@@ -279,6 +323,9 @@ pub fn indexRange(
 
     var result = try ScanResult.init(allocator);
     errdefer result.deinit();
+    result.string_storage = allocator.alloc(u8, default_string_arena_bytes) catch
+        return error.OutOfMemory;
+    var string_arena = StringArena.init(result.string_storage);
 
     const model = &catalog.models[model_id];
     const schema = &model.row_schema;
@@ -307,14 +354,30 @@ pub fn indexRange(
 
         var row = ResultRow.init();
         row.row_id = row_id;
-        row.column_count = schema.column_count;
-        row_mod.decodeRowChecked(schema, data_to_decode, &row.values) catch
-            return error.Corruption;
+        try decodeRowIntoResult(schema, data_to_decode, &row, &string_arena);
         result.appendRow(row);
     }
 
     std.debug.assert(result.row_count <= max_result_rows);
     return result;
+}
+
+fn decodeRowIntoResult(
+    schema: *const RowSchema,
+    row_data: []const u8,
+    out_row: *ResultRow,
+    string_arena: *StringArena,
+) ScanError!void {
+    out_row.column_count = schema.column_count;
+    var col_idx: u16 = 0;
+    while (col_idx < schema.column_count) : (col_idx += 1) {
+        const value = row_mod.decodeColumnChecked(schema, row_data, col_idx) catch
+            return error.Corruption;
+        out_row.values[col_idx] = switch (value) {
+            .string => |s| .{ .string = string_arena.copyString(s) catch return error.OutOfMemory },
+            else => value,
+        };
+    }
 }
 
 /// Resolve the visible version of a row for the given snapshot.
@@ -475,8 +538,17 @@ test "tableScanInto respects caller row capacity" {
     defer snap.deinit();
 
     var out_rows: [1]ResultRow = .{ResultRow.init()};
+    var arena_buf: [1024]u8 = undefined;
+    var string_arena = StringArena.init(arena_buf[0..]);
     const out = try tableScanInto(
-        &catalog, &pool, &undo_log, &snap, &tm, model_id, &out_rows,
+        &catalog,
+        &pool,
+        &undo_log,
+        &snap,
+        &tm,
+        model_id,
+        &out_rows,
+        &string_arena,
     );
 
     try testing.expectEqual(@as(u16, 1), out.row_count);
