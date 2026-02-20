@@ -122,6 +122,25 @@ These are confirmed in chat with the user:
     - excessive hop count / cyclic chain behavior.
   - Added deterministic corruption test for cyclic overflow chain reclaim.
 
+### Implemented in committed chunk `pending commit`
+
+- Overflow reclaim observability through session inspect:
+  - Added catalog-owned reclaim counters:
+    - `enqueued_total`
+    - `dequeued_total`
+    - `reclaimed_chains_total`
+    - `reclaimed_pages_total`
+    - `reclaim_failures_total`
+  - Added `Catalog.snapshotOverflowReclaimStats()` with queue-depth snapshot.
+  - Session inspect output now includes:
+    - `INSPECT overflow reclaim_queue_depth=... reclaim_enqueued_total=... reclaim_dequeued_total=... reclaim_chains_total=... reclaim_pages_total=... reclaim_failures_total=...`
+- Reclaim lifecycle wiring:
+  - Overflow unlink/reclaim enqueue/dequeue/success/failure paths now update deterministic counters.
+- Test and docs coverage:
+  - Added server-path E2E spec for backlog depth + throughput counters.
+  - Added catalog unit test for reclaim stats snapshot semantics.
+  - Updated query/user-facing docs for the additional inspect line.
+
 ## Known Test State
 
 - `zig build test` passes for this increment (including overflow reclaim and new E2E overflow tests).
@@ -130,25 +149,26 @@ These are confirmed in chat with the user:
 
 1. Durable replay integration:
    - Integrate overflow lifecycle records into a full data-page WAL replay path (not only WAL envelope+decode recovery).
-2. Overflow reclaim backlog observability:
-   - Expose queue depth and reclaim throughput in inspect/ops surfaces.
-3. Tx-level abort semantics:
+2. Tx-level abort semantics:
    - Define and test overflow lifecycle behavior under transaction abort/rollback with explicit undo/reclaim ordering.
+3. Queue-drain budget semantics:
+   - Define/document expected backlog progression when one mutation unlinks multiple overflow chains.
 
 ## Next-Session Kickoff (Concrete)
 
-Completed in committed chunk `c5548a0`:
+Completed in committed chunks `c5548a0` and `pending commit`:
 
 1. Overflow reclaim pipeline.
 2. WAL lifecycle contract for create/relink/unlink/reclaim.
 3. Deterministic crash/restart coverage for spill/replace/delete.
 4. Malformed/cyclic chain fail-closed reclaim coverage.
+5. Inspect-level reclaim backlog/throughput visibility.
 
 Next session should move to:
 
 1. Integrate overflow lifecycle WAL into full page replay/recovery.
 2. Add tx-abort lifecycle tests for overflow create/relink/unlink/reclaim.
-3. Add inspect-level reclaim backlog visibility for ops/debuggability.
+3. Define/test explicit reclaim-drain budget semantics for multi-overflow-field mutations.
 
 ## Fresh Codex Handoff Commands
 
@@ -156,7 +176,8 @@ Use these first in a new session:
 
 1. `git status --short`
 2. `zig build test`
-3. `git log -1 --stat`
+3. `git log -2 --stat`
 4. `git show --name-only --stat c5548a0`
-5. `rg -n "overflow_chain_create|overflow_chain_relink|overflow_chain_unlink|overflow_chain_reclaim|overflow_reclaim_queue" src docs user-facing-docs`
-6. Continue from "Next Logical Chunk" above.
+5. `git show --name-only --stat pending_commit_sha`
+6. `rg -n "INSPECT overflow|overflow_reclaim_stats|snapshotOverflowReclaimStats|overflow_reclaim_queue" src docs user-facing-docs`
+7. Continue from "Next Logical Chunk" above.

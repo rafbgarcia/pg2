@@ -195,6 +195,7 @@ Output lines:
 
 - `INSPECT exec ...` counters for scan/match/return and mutation/page stats.
 - `INSPECT pool ...` connection-pool saturation state.
+- `INSPECT overflow ...` overflow reclaim backlog depth and deterministic throughput counters.
 - `INSPECT plan ...` planner/executor decision summary:
   - `source_model`: resolved root model for the pipeline.
   - `pipeline`: operator chain in execution order (`scan_only` when no operators).
@@ -212,6 +213,7 @@ Example:
 OK rows=0
 INSPECT exec rows_scanned=0 rows_matched=0 rows_returned=0 rows_inserted=0 rows_updated=0 rows_deleted=0 pages_read=0 pages_written=0
 INSPECT pool policy=reject size=1 checked_out=1 pinned=0 exhausted_total=0
+INSPECT overflow reclaim_queue_depth=0 reclaim_enqueued_total=0 reclaim_dequeued_total=0 reclaim_chains_total=0 reclaim_pages_total=0 reclaim_failures_total=0
 INSPECT plan source_model=User pipeline=where>sort>inspect join_strategy=none join_order=none materialization=none sort_strategy=in_place_insertion group_strategy=none nested_relations=0
 INSPECT explain sort=rows sorted in place with insertion order swaps group=not_applied
 ```

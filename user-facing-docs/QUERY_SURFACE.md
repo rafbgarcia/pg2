@@ -33,6 +33,7 @@ String storage behavior (current):
 - `in_progress`: `offset(...)`
 - `in_progress`: `group(...)`
 - `supported`: `inspect`
+  - `inspect` includes `INSPECT overflow ...` with reclaim queue depth and reclaim throughput counters.
 
 Notes:
 - Sorting/filter examples are covered in server-path tests.

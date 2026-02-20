@@ -869,6 +869,7 @@ fn enqueueOverflowChainForReclaim(
             error.DuplicateChainRoot => error.Corruption,
         };
     };
+    catalog.recordOverflowReclaimEnqueue();
     var payload_buf: [16]u8 = undefined;
     const payload_len = encodeOverflowChainRecordMeta(
         payload_buf[0..],
@@ -897,11 +898,16 @@ fn drainOverflowReclaimQueue(
     while (processed < max_items and !catalog.overflow_reclaim_queue.isEmpty()) : (processed += 1) {
         const first_page_id = catalog.overflow_reclaim_queue.dequeue() catch
             return error.Corruption;
-        const page_count = try reclaimOverflowChain(
+        catalog.recordOverflowReclaimDequeue();
+        const page_count = reclaimOverflowChain(
             pool,
             &catalog.overflow_page_allocator,
             first_page_id,
-        );
+        ) catch |err| {
+            catalog.recordOverflowReclaimFailure();
+            return err;
+        };
+        catalog.recordOverflowReclaimSuccess(page_count);
         var payload_buf: [16]u8 = undefined;
         const payload_len = encodeOverflowChainRecordMeta(
             payload_buf[0..],

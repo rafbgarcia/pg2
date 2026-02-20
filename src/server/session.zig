@@ -15,6 +15,7 @@ const disk_mod = @import("../simulator/disk.zig");
 
 const BootstrappedRuntime = bootstrap_mod.BootstrappedRuntime;
 const Catalog = catalog_mod.Catalog;
+const OverflowReclaimStatsSnapshot = catalog_mod.OverflowReclaimStatsSnapshot;
 const ConnectionPool = pool_mod.ConnectionPool;
 const PoolConn = pool_mod.PoolConn;
 const PoolStats = pool_mod.PoolStats;
@@ -99,7 +100,7 @@ pub const Session = struct {
         defer result.deinit();
 
         const pool_stats: ?PoolStats = if (include_inspect) pool.snapshotStats() else null;
-        try serializeQueryResult(writer, &result, pool_stats);
+        try serializeQueryResult(writer, &result, self.catalog, pool_stats);
         return .{
             .bytes_written = stream.pos,
             .is_query_error = result.has_error,
@@ -206,6 +207,7 @@ fn serializeBoundaryError(
 fn serializeQueryResult(
     writer: anytype,
     result: *const exec_mod.QueryResult,
+    catalog: *const Catalog,
     pool_stats: ?PoolStats,
 ) error{ResponseTooLarge}!void {
     std.debug.assert(result.row_count <= result.rows.len);
@@ -233,7 +235,12 @@ fn serializeQueryResult(
     }
 
     if (pool_stats) |stats| {
-        try serializeInspectStats(writer, &result.stats, stats);
+        try serializeInspectStats(
+            writer,
+            &result.stats,
+            stats,
+            catalog.snapshotOverflowReclaimStats(),
+        );
     }
 }
 
@@ -241,6 +248,7 @@ fn serializeInspectStats(
     writer: anytype,
     exec_stats: *const exec_mod.ExecStats,
     pool_stats: PoolStats,
+    overflow_stats: OverflowReclaimStatsSnapshot,
 ) error{ResponseTooLarge}!void {
     writer.print(
         "INSPECT exec rows_scanned={d} rows_matched={d} rows_returned={d} rows_inserted={d} rows_updated={d} rows_deleted={d} pages_read={d} pages_written={d}\n",
@@ -263,6 +271,17 @@ fn serializeInspectStats(
             pool_stats.checked_out,
             pool_stats.pinned,
             pool_stats.pool_exhausted_total,
+        },
+    ) catch return error.ResponseTooLarge;
+    writer.print(
+        "INSPECT overflow reclaim_queue_depth={d} reclaim_enqueued_total={d} reclaim_dequeued_total={d} reclaim_chains_total={d} reclaim_pages_total={d} reclaim_failures_total={d}\n",
+        .{
+            overflow_stats.queue_depth,
+            overflow_stats.enqueued_total,
+            overflow_stats.dequeued_total,
+            overflow_stats.reclaimed_chains_total,
+            overflow_stats.reclaimed_pages_total,
+            overflow_stats.reclaim_failures_total,
         },
     ) catch return error.ResponseTooLarge;
     writer.writeAll("INSPECT plan source_model=") catch
@@ -522,6 +541,13 @@ test "session inspect appends execution and pool stats" {
             u8,
             output,
             "INSPECT pool policy=reject size=1 checked_out=1 pinned=0 exhausted_total=0\n",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "INSPECT overflow reclaim_queue_depth=0 reclaim_enqueued_total=0 reclaim_dequeued_total=0 reclaim_chains_total=0 reclaim_pages_total=0 reclaim_failures_total=0\n",
         ) != null,
     );
     try std.testing.expect(

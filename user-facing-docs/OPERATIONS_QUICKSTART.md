@@ -27,6 +27,7 @@ zig build sim
 - Success starts with `OK rows=<n>`.
 - Errors start with `ERR ...`.
 - `inspect` adds deterministic diagnostic lines after row output.
+  - includes overflow reclaim queue depth and reclaim counters.
 
 ## Known Early-Stage Constraints
 

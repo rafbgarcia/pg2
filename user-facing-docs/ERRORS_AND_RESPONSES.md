@@ -7,6 +7,7 @@ pg2 server responses are line-oriented text.
 - Query success starts with: `OK rows=<n>`
 - Each returned row is comma-separated on its own line.
 - `inspect` appends `INSPECT ...` lines after rows.
+  - includes `INSPECT overflow ...` reclaim backlog/throughput counters.
 
 Example:
 

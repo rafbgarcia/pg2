@@ -118,6 +118,23 @@ pub const ModelInfo = struct {
     total_pages: u32 = 0,
 };
 
+pub const OverflowReclaimStats = struct {
+    enqueued_total: u64 = 0,
+    dequeued_total: u64 = 0,
+    reclaimed_chains_total: u64 = 0,
+    reclaimed_pages_total: u64 = 0,
+    reclaim_failures_total: u64 = 0,
+};
+
+pub const OverflowReclaimStatsSnapshot = struct {
+    queue_depth: u32 = 0,
+    enqueued_total: u64 = 0,
+    dequeued_total: u64 = 0,
+    reclaimed_chains_total: u64 = 0,
+    reclaimed_pages_total: u64 = 0,
+    reclaim_failures_total: u64 = 0,
+};
+
 pub const CatalogError = error{
     CatalogSealed,
     TooManyModels,
@@ -139,6 +156,7 @@ pub const Catalog = struct {
     overflow_page_allocator: OverflowPageIdAllocator =
         OverflowPageIdAllocator.initDefault(),
     overflow_reclaim_queue: OverflowReclaimQueue = .{},
+    overflow_reclaim_stats: OverflowReclaimStats = .{},
 
     name_buffer: [max_name_bytes]u8 = undefined,
     name_buffer_len: u32 = 0,
@@ -475,6 +493,39 @@ pub const Catalog = struct {
         model.indexes[index_id].distinct_count = distinct_count;
     }
 
+    pub fn recordOverflowReclaimEnqueue(self: *Catalog) void {
+        checkedAddU64(&self.overflow_reclaim_stats.enqueued_total, 1);
+    }
+
+    pub fn recordOverflowReclaimDequeue(self: *Catalog) void {
+        checkedAddU64(&self.overflow_reclaim_stats.dequeued_total, 1);
+    }
+
+    pub fn recordOverflowReclaimSuccess(self: *Catalog, reclaimed_pages: u32) void {
+        checkedAddU64(&self.overflow_reclaim_stats.reclaimed_chains_total, 1);
+        checkedAddU64(
+            &self.overflow_reclaim_stats.reclaimed_pages_total,
+            reclaimed_pages,
+        );
+    }
+
+    pub fn recordOverflowReclaimFailure(self: *Catalog) void {
+        checkedAddU64(&self.overflow_reclaim_stats.reclaim_failures_total, 1);
+    }
+
+    pub fn snapshotOverflowReclaimStats(
+        self: *const Catalog,
+    ) OverflowReclaimStatsSnapshot {
+        return .{
+            .queue_depth = @intCast(self.overflow_reclaim_queue.len),
+            .enqueued_total = self.overflow_reclaim_stats.enqueued_total,
+            .dequeued_total = self.overflow_reclaim_stats.dequeued_total,
+            .reclaimed_chains_total = self.overflow_reclaim_stats.reclaimed_chains_total,
+            .reclaimed_pages_total = self.overflow_reclaim_stats.reclaimed_pages_total,
+            .reclaim_failures_total = self.overflow_reclaim_stats.reclaim_failures_total,
+        };
+    }
+
     /// Seal the catalog. No further additions allowed.
     pub fn seal(self: *Catalog) void {
         std.debug.assert(!self.sealed);
@@ -583,6 +634,13 @@ pub const Catalog = struct {
         model.columns[col_id].is_primary_key = true;
     }
 };
+
+fn checkedAddU64(target: *u64, delta: anytype) void {
+    const addend: u64 = @intCast(delta);
+    target.* = std.math.add(u64, target.*, addend) catch {
+        @panic("overflow reclaim stats counter overflow");
+    };
+}
 
 fn inferAssociationLocalKey(
     catalog: *const Catalog,
@@ -770,6 +828,27 @@ test "stats update functions" {
     cat.updateIndexStats(uid, 0, 70, 70);
     try testing.expectEqual(@as(u64, 70), cat.models[uid].indexes[0].entry_count);
     try testing.expectEqual(@as(u64, 70), cat.models[uid].indexes[0].distinct_count);
+}
+
+test "overflow reclaim stats snapshot reports queue depth and totals" {
+    var cat = Catalog{};
+    try cat.overflow_reclaim_queue.enqueue(1000);
+    cat.recordOverflowReclaimEnqueue();
+    try cat.overflow_reclaim_queue.enqueue(1001);
+    cat.recordOverflowReclaimEnqueue();
+
+    _ = try cat.overflow_reclaim_queue.dequeue();
+    cat.recordOverflowReclaimDequeue();
+    cat.recordOverflowReclaimSuccess(2);
+    cat.recordOverflowReclaimFailure();
+
+    const stats = cat.snapshotOverflowReclaimStats();
+    try testing.expectEqual(@as(u32, 1), stats.queue_depth);
+    try testing.expectEqual(@as(u64, 2), stats.enqueued_total);
+    try testing.expectEqual(@as(u64, 1), stats.dequeued_total);
+    try testing.expectEqual(@as(u64, 1), stats.reclaimed_chains_total);
+    try testing.expectEqual(@as(u64, 2), stats.reclaimed_pages_total);
+    try testing.expectEqual(@as(u64, 1), stats.reclaim_failures_total);
 }
 
 test "model name retrieval" {
