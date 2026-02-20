@@ -69,7 +69,7 @@ This milestone is done only when all conditions below are true:
 
 ## Next-Session Kickoff (Concrete)
 
-Completed in committed chunks `c5548a0`, `fd81f61`, `ad8ccd7`, `505fff1`, `7ad8fc5`, and `0000000`:
+Completed in committed chunks `c5548a0`, `fd81f61`, `ad8ccd7`, `505fff1`, `7ad8fc5`, and `852a31e`:
 
 1. Overflow reclaim pipeline.
 2. WAL lifecycle contract for create/relink/unlink/reclaim.
@@ -95,7 +95,7 @@ Use these first in a new session:
 2. `zig build test`
 3. `git log -6 --stat`
 4. `git show --name-only --stat 505fff1`
-5. `git show --name-only --stat 0000000`
+5. `git show --name-only --stat 852a31e`
 6. `git show --name-only --stat 7ad8fc5`
 7. `git show --name-only --stat ad8ccd7`
 8. `git show --name-only --stat fd81f61`

@@ -1,7 +1,7 @@
 # Quality Gate Artifact: 202602201545-e2e-string-overflow-file-rename
 
 - Artifact ID: `202602201545-e2e-string-overflow-file-rename`
-- Commit: `0000000` (required real committed SHA)
+- Commit: `852a31e` (required real committed SHA)
 - Title: `rename e2e overflow file for string clarity`
 - Scope: `Renames server E2E overflow test module to clarify it validates string-overflow behavior specifically.`
 
