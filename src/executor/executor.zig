@@ -83,6 +83,45 @@ const GroupRuntime = struct {
 /// Maximum pipeline operators in a single query.
 pub const max_operators = capacity_mod.max_pipeline_operators;
 
+pub const PlanOp = enum {
+    where_filter,
+    group_op,
+    limit_op,
+    offset_op,
+    insert_op,
+    update_op,
+    delete_op,
+    sort_op,
+    inspect_op,
+};
+
+pub const JoinStrategy = enum {
+    none,
+    nested_loop,
+};
+
+pub const JoinOrder = enum {
+    none,
+    source_then_nested,
+};
+
+pub const MaterializationMode = enum {
+    none,
+    bounded_row_buffers,
+};
+
+pub const PlanStats = struct {
+    source_model: [32]u8 = [_]u8{0} ** 32,
+    source_model_len: u8 = 0,
+    pipeline_ops: [max_operators]PlanOp =
+        [_]PlanOp{.inspect_op} ** max_operators,
+    pipeline_op_count: u8 = 0,
+    join_strategy: JoinStrategy = .none,
+    join_order: JoinOrder = .none,
+    materialization_mode: MaterializationMode = .none,
+    nested_relation_count: u8 = 0,
+};
+
 /// Execution statistics for a query.
 pub const ExecStats = struct {
     rows_scanned: u32 = 0,
@@ -93,6 +132,7 @@ pub const ExecStats = struct {
     rows_deleted: u32 = 0,
     pages_read: u32 = 0,
     pages_written: u32 = 0,
+    plan: PlanStats = .{},
 };
 
 /// Result of executing a query. Row storage is fixed-capacity and embedded to
@@ -145,17 +185,7 @@ pub const ExecContext = struct {
 };
 
 /// Operator kind extracted from the AST.
-const OpKind = enum {
-    where_filter,
-    group_op,
-    limit_op,
-    offset_op,
-    insert_op,
-    update_op,
-    delete_op,
-    sort_op,
-    inspect_op,
-};
+const OpKind = PlanOp;
 
 /// A pipeline operator descriptor.
 const OpDescriptor = struct {
@@ -208,6 +238,7 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
         &ops,
         &op_count,
     );
+    capturePlanStats(&result.stats.plan, model_name, &ops, op_count);
 
     // Check for mutations.
     if (findMutationOp(&ops, op_count)) |mut_idx| {
@@ -462,6 +493,7 @@ fn applySingleNestedSelectionJoin(
         assoc,
         result,
     ) orelse return false;
+    recordNestedJoinPlan(&result.stats.plan);
     if (!executeInnerJoinBounded(
         result,
         left_copy[0..result.row_count],
@@ -1679,6 +1711,36 @@ fn buildOperatorList(
     std.debug.assert(count.* <= max_operators);
 }
 
+fn capturePlanStats(
+    plan: *PlanStats,
+    model_name: []const u8,
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+) void {
+    @memset(plan.source_model[0..], 0);
+    const source_len = @min(model_name.len, plan.source_model.len);
+    @memcpy(plan.source_model[0..source_len], model_name[0..source_len]);
+    plan.source_model_len = @intCast(source_len);
+
+    plan.pipeline_op_count = @intCast(@min(
+        @as(u16, @intCast(max_operators)),
+        op_count,
+    ));
+    var i: u16 = 0;
+    while (i < plan.pipeline_op_count) : (i += 1) {
+        plan.pipeline_ops[i] = ops[i].kind;
+    }
+}
+
+fn recordNestedJoinPlan(plan: *PlanStats) void {
+    if (plan.nested_relation_count < std.math.maxInt(u8)) {
+        plan.nested_relation_count += 1;
+    }
+    plan.join_strategy = .nested_loop;
+    plan.join_order = .source_then_nested;
+    plan.materialization_mode = .bounded_row_buffers;
+}
+
 /// Find the first mutation operator in the list.
 fn findMutationOp(
     ops: *const [max_operators]OpDescriptor,
@@ -2034,6 +2096,49 @@ test "execute offset" {
     );
 }
 
+test "execute captures deterministic inspect plan metadata" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const src = "User |> where(active = true) |> sort(id desc) |> inspect";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    var result = try execute(
+        &env.makeCtx(tx, &snap, &p.ast, &tok, src),
+    );
+    defer result.deinit();
+
+    try testing.expect(!result.has_error);
+    const source_name =
+        result.stats.plan.source_model[0..result.stats.plan.source_model_len];
+    try testing.expectEqualStrings("User", source_name);
+    try testing.expectEqual(@as(u8, 3), result.stats.plan.pipeline_op_count);
+    try testing.expectEqual(
+        PlanOp.where_filter,
+        result.stats.plan.pipeline_ops[0],
+    );
+    try testing.expectEqual(
+        PlanOp.sort_op,
+        result.stats.plan.pipeline_ops[1],
+    );
+    try testing.expectEqual(
+        PlanOp.inspect_op,
+        result.stats.plan.pipeline_ops[2],
+    );
+    try testing.expectEqual(JoinStrategy.none, result.stats.plan.join_strategy);
+    try testing.expectEqual(JoinOrder.none, result.stats.plan.join_order);
+    try testing.expectEqual(
+        MaterializationMode.none,
+        result.stats.plan.materialization_mode,
+    );
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_relation_count);
+}
+
 test "execute with unknown model returns error" {
     var env: ExecTestEnv = undefined;
     try env.init();
@@ -2113,6 +2218,19 @@ test "execute nested relation join through selection set" {
     try testing.expectEqual(@as(i64, 20), result.rows[1].values[3].bigint);
     try testing.expectEqual(@as(i64, 2), result.rows[2].values[0].bigint);
     try testing.expectEqual(@as(i64, 15), result.rows[2].values[3].bigint);
+    try testing.expectEqual(
+        JoinStrategy.nested_loop,
+        result.stats.plan.join_strategy,
+    );
+    try testing.expectEqual(
+        JoinOrder.source_then_nested,
+        result.stats.plan.join_order,
+    );
+    try testing.expectEqual(
+        MaterializationMode.bounded_row_buffers,
+        result.stats.plan.materialization_mode,
+    );
+    try testing.expectEqual(@as(u8, 1), result.stats.plan.nested_relation_count);
 }
 
 test "execute multiple nested relations through selection set" {

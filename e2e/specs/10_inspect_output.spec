@@ -17,3 +17,5 @@ steps:
     expect_contains: "INSPECT exec rows_scanned="
   - request: User |> inspect
     expect_contains: "INSPECT pool policy="
+  - request: User |> inspect
+    expect_contains: "INSPECT plan source_model=User pipeline=inspect join_strategy=none join_order=none materialization=none nested_relations=0"

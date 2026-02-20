@@ -187,6 +187,31 @@ Supported read-side operators:
 - `inspect`
 - scope references by name
 
+### Inspect Output
+
+`inspect` appends deterministic execution diagnostics after the normal query rows.
+
+Output lines:
+
+- `INSPECT exec ...` counters for scan/match/return and mutation/page stats.
+- `INSPECT pool ...` connection-pool saturation state.
+- `INSPECT plan ...` planner/executor decision summary:
+  - `source_model`: resolved root model for the pipeline.
+  - `pipeline`: operator chain in execution order (`scan_only` when no operators).
+  - `join_strategy`: currently `none` or `nested_loop`.
+  - `join_order`: currently `none` or `source_then_nested`.
+  - `materialization`: currently `none` or `bounded_row_buffers`.
+  - `nested_relations`: number of nested relation joins executed.
+
+Example:
+
+```text
+OK rows=0
+INSPECT exec rows_scanned=0 rows_matched=0 rows_returned=0 rows_inserted=0 rows_updated=0 rows_deleted=0 pages_read=0 pages_written=0
+INSPECT pool policy=reject size=1 checked_out=1 pinned=0 exhausted_total=0
+INSPECT plan source_model=User pipeline=where>sort>inspect join_strategy=none join_order=none materialization=none nested_relations=0
+```
+
 ### Selection Sets
 
 Selection sets define output shape.

@@ -265,6 +265,48 @@ fn serializeInspectStats(
             pool_stats.pool_exhausted_total,
         },
     ) catch return error.ResponseTooLarge;
+    writer.writeAll("INSPECT plan source_model=") catch
+        return error.ResponseTooLarge;
+    writer.writeAll(
+        exec_stats.plan.source_model[0..exec_stats.plan.source_model_len],
+    ) catch return error.ResponseTooLarge;
+    writer.writeAll(" pipeline=") catch return error.ResponseTooLarge;
+    if (exec_stats.plan.pipeline_op_count == 0) {
+        writer.writeAll("scan_only") catch return error.ResponseTooLarge;
+    } else {
+        var op_index: u8 = 0;
+        while (op_index < exec_stats.plan.pipeline_op_count) : (op_index += 1) {
+            if (op_index > 0) {
+                writer.writeAll(">") catch return error.ResponseTooLarge;
+            }
+            writer.writeAll(
+                planOpLabel(exec_stats.plan.pipeline_ops[op_index]),
+            ) catch return error.ResponseTooLarge;
+        }
+    }
+    writer.print(
+        " join_strategy={s} join_order={s} materialization={s} nested_relations={d}\n",
+        .{
+            @tagName(exec_stats.plan.join_strategy),
+            @tagName(exec_stats.plan.join_order),
+            @tagName(exec_stats.plan.materialization_mode),
+            exec_stats.plan.nested_relation_count,
+        },
+    ) catch return error.ResponseTooLarge;
+}
+
+fn planOpLabel(op: exec_mod.PlanOp) []const u8 {
+    return switch (op) {
+        .where_filter => "where",
+        .group_op => "group",
+        .limit_op => "limit",
+        .offset_op => "offset",
+        .insert_op => "insert",
+        .update_op => "update",
+        .delete_op => "delete",
+        .sort_op => "sort",
+        .inspect_op => "inspect",
+    };
 }
 
 fn astHasInspectOp(ast: *const ast_mod.Ast) bool {
@@ -457,6 +499,13 @@ test "session inspect appends execution and pool stats" {
             u8,
             output,
             "INSPECT pool policy=reject size=1 checked_out=1 pinned=0 exhausted_total=0\n",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "INSPECT plan source_model=User pipeline=inspect join_strategy=none join_order=none materialization=none nested_relations=0\n",
         ) != null,
     );
 }

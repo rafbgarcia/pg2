@@ -35,7 +35,7 @@ Roadmap sequencing lives in `TODO.md`.
 - [ ] Gate 3: CRUD + query surface is stable
   - [ ] Insert/update/delete/read work end-to-end via server protocol.
   - [ ] `where`, `sort`, `limit`, `offset`, `group` are covered by E2E tests.
-  - [ ] `inspect` output is deterministic and documented.
+  - [x] `inspect` output is deterministic and documented.
   - [ ] Query boundary errors are stable and classified.
 
 - [ ] Gate 4: Referential integrity contract is enforced

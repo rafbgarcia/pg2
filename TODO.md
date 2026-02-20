@@ -36,9 +36,10 @@ Release-readiness gates live in `V1_READINESS_CHECKLIST.md`.
 - [ ] Milestone 3: Planner/executor introspection expansion
   - Scope: Improve `inspect` output to explain physical decisions (join strategy/order, materialization, sort/aggregation choices) in plain language.
   - Deliverables:
-    - Structured introspection data for key planner/executor decisions.
-    - User-facing explanation strings tied to runtime stats and query shape.
-    - Tests that assert introspection stability/quality for representative queries.
+    - [x] Structured introspection data for key planner/executor decisions.
+    - [x] User-facing explanation strings tied to runtime stats and query shape.
+    - [x] Tests that assert introspection stability/quality for representative queries.
+      - Added deterministic `INSPECT plan ...` output for source model, pipeline operator chain, join strategy/order, materialization mode, and nested relation count.
   - Done when:
     - Common query plans are explainable without reading internals.
     - Introspection output is deterministic and test-covered.
