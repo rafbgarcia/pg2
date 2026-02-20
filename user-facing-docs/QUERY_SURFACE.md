@@ -12,6 +12,7 @@ Status labels:
 - `supported`: model and field declarations (`field(...)`) through schema definitions.
 - `supported`: `reference(...)` metadata with explicit RI mode.
 - `supported`: fail-closed RI configuration for unsupported referential actions (`set default` rejected).
+- `supported`: maximum `128` total fields (columns) per model, including primary key and reference columns; model definitions above this limit fail closed.
 
 ## CRUD
 

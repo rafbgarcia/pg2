@@ -339,7 +339,70 @@ fn executeReadPipeline(
     }
 
     result.stats.rows_matched = result.row_count;
+    if (!applyFlatColumnProjection(
+        ctx,
+        result,
+        pipeline_node,
+        model_id,
+    )) {
+        return;
+    }
     result.stats.rows_returned = result.row_count;
+}
+
+fn applyFlatColumnProjection(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    pipeline_node: NodeIndex,
+    model_id: ModelId,
+) bool {
+    const selection = getPipelineSelection(ctx.ast, pipeline_node) orelse
+        return true;
+    const model_schema = &ctx.catalog.models[model_id].row_schema;
+
+    var projection_indices: [scan_mod.max_columns]u16 = undefined;
+    var projection_count: u16 = 0;
+
+    var field = ctx.ast.getNode(selection).data.unary;
+    while (field != null_node) {
+        const node = ctx.ast.getNode(field);
+        switch (node.tag) {
+            .select_field => {
+                const col_name = ctx.tokens.getText(node.data.token, ctx.source);
+                const col_idx = model_schema.findColumn(col_name) orelse {
+                    setError(result, "select column not found");
+                    return false;
+                };
+                projection_indices[projection_count] = col_idx;
+                projection_count += 1;
+            },
+            // Nested/computed projection shaping is not implemented in this pass.
+            .select_nested, .select_computed => return true,
+            else => return true,
+        }
+        field = node.next;
+    }
+
+    if (projection_count == 0) return true;
+
+    var row_index: u16 = 0;
+    while (row_index < result.row_count) : (row_index += 1) {
+        var projected: [scan_mod.max_columns]Value = undefined;
+        for (projection_indices[0..projection_count], 0..) |source_idx, out_idx| {
+            if (source_idx >= result.rows[row_index].column_count) {
+                setError(result, "projection column out of bounds");
+                return false;
+            }
+            projected[out_idx] = result.rows[row_index].values[source_idx];
+        }
+        @memcpy(
+            result.rows[row_index].values[0..projection_count],
+            projected[0..projection_count],
+        );
+        result.rows[row_index].column_count = projection_count;
+    }
+
+    return true;
 }
 
 fn applyReadOperators(

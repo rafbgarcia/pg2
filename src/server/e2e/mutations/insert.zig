@@ -36,13 +36,13 @@ fn appendWideFieldInsertAssignment(writer: anytype, field_index: usize) !void {
     }
 }
 
-fn buildWideInsertSchema(buf: []u8) ![]const u8 {
+fn buildWideInsertSchema(buf: []u8, field_count: usize) ![]const u8 {
     var stream = std.io.fixedBufferStream(buf);
     const writer = stream.writer();
     try writer.writeAll("WideUser {\n");
     try writer.writeAll("  field(id, bigint, notNull, primaryKey)\n");
     var field_index: usize = 1;
-    while (field_index <= wide_field_count) : (field_index += 1) {
+    while (field_index <= field_count) : (field_index += 1) {
         try appendWideFieldDefinition(writer, field_index);
     }
     try writer.writeAll("}\n");
@@ -225,7 +225,7 @@ test "e2e insert supports 128 total fields with deterministic readback" {
     const executor = &env.executor;
 
     var schema_buf: [8 * 1024]u8 = undefined;
-    const schema = try buildWideInsertSchema(schema_buf[0..]);
+    const schema = try buildWideInsertSchema(schema_buf[0..], wide_field_count);
     try executor.applyDefinitions(schema);
 
     var insert_req_buf: [16 * 1024]u8 = undefined;
@@ -237,21 +237,23 @@ test "e2e insert supports 128 total fields with deterministic readback" {
     );
 
     result = try executor.run("WideUser |> where(id = 1) { id f002 f003 f126 f127 }");
-    try std.testing.expect(std.mem.startsWith(
-        u8,
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,v002,true,false,1127\n",
         result,
-        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,1001,v002,true,1004,v005,false,",
-    ));
-    try std.testing.expect(std.mem.indexOf(
-        u8,
-        result,
-        "1061,v062,true,1064,v065,false,1067",
-    ) != null);
-    try std.testing.expect(std.mem.endsWith(
-        u8,
-        result,
-        ",1124,v125,false,1127\n",
-    ));
+    );
+}
+
+test "e2e insert model creation fails closed above 128 total fields" {
+    var env: e2e.E2EEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+
+    // Catalog currently allows at most 128 total columns per model.
+    var schema_buf: [8 * 1024]u8 = undefined;
+    const too_wide_schema = try buildWideInsertSchema(schema_buf[0..], 128);
+    try std.testing.expectError(error.TooManyColumns, executor.applyDefinitions(too_wide_schema));
 }
 
 test "e2e insert duplicate key fails closed late in high-volume workload" {
