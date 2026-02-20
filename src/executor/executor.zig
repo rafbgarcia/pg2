@@ -358,10 +358,12 @@ fn applyFlatColumnProjection(
 ) bool {
     const selection = getPipelineSelection(ctx.ast, pipeline_node) orelse
         return true;
-    const model_schema = &ctx.catalog.models[model_id].row_schema;
+    const source_model = &ctx.catalog.models[model_id];
+    const source_schema = &source_model.row_schema;
 
     var projection_indices: [scan_mod.max_columns]u16 = undefined;
     var projection_count: u16 = 0;
+    var joined_column_offset: u16 = source_schema.column_count;
 
     var field = ctx.ast.getNode(selection).data.unary;
     while (field != null_node) {
@@ -369,15 +371,71 @@ fn applyFlatColumnProjection(
         switch (node.tag) {
             .select_field => {
                 const col_name = ctx.tokens.getText(node.data.token, ctx.source);
-                const col_idx = model_schema.findColumn(col_name) orelse {
+                const col_idx = source_schema.findColumn(col_name) orelse {
                     setError(result, "select column not found");
                     return false;
                 };
-                projection_indices[projection_count] = col_idx;
-                projection_count += 1;
+                if (!appendProjectionIndex(
+                    result,
+                    &projection_indices,
+                    &projection_count,
+                    col_idx,
+                )) return false;
             },
-            // Nested/computed projection shaping is not implemented in this pass.
-            .select_nested, .select_computed => return true,
+            .select_nested => {
+                const relation_name = ctx.tokens.getText(node.extra, ctx.source);
+                const assoc_id = ctx.catalog.findAssociation(
+                    model_id,
+                    relation_name,
+                ) orelse {
+                    setError(result, "nested relation association not found");
+                    return false;
+                };
+                const assoc = &source_model.associations[assoc_id];
+                if (assoc.target_model_id == null_model) {
+                    setError(result, "nested relation target unresolved");
+                    return false;
+                }
+                const target_model = &ctx.catalog.models[assoc.target_model_id];
+                const nested_selection = getNestedSelection(ctx.ast, field) orelse {
+                    joined_column_offset += target_model.row_schema.column_count;
+                    field = node.next;
+                    continue;
+                };
+
+                var nested_field = ctx.ast.getNode(nested_selection).data.unary;
+                while (nested_field != null_node) {
+                    const nested_node = ctx.ast.getNode(nested_field);
+                    switch (nested_node.tag) {
+                        .select_field => {
+                            const nested_col_name = ctx.tokens.getText(
+                                nested_node.data.token,
+                                ctx.source,
+                            );
+                            const nested_col_idx = target_model.row_schema.findColumn(
+                                nested_col_name,
+                            ) orelse {
+                                setError(result, "select column not found");
+                                return false;
+                            };
+                            if (!appendProjectionIndex(
+                                result,
+                                &projection_indices,
+                                &projection_count,
+                                joined_column_offset + nested_col_idx,
+                            )) return false;
+                        },
+                        // Nested relation and computed-field projection shaping
+                        // are not implemented in this pass.
+                        .select_nested, .select_computed => return true,
+                        else => return true,
+                    }
+                    nested_field = nested_node.next;
+                }
+                joined_column_offset += target_model.row_schema.column_count;
+            },
+            // Computed-field projection shaping is not implemented in this pass.
+            .select_computed => return true,
             else => return true,
         }
         field = node.next;
@@ -403,6 +461,33 @@ fn applyFlatColumnProjection(
     }
 
     return true;
+}
+
+fn appendProjectionIndex(
+    result: *QueryResult,
+    projection_indices: *[scan_mod.max_columns]u16,
+    projection_count: *u16,
+    idx: u16,
+) bool {
+    if (projection_count.* >= scan_mod.max_columns) {
+        setError(result, "projection column capacity exceeded");
+        return false;
+    }
+    projection_indices.*[projection_count.*] = idx;
+    projection_count.* += 1;
+    return true;
+}
+
+fn getNestedSelection(tree: *const Ast, nested_node: NodeIndex) ?NodeIndex {
+    const nested = tree.getNode(nested_node);
+    if (nested.tag != .select_nested) return null;
+    if (nested.data.unary == null_node) return null;
+    const nested_pipeline = tree.getNode(nested.data.unary);
+    if (nested_pipeline.tag != .pipeline) return null;
+    const selection: NodeIndex = nested_pipeline.extra;
+    if (selection >= tree.node_count) return null;
+    if (tree.getNode(selection).tag != .selection_set) return null;
+    return selection;
 }
 
 fn applyReadOperators(
@@ -2351,12 +2436,13 @@ test "execute nested relation join through selection set" {
 
     try testing.expect(!result.has_error);
     try testing.expectEqual(@as(u16, 3), result.row_count);
+    try testing.expectEqual(@as(u16, 2), result.rows[0].column_count);
     try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].bigint);
-    try testing.expectEqual(@as(i64, 10), result.rows[0].values[3].bigint);
+    try testing.expectEqual(@as(i64, 10), result.rows[0].values[1].bigint);
     try testing.expectEqual(@as(i64, 1), result.rows[1].values[0].bigint);
-    try testing.expectEqual(@as(i64, 20), result.rows[1].values[3].bigint);
+    try testing.expectEqual(@as(i64, 20), result.rows[1].values[1].bigint);
     try testing.expectEqual(@as(i64, 2), result.rows[2].values[0].bigint);
-    try testing.expectEqual(@as(i64, 15), result.rows[2].values[3].bigint);
+    try testing.expectEqual(@as(i64, 15), result.rows[2].values[1].bigint);
     try testing.expectEqual(
         JoinStrategy.nested_loop,
         result.stats.plan.join_strategy,
@@ -2444,15 +2530,16 @@ test "execute multiple nested relations through selection set" {
 
     try testing.expect(!result.has_error);
     try testing.expectEqual(@as(u16, 5), result.row_count);
+    try testing.expectEqual(@as(u16, 3), result.rows[0].column_count);
     try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].bigint);
-    try testing.expectEqual(@as(i64, 10), result.rows[0].values[3].bigint);
-    try testing.expectEqual(@as(i64, 100), result.rows[0].values[5].bigint);
+    try testing.expectEqual(@as(i64, 10), result.rows[0].values[1].bigint);
+    try testing.expectEqual(@as(i64, 100), result.rows[0].values[2].bigint);
     try testing.expectEqual(@as(i64, 1), result.rows[3].values[0].bigint);
-    try testing.expectEqual(@as(i64, 20), result.rows[3].values[3].bigint);
-    try testing.expectEqual(@as(i64, 200), result.rows[3].values[5].bigint);
+    try testing.expectEqual(@as(i64, 20), result.rows[3].values[1].bigint);
+    try testing.expectEqual(@as(i64, 200), result.rows[3].values[2].bigint);
     try testing.expectEqual(@as(i64, 2), result.rows[4].values[0].bigint);
-    try testing.expectEqual(@as(i64, 15), result.rows[4].values[3].bigint);
-    try testing.expectEqual(@as(i64, 150), result.rows[4].values[5].bigint);
+    try testing.expectEqual(@as(i64, 15), result.rows[4].values[1].bigint);
+    try testing.expectEqual(@as(i64, 150), result.rows[4].values[2].bigint);
 }
 
 test "execute nested relation fails closed when association is missing" {
@@ -2536,10 +2623,11 @@ test "execute nested relation uses explicit association keys" {
 
     try testing.expect(!result.has_error);
     try testing.expectEqual(@as(u16, 2), result.row_count);
+    try testing.expectEqual(@as(u16, 2), result.rows[0].column_count);
     try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].bigint);
-    try testing.expectEqual(@as(i64, 20), result.rows[0].values[3].bigint);
+    try testing.expectEqual(@as(i64, 20), result.rows[0].values[1].bigint);
     try testing.expectEqual(@as(i64, 2), result.rows[1].values[0].bigint);
-    try testing.expectEqual(@as(i64, 15), result.rows[1].values[3].bigint);
+    try testing.expectEqual(@as(i64, 15), result.rows[1].values[1].bigint);
 }
 
 test "execute delete via pipeline" {

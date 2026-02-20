@@ -9,6 +9,7 @@ comptime {
     _ = @import("constraints/foreign_key_violation_test.zig");
     _ = @import("constraints/nullable_test.zig");
     _ = @import("constraints/not_null_test.zig");
+    _ = @import("schema_definition/reference_test.zig");
     _ = @import("semantic_validations/type_mismatch_test.zig");
     _ = @import("semantic_validations/unknown_field_test.zig");
     _ = @import("field_types/bigint_test.zig");
