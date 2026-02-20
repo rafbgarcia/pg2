@@ -313,6 +313,13 @@ test "replayCommittedOverflowLifecycle reclaims chain and is idempotent" {
         delete_where.data.unary,
         std.testing.allocator,
     );
+    try mutation_mod.commitOverflowReclaimEntriesForTx(
+        &catalog,
+        &pool,
+        &wal,
+        tx_id,
+        1,
+    );
     try wal.flush();
 
     var replay_wal = Wal.init(std.testing.allocator, disk.storage());

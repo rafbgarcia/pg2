@@ -839,12 +839,13 @@ test "stats update functions" {
 
 test "overflow reclaim stats snapshot reports queue depth and totals" {
     var cat = Catalog{};
-    try cat.overflow_reclaim_queue.enqueue(1000);
+    try cat.overflow_reclaim_queue.enqueue(1, 1000);
     cat.recordOverflowReclaimEnqueue();
-    try cat.overflow_reclaim_queue.enqueue(1001);
+    try cat.overflow_reclaim_queue.enqueue(1, 1001);
     cat.recordOverflowReclaimEnqueue();
+    cat.overflow_reclaim_queue.commitTx(1);
 
-    _ = try cat.overflow_reclaim_queue.dequeue();
+    _ = (try cat.overflow_reclaim_queue.dequeueCommitted()).?;
     cat.recordOverflowReclaimDequeue();
     cat.recordOverflowReclaimSuccess(2);
     cat.recordOverflowReclaimFailure();

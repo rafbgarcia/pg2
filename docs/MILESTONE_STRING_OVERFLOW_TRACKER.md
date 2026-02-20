@@ -56,13 +56,15 @@ This milestone is done only when all conditions below are true:
 1. Durable replay integration (completed in `505fff1`):
    - Added `src/storage/recovery.zig` replay path for committed/legacy-replayable overflow lifecycle WAL.
    - Added crash/restart validation through server session E2E and replay idempotence checks.
-2. Tx-level abort semantics (in progress):
-   - Recovery replay behavior for aborted overflow lifecycle WAL is now covered:
+2. Tx-level abort semantics (completed):
+   - Recovery replay behavior for aborted overflow lifecycle WAL is covered:
      - abort after create,
      - abort after relink intent,
      - abort after unlink/reclaim intent.
-   - Remaining gap:
-     - explicit mutation-path rollback ordering and reclaim-queue rollback semantics are still open.
+   - Mutation-path rollback contract is now implemented and covered:
+     - reclaim queue entries are tx-scoped (`pending`/`committed`),
+     - tx abort removes pending reclaim intents,
+     - committed-only dequeue enforces ordering and prevents reclaimed-live-chain behavior.
 3. Queue-drain budget semantics (open):
    - Define/document expected backlog progression when one mutation unlinks multiple overflow chains.
    - Acceptance:
@@ -81,12 +83,13 @@ Completed:
 6. Recovery replay application for overflow lifecycle WAL with idempotent reclaim semantics.
 7. Server E2E overflow test module rename for explicit string-overflow scope.
 8. Recovery replay abort matrix tests for overflow create/relink/unlink/reclaim lifecycle records (aborted tx records are non-replayable).
+9. Mutation-path rollback contract for overflow reclaim queue entries, including deterministic rollback ordering tests and abort-safe live-chain protection.
 
 Next session should execute in order:
 
-1. Define and implement mutation-path rollback contract for overflow reclaim queue entries (abort must not allow reclaim of live chains).
-2. Lock reclaim budget semantics with deterministic multi-chain unlink tests + inspect assertions.
-3. Decide and implement strict tx-marker replay policy (current replay supports legacy mutation WAL without tx begin/commit markers to avoid dropping replay).
+1. Lock reclaim budget semantics with deterministic multi-chain unlink tests + inspect assertions.
+2. Decide and implement strict tx-marker replay policy (current replay supports legacy mutation WAL without tx begin/commit markers to avoid dropping replay).
+3. Evaluate whether reclaim-drain budget should execute at commit hook, mutation hook, or both under explicit documented policy.
 4. Update quality-gate artifact(s), `docs/quality-gates/README.md`, and user-facing docs for any behavior changes.
 5. Run the AGENTS placeholder hygiene check before finalizing docs.
 

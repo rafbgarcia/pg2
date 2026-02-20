@@ -32,3 +32,4 @@ Expected matches should only appear in `docs/quality-gates/TEMPLATE.md`.
 ## Recent Artifacts
 
 - `docs/quality-gates/202602201830-overflow-abort-replay-matrix.md`
+- `docs/quality-gates/202602202030-overflow-reclaim-tx-rollback-contract.md`

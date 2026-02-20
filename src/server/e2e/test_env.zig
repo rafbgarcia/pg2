@@ -14,6 +14,7 @@ const heap_mod = @import("../../storage/heap.zig");
 const disk_mod = @import("../../simulator/disk.zig");
 const session_mod = @import("../session.zig");
 const pool_mod = @import("../pool.zig");
+const mutation_mod = @import("../../executor/mutation.zig");
 
 const BootstrappedRuntime = bootstrap_mod.BootstrappedRuntime;
 const Catalog = catalog_mod.Catalog;
@@ -64,15 +65,30 @@ pub const TestExecutor = struct {
 
     pub fn run(self: *TestExecutor, request: []const u8) ![]const u8 {
         var pool_conn = try self.pool.checkout();
-        defer self.pool.checkin(&pool_conn) catch {
-            @panic("pool checkin failed in E2E request");
-        };
-
         const result = try self.session.handleRequest(
             &self.pool,
             &pool_conn,
             request,
             self.response_buf[0..],
+        );
+
+        if (result.is_query_error) {
+            mutation_mod.rollbackOverflowReclaimEntriesForTx(
+                self.catalog,
+                pool_conn.tx_id,
+            );
+            try self.pool.abortCheckin(&pool_conn);
+            return self.response_buf[0..result.bytes_written];
+        }
+
+        const tx_id = pool_conn.tx_id;
+        try self.pool.checkin(&pool_conn);
+        try mutation_mod.commitOverflowReclaimEntriesForTx(
+            self.catalog,
+            &self.runtime.pool,
+            &self.runtime.wal,
+            tx_id,
+            1,
         );
         return self.response_buf[0..result.bytes_written];
     }

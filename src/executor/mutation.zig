@@ -869,7 +869,7 @@ fn enqueueOverflowChainForReclaim(
     tx_id: TxId,
     first_page_id: u64,
 ) MutationError!void {
-    catalog.overflow_reclaim_queue.enqueue(first_page_id) catch |e| {
+    catalog.overflow_reclaim_queue.enqueue(tx_id, first_page_id) catch |e| {
         return switch (e) {
             error.InvalidChainRoot => error.Corruption,
             error.QueueFull => error.OverflowReclaimQueueFull,
@@ -904,8 +904,8 @@ fn drainOverflowReclaimQueue(
 ) MutationError!void {
     var processed: usize = 0;
     while (processed < max_items and !catalog.overflow_reclaim_queue.isEmpty()) : (processed += 1) {
-        const first_page_id = catalog.overflow_reclaim_queue.dequeue() catch
-            return error.Corruption;
+        const first_page_id = (catalog.overflow_reclaim_queue.dequeueCommitted() catch
+            return error.Corruption) orelse break;
         catalog.recordOverflowReclaimDequeue();
         const page_count = reclaimOverflowChain(
             pool,
@@ -932,6 +932,24 @@ fn drainOverflowReclaimQueue(
             payload_buf[0..payload_len],
         ) catch |e| return mapWalAppendError(e);
     }
+}
+
+pub fn commitOverflowReclaimEntriesForTx(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    tx_id: TxId,
+    max_items: usize,
+) MutationError!void {
+    catalog.overflow_reclaim_queue.commitTx(tx_id);
+    try drainOverflowReclaimQueue(catalog, pool, wal, tx_id, max_items);
+}
+
+pub fn rollbackOverflowReclaimEntriesForTx(
+    catalog: *Catalog,
+    tx_id: TxId,
+) void {
+    catalog.overflow_reclaim_queue.abortTx(tx_id);
 }
 
 fn reclaimOverflowChain(
@@ -2181,6 +2199,13 @@ test "overflow WAL lifecycle is deterministic for replace path" {
         update_op.data.unary,
         testing.allocator,
     );
+    try commitOverflowReclaimEntriesForTx(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx,
+        1,
+    );
 
     try env.wal.flush();
 
@@ -2283,6 +2308,13 @@ test "overflow WAL lifecycle includes unlink and reclaim on delete" {
         delete_src,
         delete_where.data.unary,
         testing.allocator,
+    );
+    try commitOverflowReclaimEntriesForTx(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx,
+        1,
     );
 
     try env.wal.flush();
@@ -2397,6 +2429,13 @@ test "overflow lifecycle WAL records survive crash and restart recovery" {
         delete_where.data.unary,
         testing.allocator,
     );
+    try commitOverflowReclaimEntriesForTx(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx,
+        2,
+    );
 
     try env.wal.flush();
     env.disk.crash();
@@ -2464,12 +2503,105 @@ test "reclaim drain fails closed on cyclic overflow chain corruption" {
         second.markDirty();
     }
 
-    try env.catalog.overflow_reclaim_queue.enqueue(9_000);
     const tx = try env.tm.begin();
+    try env.catalog.overflow_reclaim_queue.enqueue(tx, 9_000);
+    env.catalog.overflow_reclaim_queue.commitTx(tx);
     try testing.expectError(
         error.Corruption,
         drainOverflowReclaimQueue(&env.catalog, &env.pool, &env.wal, tx, 1),
     );
+}
+
+test "reclaim queue preserves ordering across tx rollback and commit" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.catalog.overflow_page_allocator = try overflow_mod.PageIdAllocator.initWithBounds(15_000, 8);
+
+    {
+        var first = try PinnedMutationPage.pin(&env.pool, 15_000);
+        defer first.release();
+        OverflowPage.init(first.page);
+        try OverflowPage.writeChunk(first.page, "a", OverflowPage.null_page_id);
+        first.markDirty();
+    }
+    {
+        var second = try PinnedMutationPage.pin(&env.pool, 15_001);
+        defer second.release();
+        OverflowPage.init(second.page);
+        try OverflowPage.writeChunk(second.page, "b", OverflowPage.null_page_id);
+        second.markDirty();
+    }
+
+    const tx_a: u64 = 41;
+    const tx_b: u64 = 42;
+    try env.catalog.overflow_reclaim_queue.enqueue(tx_a, 15_000);
+    try env.catalog.overflow_reclaim_queue.enqueue(tx_b, 15_001);
+
+    try commitOverflowReclaimEntriesForTx(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx_b,
+        1,
+    );
+    {
+        const page = try env.pool.pin(15_001);
+        defer env.pool.unpin(15_001, false);
+        try testing.expectEqual(page_mod.PageType.overflow, page.header.page_type);
+    }
+
+    rollbackOverflowReclaimEntriesForTx(&env.catalog, tx_a);
+    try commitOverflowReclaimEntriesForTx(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        tx_b,
+        1,
+    );
+
+    {
+        const page = try env.pool.pin(15_000);
+        defer env.pool.unpin(15_000, false);
+        try testing.expectEqual(page_mod.PageType.overflow, page.header.page_type);
+    }
+    {
+        const page = try env.pool.pin(15_001);
+        defer env.pool.unpin(15_001, false);
+        try testing.expectEqual(page_mod.PageType.free, page.header.page_type);
+    }
+    try testing.expect(env.catalog.overflow_reclaim_queue.isEmpty());
+}
+
+test "abort rollback prevents reclaim of live overflow chain" {
+    var env: TestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.catalog.overflow_page_allocator = try overflow_mod.PageIdAllocator.initWithBounds(16_000, 8);
+
+    {
+        var page = try PinnedMutationPage.pin(&env.pool, 16_000);
+        defer page.release();
+        OverflowPage.init(page.page);
+        try OverflowPage.writeChunk(page.page, "live", OverflowPage.null_page_id);
+        page.markDirty();
+    }
+
+    const aborted_tx: u64 = 51;
+    try env.catalog.overflow_reclaim_queue.enqueue(aborted_tx, 16_000);
+    rollbackOverflowReclaimEntriesForTx(&env.catalog, aborted_tx);
+
+    try commitOverflowReclaimEntriesForTx(
+        &env.catalog,
+        &env.pool,
+        &env.wal,
+        52,
+        1,
+    );
+
+    const page = try env.pool.pin(16_000);
+    defer env.pool.unpin(16_000, false);
+    try testing.expectEqual(page_mod.PageType.overflow, page.header.page_type);
 }
 
 test "update pushes undo entry" {

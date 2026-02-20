@@ -103,6 +103,19 @@ pub const ConnectionPool = struct {
         conn.checked_out = false;
     }
 
+    pub fn abortCheckin(self: *ConnectionPool, conn: *PoolConn) PoolError!void {
+        if (!conn.checked_out) return error.InvalidPoolConn;
+        if (conn.pinned) return error.PoolConnPinned;
+
+        conn.snapshot.deinit();
+        try self.runtime.tx_manager.abort(conn.tx_id);
+        try self.runtime.releaseQueryBuffers(conn.slot_index);
+        std.debug.assert(self.checked_out_count > 0);
+        self.checked_out_count -= 1;
+
+        conn.checked_out = false;
+    }
+
     pub fn pin(self: *ConnectionPool, conn: *PoolConn) PoolError!void {
         if (!conn.checked_out) return error.InvalidPoolConn;
         if (conn.pinned) return error.PoolConnPinned;
@@ -229,6 +242,34 @@ test "checkin releases slot for reuse" {
     var pool = ConnectionPool.init(&runtime);
     var first = try pool.checkout();
     try pool.checkin(&first);
+
+    var second = try pool.checkout();
+    defer pool.checkin(&second) catch {};
+    try std.testing.expectEqual(@as(u16, 0), second.slot_index);
+}
+
+test "abortCheckin aborts transaction and releases slot for reuse" {
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    const backing_memory = try std.testing.allocator.alloc(
+        u8,
+        256 * 1024 * 1024,
+    );
+    defer std.testing.allocator.free(backing_memory);
+
+    var runtime = try BootstrappedRuntime.init(
+        backing_memory,
+        disk.storage(),
+        .{ .max_query_slots = 1 },
+    );
+    defer runtime.deinit();
+
+    var pool = ConnectionPool.init(&runtime);
+    var first = try pool.checkout();
+    const tx = first.tx_id;
+    try pool.abortCheckin(&first);
+    try std.testing.expect(runtime.tx_manager.getState(tx).? == .aborted);
 
     var second = try pool.checkout();
     defer pool.checkin(&second) catch {};

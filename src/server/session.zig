@@ -13,6 +13,7 @@ const parser_mod = @import("../parser/parser.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
 const ast_mod = @import("../parser/ast.zig");
 const exec_mod = @import("../executor/executor.zig");
+const mutation_mod = @import("../executor/mutation.zig");
 const transport_mod = @import("transport.zig");
 const tiger_errors = @import("../tiger/error_taxonomy.zig");
 const row_mod = @import("../storage/row.zig");
@@ -139,13 +140,6 @@ pub const Session = struct {
                 try connection.writeResponse(boundary_msg);
                 continue;
             };
-            defer pool.checkin(&pool_conn) catch |err| {
-                std.log.err(
-                    "pool checkin failed: slot={d} err={s}",
-                    .{ pool_conn.slot_index, @errorName(err) },
-                );
-                @panic("pool checkin failed");
-            };
 
             const response = self.handleRequest(
                 pool,
@@ -159,9 +153,63 @@ pub const Session = struct {
                     class,
                     err,
                 );
+                mutation_mod.rollbackOverflowReclaimEntriesForTx(
+                    self.catalog,
+                    pool_conn.tx_id,
+                );
+                pool.abortCheckin(&pool_conn) catch |abort_err| {
+                    std.log.err(
+                        "pool abort checkin failed: slot={d} err={s}",
+                        .{ pool_conn.slot_index, @errorName(abort_err) },
+                    );
+                    @panic("pool abort checkin failed");
+                };
                 try connection.writeResponse(boundary_msg);
                 continue;
             };
+
+            if (response.is_query_error) {
+                mutation_mod.rollbackOverflowReclaimEntriesForTx(
+                    self.catalog,
+                    pool_conn.tx_id,
+                );
+                pool.abortCheckin(&pool_conn) catch |abort_err| {
+                    std.log.err(
+                        "pool abort checkin failed: slot={d} err={s}",
+                        .{ pool_conn.slot_index, @errorName(abort_err) },
+                    );
+                    @panic("pool abort checkin failed");
+                };
+            } else {
+                const tx_id = pool_conn.tx_id;
+                pool.checkin(&pool_conn) catch |checkin_err| {
+                    std.log.err(
+                        "pool checkin failed: slot={d} err={s}",
+                        .{ pool_conn.slot_index, @errorName(checkin_err) },
+                    );
+                    @panic("pool checkin failed");
+                };
+                mutation_mod.commitOverflowReclaimEntriesForTx(
+                    self.catalog,
+                    &self.runtime.pool,
+                    &self.runtime.wal,
+                    tx_id,
+                    1,
+                ) catch |reclaim_err| {
+                    var stream = std.io.fixedBufferStream(response_buf);
+                    const writer = stream.writer();
+                    writer.print(
+                        "ERR class={s} code={s}\n",
+                        .{
+                            @tagName(tiger_errors.classifyMutation(reclaim_err)),
+                            @errorName(reclaim_err),
+                        },
+                    ) catch return error.ResponseTooLarge;
+                    const boundary_msg = response_buf[0..stream.pos];
+                    try connection.writeResponse(boundary_msg);
+                    continue;
+                };
+            }
             std.debug.assert(response.bytes_written <= response_buf.len);
             try connection.writeResponse(
                 response_buf[0..response.bytes_written],

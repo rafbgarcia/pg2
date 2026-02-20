@@ -73,6 +73,17 @@ pub const default_region_end_page_id: u64 =
 pub const string_inline_threshold_bytes: usize = 1024;
 pub const reclaim_queue_capacity: usize = 256;
 
+pub const ReclaimEntryState = enum(u8) {
+    pending,
+    committed,
+};
+
+pub const ReclaimQueueEntry = struct {
+    first_page_id: u64,
+    tx_id: u64,
+    state: ReclaimEntryState,
+};
+
 pub const PageIdAllocator = struct {
     region_start_page_id: u64 = default_region_start_page_id,
     region_end_page_id: u64 = default_region_end_page_id, // exclusive
@@ -115,24 +126,83 @@ pub const PageIdAllocator = struct {
 };
 
 pub const ReclaimQueue = struct {
-    entries: [reclaim_queue_capacity]u64 = [_]u64{0} ** reclaim_queue_capacity,
+    entries: [reclaim_queue_capacity]ReclaimQueueEntry = [_]ReclaimQueueEntry{
+        .{
+            .first_page_id = 0,
+            .tx_id = 0,
+            .state = .pending,
+        },
+    } ** reclaim_queue_capacity,
     head: usize = 0,
     tail: usize = 0,
     len: usize = 0,
 
-    pub fn enqueue(self: *ReclaimQueue, first_page_id: u64) OverflowReclaimError!void {
+    pub fn enqueue(self: *ReclaimQueue, tx_id: u64, first_page_id: u64) OverflowReclaimError!void {
+        if (tx_id == 0) return error.InvalidChainRoot;
         if (first_page_id == 0) return error.InvalidChainRoot;
         if (self.contains(first_page_id)) return error.DuplicateChainRoot;
         if (self.len >= reclaim_queue_capacity) return error.QueueFull;
-        self.entries[self.tail] = first_page_id;
+        self.entries[self.tail] = .{
+            .first_page_id = first_page_id,
+            .tx_id = tx_id,
+            .state = .pending,
+        };
         self.tail = (self.tail + 1) % reclaim_queue_capacity;
         self.len += 1;
     }
 
-    pub fn dequeue(self: *ReclaimQueue) OverflowReclaimError!u64 {
+    pub fn commitTx(self: *ReclaimQueue, tx_id: u64) void {
+        if (tx_id == 0 or self.len == 0) return;
+        var idx = self.head;
+        var remaining = self.len;
+        while (remaining > 0) : (remaining -= 1) {
+            if (self.entries[idx].tx_id == tx_id and
+                self.entries[idx].state == .pending)
+            {
+                self.entries[idx].state = .committed;
+            }
+            idx = (idx + 1) % reclaim_queue_capacity;
+        }
+    }
+
+    pub fn abortTx(self: *ReclaimQueue, tx_id: u64) void {
+        if (tx_id == 0 or self.len == 0) return;
+
+        var new_entries: [reclaim_queue_capacity]ReclaimQueueEntry = [_]ReclaimQueueEntry{
+            .{
+                .first_page_id = 0,
+                .tx_id = 0,
+                .state = .pending,
+            },
+        } ** reclaim_queue_capacity;
+        var new_len: usize = 0;
+        var idx = self.head;
+        var remaining = self.len;
+        while (remaining > 0) : (remaining -= 1) {
+            const entry = self.entries[idx];
+            if (!(entry.tx_id == tx_id and entry.state == .pending)) {
+                new_entries[new_len] = entry;
+                new_len += 1;
+            }
+            idx = (idx + 1) % reclaim_queue_capacity;
+        }
+
+        self.entries = new_entries;
+        self.head = 0;
+        self.len = new_len;
+        self.tail = new_len % reclaim_queue_capacity;
+    }
+
+    pub fn dequeueCommitted(self: *ReclaimQueue) OverflowReclaimError!?u64 {
         if (self.len == 0) return error.QueueEmpty;
-        const out = self.entries[self.head];
-        self.entries[self.head] = 0;
+        const entry = self.entries[self.head];
+        if (entry.state != .committed) return null;
+        const out = entry.first_page_id;
+        self.entries[self.head] = .{
+            .first_page_id = 0,
+            .tx_id = 0,
+            .state = .pending,
+        };
         self.head = (self.head + 1) % reclaim_queue_capacity;
         self.len -= 1;
         return out;
@@ -147,7 +217,7 @@ pub const ReclaimQueue = struct {
         var idx = self.head;
         var remaining = self.len;
         while (remaining > 0) : (remaining -= 1) {
-            if (self.entries[idx] == first_page_id) return true;
+            if (self.entries[idx].first_page_id == first_page_id) return true;
             idx = (idx + 1) % reclaim_queue_capacity;
         }
         return false;
@@ -321,11 +391,36 @@ test "page-id allocator rejects invalid region" {
 
 test "reclaim queue is FIFO and rejects duplicates" {
     var queue: ReclaimQueue = .{};
-    try queue.enqueue(50);
-    try queue.enqueue(60);
-    try std.testing.expectError(error.DuplicateChainRoot, queue.enqueue(50));
-    try std.testing.expectEqual(@as(u64, 50), try queue.dequeue());
-    try std.testing.expectEqual(@as(u64, 60), try queue.dequeue());
+    try queue.enqueue(10, 50);
+    try queue.enqueue(10, 60);
+    try std.testing.expectError(error.DuplicateChainRoot, queue.enqueue(10, 50));
+    queue.commitTx(10);
+    try std.testing.expectEqual(@as(u64, 50), (try queue.dequeueCommitted()).?);
+    try std.testing.expectEqual(@as(u64, 60), (try queue.dequeueCommitted()).?);
     try std.testing.expect(queue.isEmpty());
-    try std.testing.expectError(error.QueueEmpty, queue.dequeue());
+    try std.testing.expectError(error.QueueEmpty, queue.dequeueCommitted());
+}
+
+test "reclaim queue abort removes only pending entries for tx" {
+    var queue: ReclaimQueue = .{};
+    try queue.enqueue(11, 101);
+    try queue.enqueue(12, 102);
+    queue.commitTx(12);
+    queue.abortTx(11);
+
+    try std.testing.expectEqual(@as(usize, 1), queue.len);
+    try std.testing.expectEqual(@as(u64, 102), (try queue.dequeueCommitted()).?);
+    try std.testing.expect(queue.isEmpty());
+}
+
+test "reclaim queue blocks dequeue when head tx is pending" {
+    var queue: ReclaimQueue = .{};
+    try queue.enqueue(21, 201);
+    try queue.enqueue(22, 202);
+    queue.commitTx(22);
+
+    try std.testing.expectEqual(@as(?u64, null), try queue.dequeueCommitted());
+    queue.commitTx(21);
+    try std.testing.expectEqual(@as(u64, 201), (try queue.dequeueCommitted()).?);
+    try std.testing.expectEqual(@as(u64, 202), (try queue.dequeueCommitted()).?);
 }
