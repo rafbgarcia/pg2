@@ -13,7 +13,6 @@ pg2 has no users yet. Hence, no need to worry about breaking changes. Major refa
 The `docs/releases/<latest-version>.md` file contains the current work in progress.
 
 1. Read that file to understand what has to be done next. Proceed and git commit as needed.
-2. Update/create docs/gates files as needed.
 3. End the session with a give a high level overview of what was done and what's your recommended next action
 
 ### Current Focus
@@ -82,7 +81,3 @@ zig build sim          # Run deterministic simulation tests (takes a seed argume
 - **Tests**: Every module has inline tests. Simulation tests live in `src/simulator/`. Prefer property-based checks over example-based checks where possible.
 - **Page size**: 8KB (matching PostgreSQL, allows direct comparison and reuse of research).
 - **File format**: All on-disk formats are explicitly versioned from day one.
-
-## Quality Gates
-
-All Quality Gates and database-specific robustness rules live only in `docs/QUALITY_GATES.md`.
