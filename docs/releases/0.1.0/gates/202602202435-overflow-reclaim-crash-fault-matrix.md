@@ -1,7 +1,7 @@
 # Quality Gate Artifact: 202602202435-overflow-reclaim-crash-fault-matrix
 
 - Artifact ID: `202602202435-overflow-reclaim-crash-fault-matrix`
-- Commit: `59e1354b819ac5d84bcb0f7f9fc8b6713f887dc1`
+- Commit: `95a1e4d531c6b6d898c50580835e5a7761181cac`
 - Title: `overflow reclaim crash/fault matrix coverage`
 - Scope: `Adds server-path crash/restart matrix coverage around commit-hook reclaim semantics and captures a durability gap where replay applies only durable reclaim WAL records.`
 
