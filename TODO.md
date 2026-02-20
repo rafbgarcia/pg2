@@ -25,12 +25,13 @@ Release-readiness gates live in `V1_READINESS_CHECKLIST.md`.
 - [ ] Milestone 2: Transactional correctness hardening (MVCC + recovery)
   - Scope: Expand correctness guarantees for conflict handling, rollback paths, and WAL/undo crash consistency under deterministic faults.
   - Deliverables:
-    - Additional tests for write-write conflicts and rollback edge cases.
-    - Fault-injection tests for crash/restart during WAL+undo interactions.
-    - Explicit invariant checks/documentation for recovery ordering and visibility rules.
+    - [ ] Additional tests for write-write conflicts.
+    - [x] Rollback edge-case deterministic tests.
+    - [x] Fault-injection tests for crash/restart during WAL+undo interactions.
+    - [x] Explicit invariant checks/documentation for recovery ordering and visibility rules.
   - Done when:
-    - `zig build test` and `zig build sim` include new regression cases.
-    - Replay after crash is deterministic and state-consistent across seeds.
+    - [x] `zig build test` and `zig build sim` include new regression cases.
+    - [x] Replay after crash is deterministic and state-consistent across seeds.
 
 - [ ] Milestone 3: Planner/executor introspection expansion
   - Scope: Improve `inspect` output to explain physical decisions (join strategy/order, materialization, sort/aggregation choices) in plain language.

@@ -45,9 +45,9 @@ Roadmap sequencing lives in `TODO.md`.
   - [ ] Restrict/cascade/set-null behavior has deterministic E2E coverage.
 
 - [ ] Gate 5: MVCC + recovery correctness hardening
-  - [ ] Crash/restart tests cover WAL + undo interaction points.
-  - [ ] Rollback edge cases covered with deterministic seeds.
-  - [ ] Invariant docs updated for visibility and recovery ordering.
+  - [x] Crash/restart tests cover WAL + undo interaction points.
+  - [x] Rollback edge cases covered with deterministic seeds.
+  - [x] Invariant docs updated for visibility and recovery ordering.
   - [ ] Simulator crash matrix executes real recovery assertions.
 
 - [ ] Gate 6: Backup/restore minimum viability

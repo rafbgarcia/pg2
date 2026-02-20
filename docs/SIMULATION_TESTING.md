@@ -165,6 +165,16 @@ After every tick (or every N ticks for expensive checks), the simulator verifies
 4. **Replication correctness**: replicas eventually converge to the primary's committed state.
 5. **No lost writes**: every acknowledged commit is durable (survives crashes after the acknowledgment).
 
+Current deterministic matrix scenarios also enforce these concrete recovery and
+visibility invariants:
+
+1. **Rollback visibility edge**: an aborted head version does not become visible,
+   and readers consistently resolve to the correct prior version.
+2. **WAL+undo crash consistency**: when a mutation fails before WAL durability,
+   pre-crash undo-based visibility matches post-restart persisted row visibility.
+3. **Replay determinism across seed sets**: running the same scenario twice with
+   the same seed must produce the same signature.
+
 ## Running Simulations
 
 ```bash
