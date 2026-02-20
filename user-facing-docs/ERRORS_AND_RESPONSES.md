@@ -40,6 +40,7 @@ Current error classes:
 - For `ERR tokenize` or `ERR parse`: treat as client/query-shape errors and fix the query text.
 - For `ERR query`: inspect message details (for example missing model/column, unsupported function, RI violation, capacity limits).
 - Failed queries are fail-closed for transaction-scoped overflow reclaim intents: pending reclaim entries from that request are aborted, not reclaimed.
+- Overflow reclaim backlog progression is deterministic: at most one committed overflow chain is reclaimed per successful request boundary.
 - For `ERR class=resource_exhausted ...`: retry may succeed after load decreases or capacity is adjusted.
 - For `ERR class=corruption ...`: treat as operational incident.
 - For `ERR class=fatal ...`: treat as deterministic invalid operation/configuration unless docs state retry behavior.
