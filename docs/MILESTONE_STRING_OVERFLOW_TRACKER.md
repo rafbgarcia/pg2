@@ -48,7 +48,7 @@ This milestone is done only when all conditions below are true:
 
 ## Known Test State
 
-- `zig build test` passes for this increment (includes overflow lifecycle recovery replay unit + server E2E idempotence coverage).
+- `zig build test` passes for this increment (includes overflow lifecycle recovery replay unit coverage for aborted tx lifecycle records).
 - Server E2E string-overflow spec file was renamed for clarity: `src/server/e2e/overflow.zig` -> `src/server/e2e/string_overflow.zig`.
 
 ## Next Logical Chunk
@@ -56,11 +56,13 @@ This milestone is done only when all conditions below are true:
 1. Durable replay integration (completed in `505fff1`):
    - Added `src/storage/recovery.zig` replay path for committed/legacy-replayable overflow lifecycle WAL.
    - Added crash/restart validation through server session E2E and replay idempotence checks.
-2. Tx-level abort semantics (open):
-   - Define and test overflow lifecycle behavior under transaction abort/rollback with explicit undo/reclaim ordering.
-   - Acceptance:
-     - Deterministic tests cover abort after create, abort after relink intent, and abort after unlink enqueue.
-     - Tests assert no leaked reachable chains and no reclaimed-live-chain behavior.
+2. Tx-level abort semantics (in progress):
+   - Recovery replay behavior for aborted overflow lifecycle WAL is now covered:
+     - abort after create,
+     - abort after relink intent,
+     - abort after unlink/reclaim intent.
+   - Remaining gap:
+     - explicit mutation-path rollback ordering and reclaim-queue rollback semantics are still open.
 3. Queue-drain budget semantics (open):
    - Define/document expected backlog progression when one mutation unlinks multiple overflow chains.
    - Acceptance:
@@ -78,10 +80,11 @@ Completed:
 5. Inspect-level reclaim backlog/throughput visibility.
 6. Recovery replay application for overflow lifecycle WAL with idempotent reclaim semantics.
 7. Server E2E overflow test module rename for explicit string-overflow scope.
+8. Recovery replay abort matrix tests for overflow create/relink/unlink/reclaim lifecycle records (aborted tx records are non-replayable).
 
 Next session should execute in order:
 
-1. Add tx-abort lifecycle matrix tests for overflow create/relink/unlink/reclaim ordering guarantees.
+1. Define and implement mutation-path rollback contract for overflow reclaim queue entries (abort must not allow reclaim of live chains).
 2. Lock reclaim budget semantics with deterministic multi-chain unlink tests + inspect assertions.
 3. Decide and implement strict tx-marker replay policy (current replay supports legacy mutation WAL without tx begin/commit markers to avoid dropping replay).
 4. Update quality-gate artifact(s), `docs/quality-gates/README.md`, and user-facing docs for any behavior changes.
@@ -101,7 +104,8 @@ Use these first in a new session:
 8. `git show --name-only --stat ad8ccd7`
 9. `git show --name-only --stat fd81f61`
 10. `git show --name-only --stat c5548a0`
-11. `rg -n "overflow_chain_create|overflow_chain_relink|overflow_chain_unlink|overflow_chain_reclaim|replay|recover" src`
-12. `rg -n "INSPECT overflow|overflow_reclaim_stats|snapshotOverflowReclaimStats|overflow_reclaim_queue" src docs user-facing-docs`
-13. Run the AGENTS placeholder hygiene check command.
-14. Continue from "Next Logical Chunk" acceptance criteria above.
+11. `git show --name-only --stat TBD (this increment commit)`
+12. `rg -n "overflow_chain_create|overflow_chain_relink|overflow_chain_unlink|overflow_chain_reclaim|replay|recover|tx_abort" src`
+13. `rg -n "INSPECT overflow|overflow_reclaim_stats|snapshotOverflowReclaimStats|overflow_reclaim_queue" src docs user-facing-docs`
+14. Run the AGENTS placeholder hygiene check command.
+15. Continue from "Next Logical Chunk" acceptance criteria above.

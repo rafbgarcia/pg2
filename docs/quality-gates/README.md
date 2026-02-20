@@ -28,3 +28,7 @@ rg -n 'Commit: .*TBD|Commit: <pending>|<sha>|<answer>|<none or details>' docs/qu
 ```
 
 Expected matches should only appear in `docs/quality-gates/TEMPLATE.md`.
+
+## Recent Artifacts
+
+- `docs/quality-gates/202602201830-overflow-abort-replay-matrix.md`

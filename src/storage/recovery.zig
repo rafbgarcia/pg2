@@ -159,6 +159,26 @@ fn decodeU64(payload: []const u8, offset: usize) RecoveryError!u64 {
     return std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[offset .. offset + 8]).*);
 }
 
+fn encodeOverflowChainRecordMetaForTest(
+    out: []u8,
+    meta: OverflowChainRecordMeta,
+) void {
+    std.debug.assert(out.len >= 16);
+    @memcpy(out[0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, meta.first_page_id)));
+    @memcpy(out[8..12], std.mem.asBytes(&std.mem.nativeToLittle(u32, meta.page_count)));
+    @memcpy(out[12..16], std.mem.asBytes(&std.mem.nativeToLittle(u32, meta.payload_bytes)));
+}
+
+fn encodeOverflowRelinkRecordMetaForTest(
+    out: []u8,
+    old_first_page_id: u64,
+    new_first_page_id: u64,
+) void {
+    std.debug.assert(out.len >= 16);
+    @memcpy(out[0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, old_first_page_id)));
+    @memcpy(out[8..16], std.mem.asBytes(&std.mem.nativeToLittle(u64, new_first_page_id)));
+}
+
 fn applyOverflowReclaimIdempotent(
     pool: *BufferPool,
     overflow_allocator: *const OverflowPageIdAllocator,
@@ -345,4 +365,186 @@ test "replayCommittedOverflowLifecycle reclaims chain and is idempotent" {
     const root_page = try pool.pin(first_overflow_root);
     defer pool.unpin(first_overflow_root, false);
     try std.testing.expectEqual(PageType.free, root_page.header.page_type);
+}
+
+test "replayCommittedOverflowLifecycle skips aborted tx after overflow create" {
+    const disk_mod = @import("../simulator/disk.zig");
+
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 8);
+    defer pool.deinit();
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+
+    const overflow_root: u64 = 21_000;
+    var allocator = try OverflowPageIdAllocator.initWithBounds(overflow_root, 8);
+
+    {
+        const page = try pool.pin(overflow_root);
+        overflow_mod.OverflowPage.init(page);
+        try overflow_mod.OverflowPage.writeChunk(page, "live", overflow_mod.OverflowPage.null_page_id);
+        pool.unpin(overflow_root, true);
+    }
+
+    const tx_id: u64 = 91;
+    var create_payload: [16]u8 = undefined;
+    encodeOverflowChainRecordMetaForTest(
+        create_payload[0..],
+        .{
+            .first_page_id = overflow_root,
+            .page_count = 1,
+            .payload_bytes = 4,
+        },
+    );
+    _ = try wal.append(tx_id, .overflow_chain_create, overflow_root, create_payload[0..]);
+    _ = try wal.abortTx(tx_id);
+    try wal.flush();
+
+    var records: [64]Record = undefined;
+    var payload: [16 * 1024]u8 = undefined;
+    const stats = try replayCommittedOverflowLifecycle(
+        &pool,
+        &wal,
+        &allocator,
+        records[0..],
+        payload[0..],
+    );
+    try std.testing.expectEqual(@as(usize, 0), stats.overflow_reclaim_records_seen);
+    try std.testing.expectEqual(@as(usize, 0), stats.overflow_reclaim_applied);
+
+    const root_page = try pool.pin(overflow_root);
+    defer pool.unpin(overflow_root, false);
+    try std.testing.expectEqual(PageType.overflow, root_page.header.page_type);
+}
+
+test "replayCommittedOverflowLifecycle skips aborted tx after overflow relink intent" {
+    const disk_mod = @import("../simulator/disk.zig");
+
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 8);
+    defer pool.deinit();
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+
+    const old_root: u64 = 22_000;
+    const new_root: u64 = 22_001;
+    var allocator = try OverflowPageIdAllocator.initWithBounds(old_root, 8);
+
+    {
+        const page = try pool.pin(old_root);
+        overflow_mod.OverflowPage.init(page);
+        try overflow_mod.OverflowPage.writeChunk(page, "old", overflow_mod.OverflowPage.null_page_id);
+        pool.unpin(old_root, true);
+    }
+    {
+        const page = try pool.pin(new_root);
+        overflow_mod.OverflowPage.init(page);
+        try overflow_mod.OverflowPage.writeChunk(page, "new", overflow_mod.OverflowPage.null_page_id);
+        pool.unpin(new_root, true);
+    }
+
+    const tx_id: u64 = 92;
+    var create_payload: [16]u8 = undefined;
+    encodeOverflowChainRecordMetaForTest(
+        create_payload[0..],
+        .{
+            .first_page_id = new_root,
+            .page_count = 1,
+            .payload_bytes = 3,
+        },
+    );
+    _ = try wal.append(tx_id, .overflow_chain_create, new_root, create_payload[0..]);
+    var relink_payload: [16]u8 = undefined;
+    encodeOverflowRelinkRecordMetaForTest(relink_payload[0..], old_root, new_root);
+    _ = try wal.append(tx_id, .overflow_chain_relink, 100, relink_payload[0..]);
+    _ = try wal.abortTx(tx_id);
+    try wal.flush();
+
+    var records: [64]Record = undefined;
+    var payload: [16 * 1024]u8 = undefined;
+    const stats = try replayCommittedOverflowLifecycle(
+        &pool,
+        &wal,
+        &allocator,
+        records[0..],
+        payload[0..],
+    );
+    try std.testing.expectEqual(@as(usize, 0), stats.overflow_reclaim_records_seen);
+    try std.testing.expectEqual(@as(usize, 0), stats.overflow_reclaim_applied);
+
+    const old_page = try pool.pin(old_root);
+    defer pool.unpin(old_root, false);
+    try std.testing.expectEqual(PageType.overflow, old_page.header.page_type);
+
+    const new_page = try pool.pin(new_root);
+    defer pool.unpin(new_root, false);
+    try std.testing.expectEqual(PageType.overflow, new_page.header.page_type);
+}
+
+test "replayCommittedOverflowLifecycle skips aborted tx after overflow unlink enqueue and reclaim record" {
+    const disk_mod = @import("../simulator/disk.zig");
+
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 8);
+    defer pool.deinit();
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+
+    const overflow_root: u64 = 23_000;
+    var allocator = try OverflowPageIdAllocator.initWithBounds(overflow_root, 8);
+
+    {
+        const page = try pool.pin(overflow_root);
+        overflow_mod.OverflowPage.init(page);
+        try overflow_mod.OverflowPage.writeChunk(page, "livechain", overflow_mod.OverflowPage.null_page_id);
+        pool.unpin(overflow_root, true);
+    }
+
+    const tx_id: u64 = 93;
+    var unlink_payload: [16]u8 = undefined;
+    encodeOverflowChainRecordMetaForTest(
+        unlink_payload[0..],
+        .{
+            .first_page_id = overflow_root,
+            .page_count = 0,
+            .payload_bytes = 0,
+        },
+    );
+    _ = try wal.append(tx_id, .overflow_chain_unlink, overflow_root, unlink_payload[0..]);
+
+    var reclaim_payload: [16]u8 = undefined;
+    encodeOverflowChainRecordMetaForTest(
+        reclaim_payload[0..],
+        .{
+            .first_page_id = overflow_root,
+            .page_count = 1,
+            .payload_bytes = 0,
+        },
+    );
+    _ = try wal.append(tx_id, .overflow_chain_reclaim, overflow_root, reclaim_payload[0..]);
+    _ = try wal.abortTx(tx_id);
+    try wal.flush();
+
+    var records: [64]Record = undefined;
+    var payload: [16 * 1024]u8 = undefined;
+    const stats = try replayCommittedOverflowLifecycle(
+        &pool,
+        &wal,
+        &allocator,
+        records[0..],
+        payload[0..],
+    );
+    try std.testing.expectEqual(@as(usize, 0), stats.overflow_reclaim_records_seen);
+    try std.testing.expectEqual(@as(usize, 0), stats.overflow_reclaim_applied);
+    try std.testing.expectEqual(@as(usize, 0), stats.overflow_reclaim_idempotent_skips);
+
+    const root_page = try pool.pin(overflow_root);
+    defer pool.unpin(overflow_root, false);
+    try std.testing.expectEqual(PageType.overflow, root_page.header.page_type);
 }
