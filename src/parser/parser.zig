@@ -787,6 +787,9 @@ fn parseSchemaField(
         }
         if (ct == .kw_default) {
             pos += 1;
+            if (pos < tokens.count and tokens.tokens[pos].token_type == .comma) {
+                pos += 1;
+            }
             if (pos < tokens.count) pos += 1; // default value token
             continue;
         }
@@ -1117,6 +1120,17 @@ test "parse schema definition" {
     const root = result.ast.getNode(result.ast.root);
     const schema = result.ast.getNode(root.data.unary);
     try testing.expectEqual(NodeTag.schema_def, schema.tag);
+}
+
+test "parse schema field default accepts comma-separated literal" {
+    const source =
+        \\User {
+        \\  field(status, string, notNull, default, "pending")
+        \\}
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(!result.has_error);
 }
 
 test "parse let binding" {

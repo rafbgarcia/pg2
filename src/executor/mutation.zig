@@ -156,6 +156,7 @@ pub fn executeInsert(
     // Build values from assignments.
     var values: [max_assignments]Value =
         [_]Value{.{ .null_value = {} }} ** max_assignments;
+    var assigned_columns: [max_assignments]bool = [_]bool{false} ** max_assignments;
     try buildRowFromAssignments(
         tree,
         tokens,
@@ -163,6 +164,13 @@ pub fn executeInsert(
         schema,
         first_assignment_node,
         &values,
+        &assigned_columns,
+    );
+    applyColumnDefaultsForInsert(
+        catalog,
+        model_id,
+        values[0..schema.column_count],
+        assigned_columns[0..schema.column_count],
     );
     try enforceInsertUniqueness(
         catalog,
@@ -1493,8 +1501,10 @@ pub fn buildRowFromAssignments(
     schema: *const RowSchema,
     first_assignment: NodeIndex,
     out_values: []Value,
+    out_assigned: []bool,
 ) MutationError!void {
     std.debug.assert(out_values.len >= schema.column_count);
+    std.debug.assert(out_assigned.len >= schema.column_count);
 
     var current = first_assignment;
     while (current != null_node) {
@@ -1516,7 +1526,27 @@ pub fn buildRowFromAssignments(
         ) catch |e| return mapFilterError(e);
 
         out_values[col_idx] = val;
+        out_assigned[col_idx] = true;
         current = node.next;
+    }
+}
+
+fn applyColumnDefaultsForInsert(
+    catalog: *const Catalog,
+    model_id: ModelId,
+    values: []Value,
+    assigned_columns: []const bool,
+) void {
+    std.debug.assert(model_id < catalog.model_count);
+    const model = &catalog.models[model_id];
+    std.debug.assert(values.len >= model.column_count);
+    std.debug.assert(assigned_columns.len >= model.column_count);
+
+    var col_id: u16 = 0;
+    while (col_id < model.column_count) : (col_id += 1) {
+        if (assigned_columns[col_id]) continue;
+        const default_value = catalog.getColumnDefault(model_id, col_id) orelse continue;
+        values[col_id] = default_value;
     }
 }
 

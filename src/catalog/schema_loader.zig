@@ -9,6 +9,7 @@ const std = @import("std");
 const catalog_mod = @import("catalog.zig");
 const ast_mod = @import("../parser/ast.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
+const row_mod = @import("../storage/row.zig");
 
 const Catalog = catalog_mod.Catalog;
 const ModelId = catalog_mod.ModelId;
@@ -20,6 +21,8 @@ const NodeIndex = ast_mod.NodeIndex;
 const null_node = ast_mod.null_node;
 const TokenType = tokenizer_mod.TokenType;
 const TokenizeResult = tokenizer_mod.TokenizeResult;
+const ColumnType = row_mod.ColumnType;
+const Value = row_mod.Value;
 const null_token_index: u16 = std.math.maxInt(u16);
 
 pub const LoadError = error{
@@ -167,6 +170,8 @@ fn loadField(
     const type_tok_idx = node.extra;
     var nullable = true;
     var is_primary_key = false;
+    var has_default = false;
+    var default_token_idx: u16 = null_token_index;
     var scan = type_tok_idx + 1;
     var scanned_tokens: usize = 0;
     while (scan < tokens.count and scanned_tokens < max_constraint_scan_tokens) : (scanned_tokens += 1) {
@@ -181,7 +186,15 @@ fn loadField(
             scan += 1;
         } else if (tt == .kw_default) {
             scan += 1;
-            if (scan < tokens.count) scan += 1; // skip default value
+            if (scan < tokens.count and tokens.tokens[scan].token_type == .comma) {
+                scan += 1;
+            }
+            if (scan >= tokens.count) return error.InvalidSchema;
+            const literal_tt = tokens.tokens[scan].token_type;
+            if (!isLiteralToken(literal_tt)) return error.InvalidSchema;
+            has_default = true;
+            default_token_idx = scan;
+            scan += 1;
         } else if (tt == .right_paren) {
             scan += 1;
             break;
@@ -199,6 +212,16 @@ fn loadField(
     const col_id = try catalog.addColumn(model_id, name, col_type, nullable);
     if (is_primary_key) {
         catalog.setColumnPrimaryKey(model_id, col_id);
+    }
+    if (has_default) {
+        const default_value = try parseColumnDefaultValue(
+            tokens,
+            source,
+            default_token_idx,
+            col_type,
+            nullable,
+        );
+        try catalog.setColumnDefault(model_id, col_id, default_value);
     }
 }
 
@@ -403,6 +426,79 @@ fn tokenToColumnType(tok_type: TokenType) ?@import("../storage/row.zig").ColumnT
     };
 }
 
+fn isLiteralToken(tt: TokenType) bool {
+    return switch (tt) {
+        .integer_literal,
+        .float_literal,
+        .string_literal,
+        .true_literal,
+        .false_literal,
+        .null_literal,
+        => true,
+        else => false,
+    };
+}
+
+fn parseColumnDefaultValue(
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    token_idx: u16,
+    column_type: ColumnType,
+    nullable: bool,
+) LoadError!Value {
+    std.debug.assert(token_idx < tokens.count);
+    const tok = tokens.tokens[token_idx];
+    const text = tokens.getText(token_idx, source);
+
+    if (tok.token_type == .null_literal) {
+        if (!nullable) return error.InvalidSchema;
+        return .{ .null_value = {} };
+    }
+
+    return switch (column_type) {
+        .bigint => switch (tok.token_type) {
+            .integer_literal => Value{
+                .bigint = std.fmt.parseInt(i64, text, 10) catch return error.InvalidSchema,
+            },
+            else => error.InvalidSchema,
+        },
+        .int => switch (tok.token_type) {
+            .integer_literal => blk: {
+                const parsed = std.fmt.parseInt(i64, text, 10) catch return error.InvalidSchema;
+                const narrowed = std.math.cast(i32, parsed) orelse return error.InvalidSchema;
+                break :blk Value{ .int = narrowed };
+            },
+            else => error.InvalidSchema,
+        },
+        .float => switch (tok.token_type) {
+            .integer_literal, .float_literal => Value{
+                .float = std.fmt.parseFloat(f64, text) catch return error.InvalidSchema,
+            },
+            else => error.InvalidSchema,
+        },
+        .boolean => switch (tok.token_type) {
+            .true_literal => Value{ .boolean = true },
+            .false_literal => Value{ .boolean = false },
+            else => error.InvalidSchema,
+        },
+        .string => switch (tok.token_type) {
+            .string_literal => blk: {
+                if (text.len < 2 or text[0] != '"' or text[text.len - 1] != '"') {
+                    return error.InvalidSchema;
+                }
+                break :blk Value{ .string = text[1 .. text.len - 1] };
+            },
+            else => error.InvalidSchema,
+        },
+        .timestamp => switch (tok.token_type) {
+            .integer_literal => Value{
+                .timestamp = std.fmt.parseInt(i64, text, 10) catch return error.InvalidSchema,
+            },
+            else => error.InvalidSchema,
+        },
+    };
+}
+
 // --- Tests ---
 
 const testing = std.testing;
@@ -432,6 +528,48 @@ test "load simple schema" {
     try testing.expect(!catalog.models[uid].columns[0].nullable);
     try testing.expect(!catalog.models[uid].columns[1].nullable); // notNull
     try testing.expect(catalog.models[uid].columns[2].nullable); // default nullable
+}
+
+test "load schema parses typed column defaults" {
+    const source =
+        \\User {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(plan, string, notNull, default, "free")
+        \\  field(login_count, int, notNull, default, 0)
+        \\  field(enabled, boolean, notNull, default, true)
+        \\}
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const parsed = parser_mod.parse(&tokens, source);
+    try testing.expect(!parsed.has_error);
+
+    var catalog = Catalog{};
+    try loadSchema(&catalog, &parsed.ast, &tokens, source);
+
+    const plan_default = catalog.getColumnDefault(0, 1).?;
+    const count_default = catalog.getColumnDefault(0, 2).?;
+    const enabled_default = catalog.getColumnDefault(0, 3).?;
+    try testing.expectEqualSlices(u8, "free", plan_default.string);
+    try testing.expectEqual(@as(i32, 0), count_default.int);
+    try testing.expect(enabled_default.boolean);
+}
+
+test "load schema rejects non-null column default null" {
+    const source =
+        \\User {
+        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(name, string, notNull, default, null)
+        \\}
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const parsed = parser_mod.parse(&tokens, source);
+    try testing.expect(!parsed.has_error);
+
+    var catalog = Catalog{};
+    try testing.expectError(
+        error.InvalidSchema,
+        loadSchema(&catalog, &parsed.ast, &tokens, source),
+    );
 }
 
 test "load schema rejects belongsTo without explicit RI config" {

@@ -64,7 +64,7 @@ When surfaced through `ERR query: insert failed; class=<x>; code=<CodeName>`:
 - `DuplicateKey` (`fatal`):
   - insert conflicts with an existing primary/unique key.
 - `NullNotAllowed` (`fatal`):
-  - a required `notNull` column is omitted or null at insert time.
+  - a required `notNull` column remains null at insert time (for example omitted without a default, or explicitly set to `null`).
 - `TypeMismatch` (`fatal`):
   - assigned value type does not match the column type.
 - `ColumnNotFound` (`fatal`):

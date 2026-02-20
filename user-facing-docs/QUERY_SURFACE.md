@@ -10,6 +10,7 @@ Status labels:
 ## Schema
 
 - `supported`: model and field declarations (`field(...)`) through schema definitions.
+- `supported`: field defaults via `default` literal in schema definitions (for example `field(status, string, notNull, default, "pending")`).
 - `supported`: `reference(...)` metadata with explicit RI mode.
 - `supported`: fail-closed RI configuration for unsupported referential actions (`set default` rejected).
 - `supported`: maximum `128` total fields (columns) per model, including primary key and reference columns; model definitions above this limit fail closed.
@@ -17,6 +18,7 @@ Status labels:
 ## CRUD
 
 - `supported`: `insert(...)`
+- `supported`: omitted `insert(...)` fields use schema defaults when declared; explicitly assigned `null` remains `null` and does not trigger defaults.
 - `supported`: `where(...) |> update(...)` including row-growth update flow.
 - `supported`: `where(...) |> delete`
 - `supported`: model scan reads and filtered reads with explicit returning blocks (for example `User { id }`, `User |> where(...) { id }`).

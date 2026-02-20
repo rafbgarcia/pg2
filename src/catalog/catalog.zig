@@ -91,6 +91,17 @@ pub const ScopeInfo = struct {
     ast_first_op: u16 = 0,
 };
 
+pub const ColumnDefaultKind = enum(u8) {
+    none,
+    null_value,
+    bigint,
+    int,
+    float,
+    boolean,
+    string,
+    timestamp,
+};
+
 pub const ColumnInfo = struct {
     name_offset: u32,
     name_len: u16,
@@ -98,6 +109,14 @@ pub const ColumnInfo = struct {
     nullable: bool,
     is_primary_key: bool = false,
     has_default: bool = false,
+    default_kind: ColumnDefaultKind = .none,
+    default_bigint: i64 = 0,
+    default_int: i32 = 0,
+    default_float: f64 = 0,
+    default_boolean: bool = false,
+    default_string_offset: u32 = 0,
+    default_string_len: u16 = 0,
+    default_timestamp: i64 = 0,
 };
 
 pub const ModelInfo = struct {
@@ -640,6 +659,69 @@ pub const Catalog = struct {
         std.debug.assert(col_id < model.column_count);
         model.columns[col_id].is_primary_key = true;
     }
+
+    /// Set a typed default value for a column.
+    pub fn setColumnDefault(
+        self: *Catalog,
+        model_id: ModelId,
+        col_id: ColumnId,
+        value: Value,
+    ) CatalogError!void {
+        if (self.sealed) return error.CatalogSealed;
+        std.debug.assert(model_id < self.model_count);
+        const model = &self.models[model_id];
+        std.debug.assert(col_id < model.column_count);
+        var col = &model.columns[col_id];
+
+        col.has_default = true;
+        col.default_kind = switch (value) {
+            .null_value => .null_value,
+            .bigint => .bigint,
+            .int => .int,
+            .float => .float,
+            .boolean => .boolean,
+            .string => .string,
+            .timestamp => .timestamp,
+        };
+
+        switch (value) {
+            .null_value => {},
+            .bigint => |v| col.default_bigint = v,
+            .int => |v| col.default_int = v,
+            .float => |v| col.default_float = v,
+            .boolean => |v| col.default_boolean = v,
+            .string => |v| {
+                const stored = try self.storeName(v);
+                col.default_string_offset = stored.offset;
+                col.default_string_len = stored.len;
+            },
+            .timestamp => |v| col.default_timestamp = v,
+        }
+    }
+
+    /// Resolve a column's default value into row value form.
+    pub fn getColumnDefault(
+        self: *const Catalog,
+        model_id: ModelId,
+        col_id: ColumnId,
+    ) ?Value {
+        std.debug.assert(model_id < self.model_count);
+        const model = &self.models[model_id];
+        std.debug.assert(col_id < model.column_count);
+        const col = model.columns[col_id];
+        if (!col.has_default) return null;
+
+        return switch (col.default_kind) {
+            .none => null,
+            .null_value => Value{ .null_value = {} },
+            .bigint => Value{ .bigint = col.default_bigint },
+            .int => Value{ .int = col.default_int },
+            .float => Value{ .float = col.default_float },
+            .boolean => Value{ .boolean = col.default_boolean },
+            .string => Value{ .string = self.getName(col.default_string_offset, col.default_string_len) },
+            .timestamp => Value{ .timestamp = col.default_timestamp },
+        };
+    }
 };
 
 fn checkedAddU64(target: *u64, delta: anytype) void {
@@ -874,6 +956,26 @@ test "primary key flag" {
     const id_col = try cat.addColumn(uid, "id", .bigint, false);
     cat.setColumnPrimaryKey(uid, id_col);
     try testing.expect(cat.models[uid].columns[0].is_primary_key);
+}
+
+test "column defaults round-trip for typed values" {
+    var cat = Catalog{};
+    const uid = try cat.addModel("User");
+    const age_col = try cat.addColumn(uid, "age", .int, false);
+    const name_col = try cat.addColumn(uid, "name", .string, false);
+    const active_col = try cat.addColumn(uid, "active", .boolean, false);
+
+    try cat.setColumnDefault(uid, age_col, .{ .int = 18 });
+    try cat.setColumnDefault(uid, name_col, .{ .string = "pending" });
+    try cat.setColumnDefault(uid, active_col, .{ .boolean = true });
+
+    const age_default = cat.getColumnDefault(uid, age_col).?;
+    const name_default = cat.getColumnDefault(uid, name_col).?;
+    const active_default = cat.getColumnDefault(uid, active_col).?;
+
+    try testing.expectEqual(@as(i32, 18), age_default.int);
+    try testing.expectEqualSlices(u8, "pending", name_default.string);
+    try testing.expectEqual(true, active_default.boolean);
 }
 
 test "resolve missing association target fails" {
