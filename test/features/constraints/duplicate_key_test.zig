@@ -1,9 +1,9 @@
-//! E2E coverage for duplicate-key insert constraint handling.
+//! Feature coverage for duplicate-key insert constraint handling.
 const std = @import("std");
-const e2e = @import("../test_env_test.zig");
+const feature = @import("../test_env_test.zig");
 
-test "e2e insert fails closed on duplicate primary key" {
-    var env: e2e.E2EEnv = undefined;
+test "feature insert fails closed on duplicate primary key" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 

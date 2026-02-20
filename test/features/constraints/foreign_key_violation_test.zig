@@ -1,9 +1,9 @@
-//! E2E coverage for referential-integrity insert constraint handling.
+//! Feature coverage for referential-integrity insert constraint handling.
 const std = @import("std");
-const e2e = @import("../test_env_test.zig");
+const feature = @import("../test_env_test.zig");
 
-test "e2e insert fails closed on foreign-key violation" {
-    var env: e2e.E2EEnv = undefined;
+test "feature insert fails closed on foreign-key violation" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 

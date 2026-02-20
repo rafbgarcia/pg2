@@ -1,4 +1,4 @@
-//! E2E crash/fault matrix for commit-hook overflow reclaim behavior.
+//! Internal crash/fault matrix for commit-hook overflow reclaim behavior.
 //!
 //! Responsibilities in this file:
 //! - Verifies replay applies only committed reclaim records after crash.
@@ -10,7 +10,7 @@ const overflow_mod = pg2.storage.overflow;
 const page_mod = pg2.storage.page;
 const recovery_mod = pg2.storage.recovery;
 const wal_mod = pg2.storage.wal;
-const e2e = @import("../../features/test_env_test.zig");
+const internal = @import("../../features/test_env_test.zig");
 
 const PageType = page_mod.PageType;
 const Record = wal_mod.Record;
@@ -55,7 +55,7 @@ fn containsRoot(roots: []const u64, root: u64) bool {
 }
 
 fn runCrashScenario(crash_point: CrashPoint) !ScenarioOutcome {
-    var env: e2e.E2EEnv = undefined;
+    var env: internal.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 
@@ -196,7 +196,7 @@ fn runCrashScenario(crash_point: CrashPoint) !ScenarioOutcome {
     };
 }
 
-test "e2e crash matrix: crash after update commit replays one committed reclaim and keeps unrecorded unlink overflow" {
+test "internal crash matrix: crash after update commit replays one committed reclaim and keeps unrecorded unlink overflow" {
     const outcome = try runCrashScenario(.after_update_commit);
 
     try std.testing.expectEqual(@as(usize, 1), outcome.pre_crash_reclaim_len);
@@ -212,7 +212,7 @@ test "e2e crash matrix: crash after update commit replays one committed reclaim 
     }
 }
 
-test "e2e crash matrix: follow-up write commit drains backlog and replay reclaims all unlinked roots" {
+test "internal crash matrix: follow-up write commit drains backlog and replay reclaims all unlinked roots" {
     const outcome = try runCrashScenario(.after_followup_commit);
 
     try std.testing.expectEqual(@as(usize, 2), outcome.pre_crash_reclaim_len);
@@ -227,8 +227,8 @@ test "e2e crash matrix: follow-up write commit drains backlog and replay reclaim
     }
 }
 
-test "e2e crash matrix: repeated replay cycles remain idempotent after durable multi-chain reclaim" {
-    var env: e2e.E2EEnv = undefined;
+test "internal crash matrix: repeated replay cycles remain idempotent after durable multi-chain reclaim" {
+    var env: internal.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 

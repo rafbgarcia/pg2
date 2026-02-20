@@ -105,14 +105,14 @@ pub const TestExecutor = struct {
     }
 };
 
-pub const E2EEnv = struct {
+pub const FeatureEnv = struct {
     disk: disk_mod.SimulatedDisk,
     backing_memory: []u8,
     runtime: BootstrappedRuntime,
     catalog: Catalog,
     executor: TestExecutor,
 
-    pub fn init(self: *E2EEnv) !void {
+    pub fn init(self: *FeatureEnv) !void {
         self.disk = disk_mod.SimulatedDisk.init(testing_allocator);
         errdefer self.disk.deinit();
 
@@ -128,7 +128,7 @@ pub const E2EEnv = struct {
         self.executor.init(&self.runtime, &self.catalog);
     }
 
-    pub fn deinit(self: *E2EEnv) void {
+    pub fn deinit(self: *FeatureEnv) void {
         // Keep teardown aligned with existing server tests which do not call
         // runtime.deinit in this path.
         testing_allocator.free(self.backing_memory);

@@ -1,8 +1,8 @@
-//! E2E coverage for insert behavior through server session path.
+//! Feature coverage for insert behavior through server session path.
 const std = @import("std");
 const pg2 = @import("pg2");
 const overflow_mod = pg2.storage.overflow;
-const e2e = @import("../test_env_test.zig");
+const feature = @import("../test_env_test.zig");
 
 const wide_field_count: usize = 127;
 
@@ -62,8 +62,8 @@ fn buildWideInsertRequest(buf: []u8, id: usize) ![]const u8 {
     return stream.getWritten();
 }
 
-test "e2e insert returns explicit insert count via session path" {
-    var env: e2e.E2EEnv = undefined;
+test "feature insert returns explicit insert count via session path" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 
@@ -85,8 +85,8 @@ test "e2e insert returns explicit insert count via session path" {
     );
 }
 
-test "e2e insert high-volume sequential requests remain queryable via session path" {
-    var env: e2e.E2EEnv = undefined;
+test "feature insert high-volume sequential requests remain queryable via session path" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 
@@ -134,8 +134,8 @@ test "e2e insert high-volume sequential requests remain queryable via session pa
     );
 }
 
-test "e2e insert large-row payloads remain readable via session path" {
-    var env: e2e.E2EEnv = undefined;
+test "feature insert large-row payloads remain readable via session path" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 
@@ -218,8 +218,8 @@ test "e2e insert large-row payloads remain readable via session path" {
     try std.testing.expectEqualStrings(expected_c, result);
 }
 
-test "e2e insert supports 128 total fields with deterministic readback" {
-    var env: e2e.E2EEnv = undefined;
+test "feature insert supports 128 total fields with deterministic readback" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 
@@ -244,8 +244,8 @@ test "e2e insert supports 128 total fields with deterministic readback" {
     );
 }
 
-test "e2e insert model creation fails closed above 128 total fields" {
-    var env: e2e.E2EEnv = undefined;
+test "feature insert model creation fails closed above 128 total fields" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 
@@ -257,8 +257,8 @@ test "e2e insert model creation fails closed above 128 total fields" {
     try std.testing.expectError(error.TooManyColumns, executor.applyDefinitions(too_wide_schema));
 }
 
-test "e2e insert duplicate key fails closed late in high-volume workload" {
-    var env: e2e.E2EEnv = undefined;
+test "feature insert duplicate key fails closed late in high-volume workload" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 

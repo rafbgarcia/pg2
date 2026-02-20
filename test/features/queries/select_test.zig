@@ -1,9 +1,9 @@
-//! E2E coverage for select/query behavior through server session path.
+//! Feature coverage for select/query behavior through server session path.
 const std = @import("std");
-const e2e = @import("../test_env_test.zig");
+const feature = @import("../test_env_test.zig");
 
-test "e2e query returns deterministic rows via session path" {
-    var env: e2e.E2EEnv = undefined;
+test "feature query returns deterministic rows via session path" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 
@@ -49,8 +49,8 @@ test "e2e query returns deterministic rows via session path" {
     );
 }
 
-test "e2e query projection returns only requested columns via session path" {
-    var env: e2e.E2EEnv = undefined;
+test "feature query projection returns only requested columns via session path" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 

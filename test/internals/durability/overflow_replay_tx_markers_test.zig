@@ -1,4 +1,4 @@
-//! E2E coverage for strict tx-marker policy in overflow lifecycle replay.
+//! Internal coverage for strict tx-marker policy in overflow lifecycle replay.
 //!
 //! Responsibilities in this file:
 //! - Exercises server session path writes that emit overflow lifecycle WAL.
@@ -9,7 +9,7 @@ const buffer_pool_mod = pg2.storage.buffer_pool;
 const overflow_mod = pg2.storage.overflow;
 const recovery_mod = pg2.storage.recovery;
 const wal_mod = pg2.storage.wal;
-const e2e = @import("../../features/test_env_test.zig");
+const internal = @import("../../features/test_env_test.zig");
 
 const Record = wal_mod.Record;
 
@@ -35,8 +35,8 @@ fn encodeOverflowChainRecordMeta(out: []u8, meta: OverflowChainRecordMeta) void 
     @memcpy(out[12..16], std.mem.asBytes(&std.mem.nativeToLittle(u32, meta.payload_bytes)));
 }
 
-test "e2e overflow replay fails closed for lifecycle record without tx markers" {
-    var env: e2e.E2EEnv = undefined;
+test "internal overflow replay fails closed for lifecycle record without tx markers" {
+    var env: internal.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 

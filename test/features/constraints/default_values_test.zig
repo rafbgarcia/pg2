@@ -1,9 +1,9 @@
-//! E2E coverage for insert defaults on omitted fields.
+//! Feature coverage for insert defaults on omitted fields.
 const std = @import("std");
-const e2e = @import("../test_env_test.zig");
+const feature = @import("../test_env_test.zig");
 
-test "e2e insert applies schema defaults for omitted fields" {
-    var env: e2e.E2EEnv = undefined;
+test "feature insert applies schema defaults for omitted fields" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 
@@ -29,8 +29,8 @@ test "e2e insert applies schema defaults for omitted fields" {
     );
 }
 
-test "e2e insert keeps explicit null semantics even when default exists" {
-    var env: e2e.E2EEnv = undefined;
+test "feature insert keeps explicit null semantics even when default exists" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 

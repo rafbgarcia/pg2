@@ -1,9 +1,9 @@
-//! E2E coverage for bigint field behavior through server session path.
+//! Feature coverage for bigint field behavior through server session path.
 const std = @import("std");
-const e2e = @import("../test_env_test.zig");
+const feature = @import("../test_env_test.zig");
 
-test "e2e bigint fields preserve large integer values end-to-end" {
-    var env: e2e.E2EEnv = undefined;
+test "feature bigint fields preserve large integer values end-to-end" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 

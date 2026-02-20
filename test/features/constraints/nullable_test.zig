@@ -1,9 +1,9 @@
-//! E2E coverage for nullable insert behavior.
+//! Feature coverage for nullable insert behavior.
 const std = @import("std");
-const e2e = @import("../test_env_test.zig");
+const feature = @import("../test_env_test.zig");
 
-test "e2e insert allows omitted nullable field and persists null" {
-    var env: e2e.E2EEnv = undefined;
+test "feature insert allows omitted nullable field and persists null" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 
@@ -28,8 +28,8 @@ test "e2e insert allows omitted nullable field and persists null" {
     );
 }
 
-test "e2e insert allows explicit null assignment to nullable field" {
-    var env: e2e.E2EEnv = undefined;
+test "feature insert allows explicit null assignment to nullable field" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 
@@ -54,8 +54,8 @@ test "e2e insert allows explicit null assignment to nullable field" {
     );
 }
 
-test "e2e insert applies default for omitted nullable field" {
-    var env: e2e.E2EEnv = undefined;
+test "feature insert applies default for omitted nullable field" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 
@@ -80,8 +80,8 @@ test "e2e insert applies default for omitted nullable field" {
     );
 }
 
-test "e2e insert explicit null bypasses default on nullable field" {
-    var env: e2e.E2EEnv = undefined;
+test "feature insert explicit null bypasses default on nullable field" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 
@@ -106,8 +106,8 @@ test "e2e insert explicit null bypasses default on nullable field" {
     );
 }
 
-test "e2e insert explicit value overrides default on nullable field" {
-    var env: e2e.E2EEnv = undefined;
+test "feature insert explicit value overrides default on nullable field" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 

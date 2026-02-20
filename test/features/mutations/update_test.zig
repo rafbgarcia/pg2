@@ -1,9 +1,9 @@
-//! E2E coverage for update behavior through server session path.
+//! Feature coverage for update behavior through server session path.
 const std = @import("std");
-const e2e = @import("../test_env_test.zig");
+const feature = @import("../test_env_test.zig");
 
-test "e2e update supports row growth via session path" {
-    var env: e2e.E2EEnv = undefined;
+test "feature update supports row growth via session path" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 

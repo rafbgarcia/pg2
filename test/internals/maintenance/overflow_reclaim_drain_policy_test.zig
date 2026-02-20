@@ -1,4 +1,4 @@
-//! E2E coverage for overflow reclaim drain execution policy.
+//! Internal coverage for overflow reclaim drain execution policy.
 //!
 //! Responsibilities in this file:
 //! - Verifies reclaim drain executes only on successful write commit boundaries.
@@ -6,10 +6,10 @@
 const std = @import("std");
 const pg2 = @import("pg2");
 const overflow_mod = pg2.storage.overflow;
-const e2e = @import("../../features/test_env_test.zig");
+const internal = @import("../../features/test_env_test.zig");
 
-test "e2e overflow multi-chain unlink drains one committed chain per successful write commit boundary" {
-    var env: e2e.E2EEnv = undefined;
+test "internal overflow multi-chain unlink drains one committed chain per successful write commit boundary" {
+    var env: internal.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 

@@ -1,11 +1,11 @@
-//! E2E coverage for string field behavior through server session path.
+//! Feature coverage for string field behavior through server session path.
 const std = @import("std");
 const pg2 = @import("pg2");
 const overflow_mod = pg2.storage.overflow;
-const e2e = @import("../test_env_test.zig");
+const feature = @import("../test_env_test.zig");
 
-test "e2e string fields preserve user-facing text values" {
-    var env: e2e.E2EEnv = undefined;
+test "feature string fields preserve user-facing text values" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 
@@ -34,8 +34,8 @@ test "e2e string fields preserve user-facing text values" {
     );
 }
 
-test "e2e string fields support overflow-backed large values end-to-end" {
-    var env: e2e.E2EEnv = undefined;
+test "feature string fields support overflow-backed large values end-to-end" {
+    var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 
