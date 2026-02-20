@@ -1,7 +1,7 @@
 # Quality Gate Artifact: 202602202030-overflow-reclaim-tx-rollback-contract
 
 - Artifact ID: `202602202030-overflow-reclaim-tx-rollback-contract`
-- Commit: `BACKFILL_COMMIT_SHA`
+- Commit: `f7f33a2e8d872435dc9140589b4d8f3183613a95`
 - Title: `overflow reclaim queue tx rollback contract`
 - Scope: `Makes overflow reclaim queue entries transaction-scoped so abort removes pending reclaim intents and committed-only drain prevents reclaiming live chains.`
 

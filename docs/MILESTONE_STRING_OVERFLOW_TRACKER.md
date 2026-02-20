@@ -73,6 +73,9 @@ This milestone is done only when all conditions below are true:
 
 ## Next-Session Kickoff (Concrete)
 
+Committed SHA(s) in this increment:
+- `f7f33a2` - Implement tx-aware overflow reclaim rollback contract
+
 Completed:
 
 1. Overflow reclaim pipeline.
@@ -108,7 +111,8 @@ Use these first in a new session:
 9. `git show --name-only --stat fd81f61`
 10. `git show --name-only --stat c5548a0`
 11. `git show --name-only --stat 0e1c366`
-12. `rg -n "overflow_chain_create|overflow_chain_relink|overflow_chain_unlink|overflow_chain_reclaim|replay|recover|tx_abort" src`
-13. `rg -n "INSPECT overflow|overflow_reclaim_stats|snapshotOverflowReclaimStats|overflow_reclaim_queue" src docs user-facing-docs`
-14. Run the AGENTS placeholder hygiene check command.
-15. Continue from "Next Logical Chunk" acceptance criteria above.
+12. `git show --name-only --stat f7f33a2`
+13. `rg -n "overflow_chain_create|overflow_chain_relink|overflow_chain_unlink|overflow_chain_reclaim|replay|recover|tx_abort|commitOverflowReclaimEntriesForTx|rollbackOverflowReclaimEntriesForTx" src`
+14. `rg -n "INSPECT overflow|overflow_reclaim_stats|snapshotOverflowReclaimStats|overflow_reclaim_queue|abortCheckin" src docs user-facing-docs`
+15. Run the AGENTS placeholder hygiene check command.
+16. Continue from "Next Logical Chunk" acceptance criteria above.
