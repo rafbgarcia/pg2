@@ -141,6 +141,11 @@ These are confirmed in chat with the user:
   - Added catalog unit test for reclaim stats snapshot semantics.
   - Updated query/user-facing docs for the additional inspect line.
 
+### Documentation finalization in committed chunk `ad8ccd7`
+
+- Updated milestone + quality-gate metadata to reference real committed SHAs.
+- Removed placeholder wording in quality-gate template/entry commit fields.
+
 ## Known Test State
 
 - `zig build test` passes for this increment (including overflow reclaim and new E2E overflow tests).
@@ -156,7 +161,7 @@ These are confirmed in chat with the user:
 
 ## Next-Session Kickoff (Concrete)
 
-Completed in committed chunks `c5548a0` and `fd81f61`:
+Completed in committed chunks `c5548a0`, `fd81f61`, and `ad8ccd7`:
 
 1. Overflow reclaim pipeline.
 2. WAL lifecycle contract for create/relink/unlink/reclaim.
@@ -177,7 +182,8 @@ Use these first in a new session:
 1. `git status --short`
 2. `zig build test`
 3. `git log -2 --stat`
-4. `git show --name-only --stat c5548a0`
+4. `git show --name-only --stat ad8ccd7`
 5. `git show --name-only --stat fd81f61`
-6. `rg -n "INSPECT overflow|overflow_reclaim_stats|snapshotOverflowReclaimStats|overflow_reclaim_queue" src docs user-facing-docs`
-7. Continue from "Next Logical Chunk" above.
+6. `git show --name-only --stat c5548a0`
+7. `rg -n "INSPECT overflow|overflow_reclaim_stats|snapshotOverflowReclaimStats|overflow_reclaim_queue" src docs user-facing-docs`
+8. Continue from "Next Logical Chunk" above.
