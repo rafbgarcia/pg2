@@ -72,8 +72,10 @@ For each implementation increment, follow this sequence:
      - committed SHA(s) for this increment,
      - "Next-Session Kickoff (Concrete)" with ordered next tasks,
      - a "Fresh Codex Handoff Commands" block that starts from current HEAD.
-   - Ensure any new quality artifact `Commit:` field references the real commit SHA.
-6. Ask the user whether to proceed to the next recommended task.
+   - Ensure any new quality artifact `Commit:` field references the real commit SHA and never stays as `TBD`.
+   - Run: `rg -n 'Commit: .*TBD|pending commit|TBD \\(this increment commit\\)' docs/quality-gates docs/MILESTONE_*`
+     - If any match exists, fix docs before final response.
+6. End every session by outputting a ready-to-paste **Fresh Codex Prompt** block for the next session (do not ask whether to proceed).
 
 ### User-Facing Docs Rule
 

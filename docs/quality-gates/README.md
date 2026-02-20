@@ -18,6 +18,8 @@ Each artifact answers the mandatory checklist in `docs/QUALITY_GATES.md`:
 2. Name the new file `YYYYMMDDHHMM-<short-slug>.md`.
 3. Fill all checklist fields explicitly (`none` with reason where applicable).
 4. Add the new file to the artifact list below.
+5. `Commit:` must reference a real commit SHA. Never leave `TBD`.
+   - If SHA is unknown before the first commit, make an immediate docs follow-up commit that updates the artifact to the real SHA.
 
 ## Artifacts
 
