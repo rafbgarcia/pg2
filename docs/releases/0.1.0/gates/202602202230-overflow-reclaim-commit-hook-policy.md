@@ -1,7 +1,7 @@
 # Quality Gate Artifact: 202602202230-overflow-reclaim-commit-hook-policy
 
 - Artifact ID: `202602202230-overflow-reclaim-commit-hook-policy`
-- Commit: `145f2b08bf6aa42bb628da24ca5f5b0ee159f085`
+- Commit: `48fe07be06be8a188fdea7cb1c39486a2c35b900`
 - Title: `overflow reclaim drain commit-hook execution policy`
 - Scope: `Finalizes reclaim drain execution to commit-hook only, with reclaim WAL emitted before tx_commit and deterministic one-chain drain budget per successful commit boundary.`
 

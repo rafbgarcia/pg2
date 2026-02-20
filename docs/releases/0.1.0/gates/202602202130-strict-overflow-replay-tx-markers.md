@@ -1,7 +1,7 @@
 # Quality Gate Artifact: 202602202130-strict-overflow-replay-tx-markers
 
 - Artifact ID: `202602202130-strict-overflow-replay-tx-markers`
-- Commit: `145f2b08bf6aa42bb628da24ca5f5b0ee159f085`
+- Commit: `48fe07be06be8a188fdea7cb1c39486a2c35b900`
 - Title: `strict tx-marker policy for overflow lifecycle replay`
 - Scope: `Enforces fail-closed recovery replay when overflow lifecycle WAL mutations are missing tx markers and wires session tx lifecycle to emit begin/commit/abort WAL records.`
 
