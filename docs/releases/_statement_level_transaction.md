@@ -1,9 +1,3 @@
-# Release Tracker: 0.99.0
-
-Last updated: 2026-02-20
-Owner: Codex session (handoff-ready)
-Status: Draft
-
 ## Focus Item
 
 Statement-level transactional composition:
