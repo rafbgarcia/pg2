@@ -8,7 +8,6 @@ comptime {
     _ = @import("constraints/duplicate_key.zig");
     _ = @import("constraints/foreign_key_violation.zig");
     _ = @import("constraints/nullable.zig");
-    _ = @import("constraints/nullable_with_default.zig");
     _ = @import("constraints/not_null.zig");
     _ = @import("constraints/type_mismatch.zig");
     _ = @import("constraints/unknown_field.zig");

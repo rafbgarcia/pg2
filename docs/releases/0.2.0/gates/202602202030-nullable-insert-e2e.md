@@ -22,7 +22,6 @@
     - explicit values override defaults.
   - Added test files:
     - `src/server/e2e/constraints/nullable.zig`
-    - `src/server/e2e/constraints/nullable_with_default.zig`
   - Suite aggregation updated in `src/server/e2e/e2e_specs.zig`.
 
 - What is the crash-consistency contract for the modified path?
