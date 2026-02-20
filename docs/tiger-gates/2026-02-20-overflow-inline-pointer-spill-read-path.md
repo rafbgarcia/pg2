@@ -1,6 +1,6 @@
 # Tiger Gate Artifact: 2026-02-20-overflow-inline-pointer-spill-read-path
 
-- Commit: `<pending>`
+- Commit: `76598c4`
 - Title: `Implement dedicated overflow region allocator + row pointer encoding + spill/read integration`
 - Scope: `Delivers end-to-end overflow string handling: dedicated overflow page-id allocator, row inline-vs-overflow pointer encoding, mutation spill on >1024B strings, bounded read-path overflow materialization, and deterministic exhaustion/roundtrip tests.`
 

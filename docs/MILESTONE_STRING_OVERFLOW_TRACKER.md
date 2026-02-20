@@ -63,7 +63,7 @@ These are confirmed in chat with the user:
   - `ScanResult` now owns string storage for allocator-returning scan APIs (`tableScan`, `indexRange`) to guarantee lifetime safety.
   - Executor read path threads per-query arena to `tableScanInto` calls (including nested relation scans).
 
-### Implemented in current increment (`<pending-commit>`)
+### Implemented in current increment (`76598c4`)
 
 - Dedicated overflow page-id region allocator:
   - Added deterministic allocator state in `src/storage/overflow.zig` with default dedicated region bounds, ownership checks, and fail-closed `RegionExhausted`.
@@ -96,28 +96,20 @@ These are confirmed in chat with the user:
 
 ## Next Logical Chunk
 
-1. Confirm overflow page-id allocation strategy:
-   - dedicated page-id region (recommended),
-   - global free-list allocator,
-   - per-model region allocator.
-2. Row format integration:
-   - Extend string fixed-slot encoding to support inline vs overflow-pointer variants.
-   - Keep backwards-compatible row format behavior decisions explicit (likely version bump).
-3. Mutation path integration:
-   - On insert/update, apply 1024-byte inline policy for strings.
-   - Allocate/write overflow pages and set in-row pointers when spilling.
-4. Durability integration:
-   - Define WAL payload contract for overflow chain create/relink/unlink.
-   - Add deterministic crash/fault tests for spill + update + unlink/recover.
-
-## Open Design Confirmation Needed Before Overflow Coding
-
-Confirmed: use same DB storage file with distinct overflow page type/region (not a separate OS file) for v1.
-Confirmed: overflow page-id allocation strategy is `dedicated page-id region` for v1.
+1. Overflow reclaim pipeline:
+   - Define deterministic unlink + reclaim queue behavior for replaced/deleted overflow chains.
+   - Ensure reclaim ordering is deterministic and fail-closed under corruption.
+2. Durability/WAL contract:
+   - Add explicit WAL payload contract for overflow chain create/relink/unlink.
+   - Define redo/undo ordering for row-pointer publication and reclaim lifecycle.
+3. Crash/restart deterministic coverage:
+   - Add simulation/fault tests for spill, replace, delete, and restart recovery visibility.
+4. Read/write safety hardening:
+   - Add bounds checks for extreme chain lengths and malformed on-disk chains in recovery/read paths.
 
 ## Next-Session Kickoff (Concrete)
 
-Completed in this increment (all items 1..6). Next focus should move to:
+Completed in increment `76598c4` (all items 1..6). Next focus should move to:
 
 1. Overflow reclaim pipeline:
    - Define deterministic unlink + reclaim queue behavior for replaced/deleted overflow chains.
@@ -132,5 +124,6 @@ Use these first in a new session:
 
 1. `git status --short`
 2. `zig build test`
-3. `rg -n "overflow|StringArena|query_string_arena_bytes_per_slot" src/storage src/executor src/runtime`
-4. Continue from "Next Logical Chunk" above.
+3. `git show --name-only --stat 76598c4`
+4. `rg -n "OverflowRegionExhausted|decodeColumnStorageChecked|string_inline_threshold_bytes|overflow_page_allocator" src/storage src/executor src/catalog src/tiger`
+5. Continue from "Next Logical Chunk" above.
