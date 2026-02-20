@@ -68,7 +68,7 @@ This milestone is done only when all conditions below are true:
 
 ## Next-Session Kickoff (Concrete)
 
-Completed in committed chunks `c5548a0`, `fd81f61`, `ad8ccd7`, and `505fff1`:
+Completed in committed chunks `c5548a0`, `fd81f61`, `ad8ccd7`, `505fff1`, and `7ad8fc5`:
 
 1. Overflow reclaim pipeline.
 2. WAL lifecycle contract for create/relink/unlink/reclaim.
@@ -93,10 +93,11 @@ Use these first in a new session:
 2. `zig build test`
 3. `git log -6 --stat`
 4. `git show --name-only --stat 505fff1`
-5. `git show --name-only --stat ad8ccd7`
-6. `git show --name-only --stat fd81f61`
-7. `git show --name-only --stat c5548a0`
-8. `rg -n "overflow_chain_create|overflow_chain_relink|overflow_chain_unlink|overflow_chain_reclaim|replay|recover" src`
-9. `rg -n "INSPECT overflow|overflow_reclaim_stats|snapshotOverflowReclaimStats|overflow_reclaim_queue" src docs user-facing-docs`
-10. Run the AGENTS placeholder hygiene check command.
-11. Continue from "Next Logical Chunk" acceptance criteria above.
+5. `git show --name-only --stat 7ad8fc5`
+6. `git show --name-only --stat ad8ccd7`
+7. `git show --name-only --stat fd81f61`
+8. `git show --name-only --stat c5548a0`
+9. `rg -n "overflow_chain_create|overflow_chain_relink|overflow_chain_unlink|overflow_chain_reclaim|replay|recover" src`
+10. `rg -n "INSPECT overflow|overflow_reclaim_stats|snapshotOverflowReclaimStats|overflow_reclaim_queue" src docs user-facing-docs`
+11. Run the AGENTS placeholder hygiene check command.
+12. Continue from "Next Logical Chunk" acceptance criteria above.
