@@ -40,6 +40,7 @@ pub const ServeError = SessionError ||
 pub const SessionResponse = struct {
     bytes_written: usize,
     is_query_error: bool,
+    had_mutation: bool,
 };
 
 /// Deterministic request/session boundary used by server-side handlers.
@@ -80,6 +81,7 @@ pub const Session = struct {
             return .{
                 .bytes_written = stream.pos,
                 .is_query_error = true,
+                .had_mutation = false,
             };
         }
 
@@ -91,6 +93,7 @@ pub const Session = struct {
             return .{
                 .bytes_written = stream.pos,
                 .is_query_error = true,
+                .had_mutation = false,
             };
         }
         const include_inspect = astHasInspectOp(&parsed.ast);
@@ -109,9 +112,14 @@ pub const Session = struct {
 
         const pool_stats: ?PoolStats = if (include_inspect) pool.snapshotStats() else null;
         try serializeQueryResult(writer, &result, self.catalog, pool_stats);
+        const had_mutation =
+            result.stats.rows_inserted > 0 or
+            result.stats.rows_updated > 0 or
+            result.stats.rows_deleted > 0;
         return .{
             .bytes_written = stream.pos,
             .is_query_error = result.has_error,
+            .had_mutation = had_mutation,
         };
     }
 
@@ -182,37 +190,39 @@ pub const Session = struct {
                 };
             } else {
                 const tx_id = pool_conn.tx_id;
-                mutation_mod.commitOverflowReclaimEntriesForTx(
-                    self.catalog,
-                    &self.runtime.pool,
-                    &self.runtime.wal,
-                    tx_id,
-                    1,
-                ) catch |reclaim_err| {
-                    mutation_mod.rollbackOverflowReclaimEntriesForTx(
+                if (response.had_mutation) {
+                    mutation_mod.commitOverflowReclaimEntriesForTx(
                         self.catalog,
+                        &self.runtime.pool,
+                        &self.runtime.wal,
                         tx_id,
-                    );
-                    pool.abortCheckin(&pool_conn) catch |abort_err| {
-                        std.log.err(
-                            "pool abort checkin failed: slot={d} err={s}",
-                            .{ pool_conn.slot_index, @errorName(abort_err) },
+                        1,
+                    ) catch |reclaim_err| {
+                        mutation_mod.rollbackOverflowReclaimEntriesForTx(
+                            self.catalog,
+                            tx_id,
                         );
-                        @panic("pool abort checkin failed");
+                        pool.abortCheckin(&pool_conn) catch |abort_err| {
+                            std.log.err(
+                                "pool abort checkin failed: slot={d} err={s}",
+                                .{ pool_conn.slot_index, @errorName(abort_err) },
+                            );
+                            @panic("pool abort checkin failed");
+                        };
+                        var stream = std.io.fixedBufferStream(response_buf);
+                        const writer = stream.writer();
+                        writer.print(
+                            "ERR class={s} code={s}\n",
+                            .{
+                                @tagName(tiger_errors.classifyMutation(reclaim_err)),
+                                @errorName(reclaim_err),
+                            },
+                        ) catch return error.ResponseTooLarge;
+                        const boundary_msg = response_buf[0..stream.pos];
+                        try connection.writeResponse(boundary_msg);
+                        continue;
                     };
-                    var stream = std.io.fixedBufferStream(response_buf);
-                    const writer = stream.writer();
-                    writer.print(
-                        "ERR class={s} code={s}\n",
-                        .{
-                            @tagName(tiger_errors.classifyMutation(reclaim_err)),
-                            @errorName(reclaim_err),
-                        },
-                    ) catch return error.ResponseTooLarge;
-                    const boundary_msg = response_buf[0..stream.pos];
-                    try connection.writeResponse(boundary_msg);
-                    continue;
-                };
+                }
                 pool.checkin(&pool_conn) catch |checkin_err| {
                     std.log.err(
                         "pool checkin failed: slot={d} err={s}",

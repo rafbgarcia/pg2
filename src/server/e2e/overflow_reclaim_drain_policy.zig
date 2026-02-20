@@ -1,13 +1,13 @@
 //! E2E coverage for overflow reclaim drain execution policy.
 //!
 //! Responsibilities in this file:
-//! - Verifies reclaim drain executes only on committed tx boundaries.
-//! - Validates fixed one-chain drain budget progression across committed txs.
+//! - Verifies reclaim drain executes only on successful write commit boundaries.
+//! - Validates fixed one-chain drain budget progression across committed writes.
 const std = @import("std");
 const overflow_mod = @import("../../storage/overflow.zig");
 const e2e = @import("test_env.zig");
 
-test "e2e overflow multi-chain unlink drains one committed chain per commit boundary" {
+test "e2e overflow multi-chain unlink drains one committed chain per successful write commit boundary" {
     var env: e2e.E2EEnv = undefined;
     try env.init();
     defer env.deinit();
@@ -56,6 +56,20 @@ test "e2e overflow multi-chain unlink drains one committed chain per commit boun
             "INSPECT overflow reclaim_queue_depth=1 reclaim_enqueued_total=2 reclaim_dequeued_total=1 reclaim_chains_total=1 reclaim_pages_total=1 reclaim_failures_total=0\n",
         ) != null,
     );
+
+    // Read-only requests do not advance reclaim drain.
+    result = try executor.run("User |> inspect");
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            result,
+            "INSPECT overflow reclaim_queue_depth=1 reclaim_enqueued_total=2 reclaim_dequeued_total=1 reclaim_chains_total=1 reclaim_pages_total=1 reclaim_failures_total=0\n",
+        ) != null,
+    );
+
+    // A subsequent write commit boundary drains one more committed chain.
+    result = try executor.run("User |> insert(id = 2, name = \"n\", bio = \"b\")");
+    try std.testing.expectEqualStrings("OK rows=0\n", result);
 
     result = try executor.run("User |> inspect");
     try std.testing.expect(
