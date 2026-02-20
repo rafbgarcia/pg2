@@ -1,3 +1,23 @@
+//! B+ tree page formats and index operations.
+//!
+//! Responsibilities in this file:
+//! - Defines on-page layouts and operations for leaf/internal B+ tree nodes.
+//! - Implements key search/insert/delete/split behaviors on node pages.
+//! - Wires tree-level mutation/read paths through buffer pool and WAL constraints.
+//!
+//! Why this exists:
+//! - Secondary access paths require ordered key lookup independent of heap layout.
+//! - Keeping page-structure logic centralized avoids subtle index corruption bugs.
+//!
+//! Behavioral boundaries:
+//! - This module manages B+ tree structure and page mutations.
+//! - It does not define SQL/planner semantics; callers provide keys/row ids.
+//! - Concurrency control and transactional visibility are enforced by higher layers.
+//!
+//! Contributor notes:
+//! - Leaf/internal header and cell layouts are persistent contracts.
+//! - Maintain deterministic split/insert behavior and strict bounds checks.
+//! - Prefer explicit corruption errors over permissive recovery when invariants fail.
 const std = @import("std");
 const io = @import("io.zig");
 const page_mod = @import("page.zig");

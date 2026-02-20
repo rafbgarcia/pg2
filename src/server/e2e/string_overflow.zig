@@ -1,3 +1,9 @@
+//! E2E coverage for overflow-string lifecycle through server session path.
+//!
+//! Responsibilities in this file:
+//! - Verifies insert/update/read behavior for oversized string values.
+//! - Validates reclaim queue accounting and inspect surface output.
+//! - Exercises crash-recovery WAL replay behavior for overflow reclaim paths.
 const std = @import("std");
 const buffer_pool_mod = @import("../../storage/buffer_pool.zig");
 const overflow_mod = @import("../../storage/overflow.zig");

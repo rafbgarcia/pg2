@@ -1,3 +1,10 @@
+//! Server session boundary: request parse/execute/serialize flow.
+//!
+//! Responsibilities in this file:
+//! - Handles one request from raw query text through executor output bytes.
+//! - Integrates parse/tokenize errors, execution errors, and boundary error classes.
+//! - Serves accepted connections with bounded request/response buffers.
+//! - Emits deterministic wire-format responses for tests and clients.
 const std = @import("std");
 const bootstrap_mod = @import("../runtime/bootstrap.zig");
 const request_mod = @import("../runtime/request.zig");

@@ -1,3 +1,10 @@
+//! Query executor orchestration and operator pipeline runtime.
+//!
+//! Responsibilities in this file:
+//! - Interprets parsed pipeline AST into executable operator stages.
+//! - Coordinates scan/filter/mutation helpers under one execution context.
+//! - Produces query results plus always-on execution/planning statistics.
+//! - Enforces bounded in-memory operator behavior via capacity contracts.
 const std = @import("std");
 const ast_mod = @import("../parser/ast.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");

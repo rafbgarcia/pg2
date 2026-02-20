@@ -1,3 +1,9 @@
+//! Linux io_uring transport backend.
+//!
+//! Responsibilities in this file:
+//! - Accepts and serves socket I/O using io_uring submission/completion queues.
+//! - Implements request framing and response writes via transport interfaces.
+//! - Enforces platform guards and explicit listen/accept I/O failure mapping.
 const std = @import("std");
 const builtin = @import("builtin");
 const transport_mod = @import("transport.zig");

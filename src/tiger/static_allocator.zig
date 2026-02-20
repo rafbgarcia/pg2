@@ -1,3 +1,9 @@
+//! Startup-only static allocator with explicit seal boundary.
+//!
+//! Responsibilities in this file:
+//! - Wraps a fixed buffer allocator for deterministic init-time allocations.
+//! - Enforces a strict transition from init phase to sealed runtime phase.
+//! - Panics on post-seal growth attempts to prevent hidden runtime allocation.
 const std = @import("std");
 
 const Allocator = std.mem.Allocator;

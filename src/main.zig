@@ -1,3 +1,10 @@
+//! pg2 process entrypoint and server bootstrap loop.
+//!
+//! Responsibilities in this file:
+//! - Parses CLI flags (`--memory`, `--listen`) and validates startup args.
+//! - Bootstraps runtime/canonical in-memory catalog for local process use.
+//! - Starts the server accept loop when listen mode is requested.
+//! - Emits user-facing startup/failure messages at process boundary.
 const std = @import("std");
 const builtin = @import("builtin");
 const runtime_config = @import("pg2").runtime.config;

@@ -1,3 +1,10 @@
+//! Fixed-capacity abstract syntax tree (AST) definitions.
+//!
+//! Responsibilities in this file:
+//! - Declares all parser node tags and compact node payload layouts.
+//! - Owns AST node allocation/indexing/list-link helpers.
+//! - Provides bounded AST storage contracts used across parser/executor.
+//! - Serves as the canonical syntax-tree data model for query/schema input.
 const std = @import("std");
 
 /// Maximum number of AST nodes in a single parse.

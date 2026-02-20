@@ -1,3 +1,10 @@
+//! In-memory catalog metadata and schema-time integrity configuration.
+//!
+//! Responsibilities in this file:
+//! - Defines model/column/index/association/scope metadata structures.
+//! - Stores bounded catalog state and name buffers used by execution/runtime.
+//! - Tracks overflow allocator/reclaim state and lightweight model statistics.
+//! - Enforces explicit referential-integrity configuration semantics.
 const std = @import("std");
 const row_mod = @import("../storage/row.zig");
 const overflow_mod = @import("../storage/overflow.zig");

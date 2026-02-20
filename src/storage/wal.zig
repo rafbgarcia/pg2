@@ -1,3 +1,24 @@
+//! Write-ahead log (WAL) record format and append/read machinery.
+//!
+//! Responsibilities in this file:
+//! - Defines WAL record envelope (`RecordType`, `Record`) and CRC protection.
+//! - Serializes/deserializes WAL records with deterministic binary layout.
+//! - Manages WAL append state (`next_lsn`, offsets, flush tracking) and recovery
+//!   envelope persistence for restart continuity.
+//!
+//! Why this exists:
+//! - Core storage durability depends on WAL-before-data ordering.
+//! - A single WAL codec/state machine avoids divergence across callers.
+//!
+//! Integrity behavior:
+//! - Record CRC is verified during decode; corruption and truncation are explicit.
+//! - Recovery envelope has magic/version/checksum validation and fails closed.
+//!
+//! Contributor notes:
+//! - WAL byte layout is a persistent contract; incompatible changes require
+//!   explicit versioning and migration/read-compat strategy.
+//! - Keep payload sizing bounded and deterministic (u16 length contract).
+//! - Do not hide partial-write/corruption cases; return explicit errors.
 const std = @import("std");
 const io = @import("io.zig");
 
@@ -699,13 +720,13 @@ test "WAL readFrom filters by LSN" {
     var wal = Wal.init(std.testing.allocator, disk.storage());
     defer wal.deinit();
 
-    _ = try wal.beginTx(1);     // lsn 1
+    _ = try wal.beginTx(1); // lsn 1
     _ = try wal.append(1, .insert, 5, "a"); // lsn 2
-    _ = try wal.commitTx(1);    // lsn 3
+    _ = try wal.commitTx(1); // lsn 3
 
-    _ = try wal.beginTx(2);     // lsn 4
+    _ = try wal.beginTx(2); // lsn 4
     _ = try wal.append(2, .insert, 6, "b"); // lsn 5
-    _ = try wal.commitTx(2);    // lsn 6
+    _ = try wal.commitTx(2); // lsn 6
 
     // Read from LSN 4 onwards.
     var records_buf: [8]Record = undefined;

@@ -1,3 +1,9 @@
+//! Deterministic fault-matrix tests for referential-integrity behavior.
+//!
+//! Responsibilities in this file:
+//! - Builds parent/child schemas with explicit referential actions.
+//! - Exercises delete/update behavior under crash/restart conditions.
+//! - Verifies RI invariants remain stable across seeded fault scenarios.
 const std = @import("std");
 const disk_mod = @import("disk.zig");
 const buffer_pool_mod = @import("../storage/buffer_pool.zig");

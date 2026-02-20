@@ -1,3 +1,10 @@
+//! Expression parser (shunting-yard style) for pg2 syntax.
+//!
+//! Responsibilities in this file:
+//! - Parses expression tokens into AST nodes with precedence handling.
+//! - Supports literals, refs, lists, function calls, and aggregate calls.
+//! - Produces deterministic parse outputs with explicit stack limits.
+//! - Fails closed on malformed syntax (mismatched delimiters, bad arity, etc.).
 const std = @import("std");
 const ast_mod = @import("ast.zig");
 const tokenizer_mod = @import("tokenizer.zig");

@@ -1,3 +1,24 @@
+//! Heap-page (slotted-page) storage for row bytes.
+//!
+//! Responsibilities in this file:
+//! - Defines slotted-page metadata (`SlottedHeader`, `Slot`) for heap pages.
+//! - Implements row insert/read/update/delete against a single heap page.
+//! - Maintains free-space bookkeeping and local compaction when required.
+//! - Exposes row addressing via `(page_id, slot)` (`RowId`).
+//!
+//! Why this exists:
+//! - Heap storage needs stable row identifiers while supporting variable-size rows.
+//! - Slotted pages decouple logical row identity (slot) from physical placement.
+//!
+//! Behavioral boundaries:
+//! - Operates on one in-memory page at a time; caller manages buffer pin/unpin.
+//! - Does not handle WAL protocol, locking, or transaction visibility rules.
+//! - Deleted rows are tombstoned by slot state; reclamation/GC policy is higher-level.
+//!
+//! Contributor notes:
+//! - Header/slot layout is an on-page contract and must remain deterministic.
+//! - Keep bounds validation fail-closed to prevent corrupt page propagation.
+//! - Any format-breaking change requires versioning and compatibility handling.
 const std = @import("std");
 const page_mod = @import("page.zig");
 
@@ -138,7 +159,6 @@ pub const HeapError = error{
 /// These operate directly on the content area of a `Page`.
 /// The caller is responsible for pinning/unpinning the page via the buffer pool.
 pub const HeapPage = struct {
-
     /// Initialize a page's content area for heap use.
     pub fn init(page: *Page) void {
         std.debug.assert(page.header.page_type == .free or page.header.page_type == .heap);

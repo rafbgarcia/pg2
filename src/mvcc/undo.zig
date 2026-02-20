@@ -1,3 +1,10 @@
+//! Undo-log storage for MVCC version chains.
+//!
+//! Responsibilities in this file:
+//! - Stores prior row images in bounded ring buffers.
+//! - Maintains per-row undo head pointers for chain traversal.
+//! - Resolves snapshot-visible row versions through transaction state checks.
+//! - Truncates obsolete undo history once no active snapshot can require it.
 const std = @import("std");
 const tx_mod = @import("transaction.zig");
 

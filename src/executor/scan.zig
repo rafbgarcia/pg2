@@ -1,3 +1,10 @@
+//! Scan and row materialization path for query reads.
+//!
+//! Responsibilities in this file:
+//! - Reads heap/index-backed rows into bounded result buffers.
+//! - Applies snapshot/undo visibility reconstruction for reads.
+//! - Materializes overflow-backed strings into caller-managed arenas.
+//! - Exposes deterministic scan stats used by executor introspection.
 const std = @import("std");
 const page_mod = @import("../storage/page.zig");
 const heap_mod = @import("../storage/heap.zig");
@@ -227,7 +234,10 @@ pub fn tableScanInto(
             try scanSlotInto(
                 catalog,
                 pool,
-                page, page_id, slot_idx, schema,
+                page,
+                page_id,
+                slot_idx,
+                schema,
                 undo_log,
                 snapshot,
                 tx_manager,
@@ -272,7 +282,10 @@ fn scanSlotInto(
         }
         // Has undo history — check visibility.
         const vis = undo_log.findVisible(
-            page_id, slot_idx, snapshot, tx_manager,
+            page_id,
+            slot_idx,
+            snapshot,
+            tx_manager,
         );
         if (vis) |old_data| {
             break :blk old_data;
@@ -324,8 +337,12 @@ pub fn indexFind(
 
     // MVCC check.
     const data_to_decode = resolveVisibleVersion(
-        undo_log, row_id.page_id, row_id.slot,
-        snapshot, tx_manager, row_data,
+        undo_log,
+        row_id.page_id,
+        row_id.slot,
+        snapshot,
+        tx_manager,
+        row_data,
     );
 
     var row = ResultRow.init();
@@ -383,8 +400,12 @@ pub fn indexRange(
 
         // MVCC check.
         const data_to_decode = resolveVisibleVersion(
-            undo_log, row_id.page_id, row_id.slot,
-            snapshot, tx_manager, row_data,
+            undo_log,
+            row_id.page_id,
+            row_id.slot,
+            snapshot,
+            tx_manager,
+            row_data,
         );
 
         var row = ResultRow.init();
@@ -481,7 +502,10 @@ fn resolveVisibleVersion(
     const head = undo_log.getHead(page_id, slot_idx);
     if (head == null) return heap_data;
     const vis = undo_log.findVisible(
-        page_id, slot_idx, snapshot, tx_manager,
+        page_id,
+        slot_idx,
+        snapshot,
+        tx_manager,
     );
     return vis orelse heap_data;
 }
@@ -531,7 +555,13 @@ test "empty scan returns zero rows" {
     defer snap.deinit();
 
     var result = try tableScan(
-        &catalog, &pool, &undo_log, &snap, &tm, model_id, testing.allocator,
+        &catalog,
+        &pool,
+        &undo_log,
+        &snap,
+        &tm,
+        model_id,
+        testing.allocator,
     );
     defer result.deinit();
 
@@ -580,7 +610,13 @@ test "scan with rows inserted via HeapPage" {
     defer snap.deinit();
 
     var result = try tableScan(
-        &catalog, &pool, &undo_log, &snap, &tm, model_id, testing.allocator,
+        &catalog,
+        &pool,
+        &undo_log,
+        &snap,
+        &tm,
+        model_id,
+        testing.allocator,
     );
     defer result.deinit();
 
@@ -682,7 +718,13 @@ test "scan skips deleted slots" {
     defer snap.deinit();
 
     var result = try tableScan(
-        &catalog, &pool, &undo_log, &snap, &tm, model_id, testing.allocator,
+        &catalog,
+        &pool,
+        &undo_log,
+        &snap,
+        &tm,
+        model_id,
+        testing.allocator,
     );
     defer result.deinit();
 
@@ -720,7 +762,13 @@ test "scan pages_read tracks correctly" {
     defer snap.deinit();
 
     var result = try tableScan(
-        &catalog, &pool, &undo_log, &snap, &tm, model_id, testing.allocator,
+        &catalog,
+        &pool,
+        &undo_log,
+        &snap,
+        &tm,
+        model_id,
+        testing.allocator,
     );
     defer result.deinit();
 

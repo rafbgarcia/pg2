@@ -1,3 +1,11 @@
+//! Data-mutation executor path (insert/update/delete).
+//!
+//! Responsibilities in this file:
+//! - Builds/encodes row values from mutation assignments.
+//! - Applies heap/index writes through buffer pool and WAL.
+//! - Integrates overflow-chain lifecycle for oversized strings.
+//! - Enforces outgoing/incoming referential-integrity actions.
+//! - Records undo entries required for MVCC visibility and recovery.
 const std = @import("std");
 const ast_mod = @import("../parser/ast.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");

@@ -1,3 +1,9 @@
+//! Stable machine-actionable error classification taxonomy.
+//!
+//! Responsibilities in this file:
+//! - Maps subsystem errors into coarse operational classes.
+//! - Defines session-boundary error union used by server/runtime edges.
+//! - Keeps retryable/resource/corruption/fatal semantics explicit and stable.
 const scan_mod = @import("../executor/scan.zig");
 const mutation_mod = @import("../executor/mutation.zig");
 const buffer_pool_mod = @import("../storage/buffer_pool.zig");

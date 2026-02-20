@@ -1,3 +1,10 @@
+//! Expression evaluation for row-level filtering and computed values.
+//!
+//! Responsibilities in this file:
+//! - Evaluates AST expression trees against row values and schema metadata.
+//! - Implements deterministic stack-based evaluation and builtin functions.
+//! - Handles aggregate-node resolution through an explicit resolver callback.
+//! - Returns strict typed errors for invalid predicates and expression misuse.
 const std = @import("std");
 const ast_mod = @import("../parser/ast.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");

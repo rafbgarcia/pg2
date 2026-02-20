@@ -1,3 +1,25 @@
+//! WAL replay helpers for committed overflow lifecycle recovery.
+//!
+//! Responsibilities in this file:
+//! - Reads WAL records in bounded buffers for deterministic recovery.
+//! - Filters replay to committed (or implicitly replayable) transactions.
+//! - Validates overflow lifecycle record payloads and allocator ownership.
+//! - Applies idempotent overflow-chain reclaim into buffer-pool page state.
+//!
+//! Why this exists:
+//! - Restart/recovery needs a single fail-closed path for overflow chain cleanup.
+//! - Idempotent reclaim allows safe re-application across repeated recovery runs.
+//!
+//! Boundaries:
+//! - This module focuses on overflow lifecycle replay, not full database recovery.
+//! - It relies on `BufferPool` and `Wal` primitives; checkpoint orchestration and
+//!   broader replay ordering policy are handled at higher layers.
+//!
+//! Contributor notes:
+//! - Keep corruption checks strict (page ownership, payload shapes, hop bounds).
+//! - Preserve allocation-free behavior in core replay paths by honoring caller
+//!   supplied record/payload buffers.
+//! - Treat idempotency as a correctness requirement, not an optimization.
 const std = @import("std");
 const buffer_pool_mod = @import("buffer_pool.zig");
 const overflow_mod = @import("overflow.zig");

@@ -1,3 +1,10 @@
+//! Runtime bootstrap/composition for core pg2 subsystems.
+//!
+//! Responsibilities in this file:
+//! - Builds buffer pool, WAL, transaction manager, undo log, and query buffers.
+//! - Uses startup-only static allocation and seals runtime memory for operation.
+//! - Validates memory-budget/config requirements before runtime activation.
+//! - Provides bounded per-query buffer slot acquisition/release APIs.
 const std = @import("std");
 const io_mod = @import("../storage/io.zig");
 const buffer_pool_mod = @import("../storage/buffer_pool.zig");

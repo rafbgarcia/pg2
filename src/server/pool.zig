@@ -1,3 +1,10 @@
+//! Connection-pool lease model over runtime query slots.
+//!
+//! Responsibilities in this file:
+//! - Manages checkout/checkin lifecycles for bounded query buffer slots.
+//! - Starts transactions and snapshots per checked-out pool connection.
+//! - Supports overload policies (reject/queue) with lightweight pool stats.
+//! - Enforces pin/unpin semantics for connection-scoped long-lived work.
 const std = @import("std");
 const bootstrap_mod = @import("../runtime/bootstrap.zig");
 const tx_mod = @import("../mvcc/transaction.zig");

@@ -1,3 +1,10 @@
+//! Query/schema tokenizer for pg2 source text.
+//!
+//! Responsibilities in this file:
+//! - Converts source bytes into bounded token streams with line metadata.
+//! - Classifies literals, identifiers, keywords, operators, and punctuation.
+//! - Provides token text slicing helpers used by parser and catalog loader.
+//! - Fails closed with deterministic error reporting on malformed lexemes.
 const std = @import("std");
 
 /// Token types produced by the tokenizer.

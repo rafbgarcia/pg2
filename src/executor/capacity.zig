@@ -1,3 +1,9 @@
+//! Executor capacity contracts for bounded operator behavior.
+//!
+//! Responsibilities in this file:
+//! - Defines explicit max limits for pipeline, sort, aggregate, and join paths.
+//! - Provides default capacity bundles for execution planning/runtime.
+//! - Encodes compile-time assertions that keep limits internally consistent.
 const std = @import("std");
 const scan_mod = @import("scan.zig");
 

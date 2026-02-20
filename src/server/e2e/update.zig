@@ -1,3 +1,4 @@
+//! E2E coverage for update behavior through server session path.
 const std = @import("std");
 const e2e = @import("test_env.zig");
 

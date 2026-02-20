@@ -69,7 +69,7 @@ This milestone is done only when all conditions below are true:
 
 ## Next-Session Kickoff (Concrete)
 
-Completed in committed chunks `c5548a0`, `fd81f61`, `ad8ccd7`, `505fff1`, `7ad8fc5`, `852a31e`, and `3d0c648`:
+Completed:
 
 1. Overflow reclaim pipeline.
 2. WAL lifecycle contract for create/relink/unlink/reclaim.

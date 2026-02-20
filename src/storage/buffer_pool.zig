@@ -1,3 +1,28 @@
+//! In-memory page cache with clock-sweep eviction and WAL-aware flushing.
+//!
+//! Responsibilities in this file:
+//! - Caches fixed-size pages in frames keyed by `page_id`.
+//! - Provides pin/unpin lifecycle and dirty tracking for callers.
+//! - Handles page load/eviction/flush against `Storage`.
+//! - Enforces WAL protocol on flush (`page.lsn <= wal.flushed_lsn`).
+//!
+//! Why this exists:
+//! - Storage performance and correctness depend on controlled page residency.
+//! - A central buffer manager is required to enforce eviction and flush invariants.
+//!
+//! Integrity behavior:
+//! - Deserialization failures on non-zero bytes fail closed as checksum errors.
+//! - Optional allocation metadata rejects all-zero reads for allocated pages to
+//!   avoid silently accepting torn/corrupt writes.
+//!
+//! Boundaries:
+//! - This module is not responsible for lock management or transaction semantics.
+//! - It manages page lifecycle and durability ordering only.
+//!
+//! Contributor notes:
+//! - Preserve pin-count and eviction invariants; never evict pinned frames.
+//! - Keep flush ordering strict with WAL to prevent lost committed updates.
+//! - Be explicit about corruption paths; avoid silently reinitializing data pages.
 const std = @import("std");
 const io = @import("io.zig");
 const page_mod = @import("page.zig");

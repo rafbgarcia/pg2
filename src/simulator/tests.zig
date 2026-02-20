@@ -1,3 +1,8 @@
+//! Simulator test aggregation module.
+//!
+//! Responsibilities in this file:
+//! - Forces compile-time discovery of simulator fault-matrix suites.
+//! - Provides a stable test target root for simulator-focused runs.
 const std = @import("std");
 const pg2 = @import("pg2");
 

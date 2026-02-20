@@ -1,3 +1,10 @@
+//! Root module export surface for pg2 subsystems.
+//!
+//! Responsibilities in this file:
+//! - Re-exports storage, mvcc, parser, catalog, executor, runtime, server, and
+//!   simulator modules under stable namespace groups.
+//! - Forces compile-time test discovery across the full module graph.
+//! - Serves as the primary import entrypoint for binaries/tests.
 pub const storage = struct {
     pub const io = @import("storage/io.zig");
     pub const page = @import("storage/page.zig");

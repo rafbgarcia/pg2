@@ -1,3 +1,9 @@
+//! Transport-agnostic server connection interfaces.
+//!
+//! Responsibilities in this file:
+//! - Defines `Connection` request/response framing contract.
+//! - Defines `Acceptor` contract for pending-connection retrieval.
+//! - Provides a stable abstraction shared by TCP and io_uring backends.
 const std = @import("std");
 
 pub const AcceptError = error{

@@ -1,3 +1,25 @@
+//! Core page format and (de)serialization for persistent storage.
+//!
+//! Responsibilities in this file:
+//! - Defines the database-wide page header contract (`PageHeader`).
+//! - Defines valid page kinds (`PageType`) used by storage structures.
+//! - Serializes/deserializes pages with checksum and format validation.
+//! - Provides `Page.init` for deterministic zeroed page construction.
+//!
+//! Why this exists:
+//! - Every storage subsystem reads/writes the same 8KB page primitive.
+//! - A single canonical format prevents per-module drift and hidden coupling.
+//!
+//! Integrity behavior:
+//! - Deserialization verifies checksum first, then type/magic/version fields.
+//! - Invalid bytes fail closed via explicit errors instead of permissive parsing.
+//!
+//! Contributor notes:
+//! - `PageHeader` layout is an on-disk contract; incompatible changes require
+//!   versioning and compatibility handling.
+//! - Keep serialization deterministic (little-endian encoding, fixed offsets).
+//! - Higher layers own semantics of page content; this module only handles the
+//!   common envelope and validation.
 const std = @import("std");
 const io = @import("io.zig");
 

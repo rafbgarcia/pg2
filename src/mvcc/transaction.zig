@@ -1,3 +1,10 @@
+//! Fixed-capacity transaction manager and snapshot visibility rules.
+//!
+//! Responsibilities in this file:
+//! - Assigns transaction IDs and tracks active/committed/aborted states.
+//! - Produces snapshots for repeatable visibility checks.
+//! - Exposes oldest-active boundaries used by undo truncation policy.
+//! - Enforces bounded state windows with explicit exhaustion errors.
 const std = @import("std");
 
 pub const TxId = u64;

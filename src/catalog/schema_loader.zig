@@ -1,3 +1,10 @@
+//! Schema AST-to-catalog loader.
+//!
+//! Responsibilities in this file:
+//! - Walks parsed schema nodes and populates catalog metadata.
+//! - Resolves model/column/index/association/scope references.
+//! - Validates fail-closed schema constraints and association wiring.
+//! - Keeps loader behavior deterministic for the same token/AST input.
 const std = @import("std");
 const catalog_mod = @import("catalog.zig");
 const ast_mod = @import("../parser/ast.zig");
@@ -87,13 +94,28 @@ fn loadModelMembers(
         switch (node.tag) {
             .schema_field => try loadField(catalog, tokens, source, model_id, node),
             .schema_has_many => try loadAssociation(
-                catalog, tokens, source, model_id, node, .has_many,
+                catalog,
+                tokens,
+                source,
+                model_id,
+                node,
+                .has_many,
             ),
             .schema_has_one => try loadAssociation(
-                catalog, tokens, source, model_id, node, .has_one,
+                catalog,
+                tokens,
+                source,
+                model_id,
+                node,
+                .has_one,
             ),
             .schema_belongs_to => try loadAssociation(
-                catalog, tokens, source, model_id, node, .belongs_to,
+                catalog,
+                tokens,
+                source,
+                model_id,
+                node,
+                .belongs_to,
             ),
             .schema_reference => try loadReference(
                 catalog,
@@ -105,7 +127,13 @@ fn loadModelMembers(
             ),
             .schema_index => try loadIndex(catalog, tree, tokens, source, model_id, node, false),
             .schema_unique_index => try loadIndex(
-                catalog, tree, tokens, source, model_id, node, true,
+                catalog,
+                tree,
+                tokens,
+                source,
+                model_id,
+                node,
+                true,
             ),
             .schema_scope => try loadScope(catalog, tokens, source, model_id, node),
             else => return error.UnexpectedNodeTag,

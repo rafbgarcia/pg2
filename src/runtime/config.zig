@@ -1,3 +1,9 @@
+//! Runtime configuration parsing helpers.
+//!
+//! Responsibilities in this file:
+//! - Defines default runtime sizing constants.
+//! - Parses human-friendly memory-budget strings for CLI/runtime config.
+//! - Validates and normalizes units with explicit overflow/error handling.
 const std = @import("std");
 
 pub const default_memory_bytes: usize = 512 * 1024 * 1024;

@@ -1,3 +1,22 @@
+//! Storage-facing runtime interfaces (I/O, clock, and network abstractions).
+//!
+//! Responsibilities in this file:
+//! - Declares `Storage`, `Clock`, and `Network` interfaces used by core modules.
+//! - Defines shared constants/errors (`page_size`, `StorageError`).
+//! - Provides production clock wiring (`RealClock`) while preserving interface use.
+//!
+//! Why this exists:
+//! - Core database logic must not depend directly on OS-specific APIs.
+//! - Deterministic simulation requires replaceable implementations of side effects.
+//!
+//! Boundaries:
+//! - This file defines interfaces and light adapters, not storage engine policy.
+//! - Concrete simulated implementations live outside this module.
+//!
+//! Contributor notes:
+//! - Keep interfaces minimal and explicit; avoid leaking hidden global state.
+//! - Core code should consume these abstractions rather than direct system calls.
+//! - Preserve deterministic behavior expectations (especially for tests/simulation).
 const std = @import("std");
 
 pub const page_size = 8192;

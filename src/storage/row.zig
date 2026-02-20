@@ -1,3 +1,24 @@
+//! Row value and row-byte encoding primitives.
+//!
+//! Responsibilities in this file:
+//! - Defines logical scalar types (`ColumnType`) and runtime values (`Value`).
+//! - Defines row schema metadata (`RowSchema`, `ColumnDef`) used for encoding.
+//! - Encodes/decodes row payload bytes with explicit format guards.
+//! - Provides value comparison semantics used by planner/executor/storage paths.
+//!
+//! Why this exists:
+//! - Storage modules need a single canonical way to represent typed row bytes.
+//! - Centralizing encoding/decoding avoids subtle compatibility bugs.
+//!
+//! Behavioral notes:
+//! - Null handling is explicit (`null_value`) and comparison sorts null last.
+//! - String values are variable-length; fixed-width accounting excludes strings.
+//! - Format magic/version checks fail closed during decode.
+//!
+//! Contributor notes:
+//! - Row byte layout is part of the persistent contract.
+//! - If encoding changes, bump version and preserve decode compatibility rules.
+//! - Keep type mismatch/nullability checks strict; do not silently coerce values.
 const std = @import("std");
 
 /// Column data types supported by pg2.

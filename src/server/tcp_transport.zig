@@ -1,3 +1,9 @@
+//! TCP transport backend implementing server transport interfaces.
+//!
+//! Responsibilities in this file:
+//! - Accepts TCP connections and exposes them as `transport.Connection`.
+//! - Implements newline-delimited request framing and response writes.
+//! - Handles connection lifecycle and platform-safe cleanup for tests/runtime.
 const std = @import("std");
 const builtin = @import("builtin");
 const transport_mod = @import("transport.zig");

@@ -1,3 +1,8 @@
+//! Simulation binary entrypoint.
+//!
+//! Responsibilities in this file:
+//! - Parses seed/tick arguments for deterministic simulation runs.
+//! - Emits run configuration and placeholder status for simulator execution.
 const std = @import("std");
 
 pub fn main() !void {

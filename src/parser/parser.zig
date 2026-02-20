@@ -1,3 +1,10 @@
+//! Top-level parser from tokens to full query/schema AST.
+//!
+//! Responsibilities in this file:
+//! - Parses statements, pipelines, operators, selection sets, and schema blocks.
+//! - Delegates expression parsing while wiring statement/operator structure.
+//! - Returns bounded parse diagnostics without heap allocation in core flow.
+//! - Keeps grammar handling deterministic and explicit for contributor debugging.
 const std = @import("std");
 const ast_mod = @import("ast.zig");
 const tokenizer_mod = @import("tokenizer.zig");

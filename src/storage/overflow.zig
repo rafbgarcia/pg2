@@ -1,3 +1,42 @@
+//! Overflow storage primitives for large field values.
+//!
+//! Responsibilities in this file:
+//! - Defines the on-page overflow chunk format (`OverflowHeader` + payload bytes).
+//! - Provides read/write helpers for a single overflow page (`OverflowPage`).
+//! - Defines a dedicated page-id allocator for overflow chains (`PageIdAllocator`).
+//! - Tracks chain roots pending reclamation via a bounded FIFO (`ReclaimQueue`).
+//!
+//! Why this exists:
+//! - Row storage can keep small values inline for locality and simplicity.
+//! - Larger values (for example long strings above `string_inline_threshold_bytes`)
+//!   are split into chunks and linked across overflow pages.
+//! - Keeping this logic isolated gives one explicit place for overflow format
+//!   validation, version checks, and fail-closed behavior.
+//!
+//! How it works:
+//! - Each overflow page stores:
+//!   - a versioned header (`format_magic`, `format_version`, `next_page_id`,
+//!     `payload_len`), and
+//!   - one payload chunk of up to `OverflowPage.max_payload_len()` bytes.
+//! - Chaining is singly linked via `next_page_id`; `0` means end of chain.
+//! - Header reads validate magic/version/payload bounds before exposing bytes.
+//! - `writeChunk` rewrites header + payload and zero-fills trailing bytes to keep
+//!   deterministic page content.
+//!
+//! Boundaries and non-responsibilities:
+//! - This file does not decide *when* to overflow a value; callers do.
+//! - This file does not walk full chains, manage transactions, WAL ordering, or
+//!   crash recovery policy; those belong to higher storage/MVCC layers.
+//! - Reclaim queue entries are chain root page ids only; actual reclamation logic
+//!   is external and must consume the queue explicitly.
+//!
+//! Contributor notes:
+//! - Treat `OverflowHeader` as an on-disk contract. Any incompatible change must
+//!   be versioned and accompanied by upgrade/read-compat handling.
+//! - Keep validation fail-closed (`InvalidPageFormat` /
+//!   `UnsupportedPageVersion`) instead of accepting ambiguous bytes.
+//! - Preserve allocator region disjointness so overflow page ids do not collide
+//!   with other reserved page-id spaces.
 const std = @import("std");
 const page_mod = @import("page.zig");
 

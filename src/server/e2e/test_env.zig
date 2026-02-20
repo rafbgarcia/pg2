@@ -1,3 +1,9 @@
+//! Shared E2E harness for server session-path tests.
+//!
+//! Responsibilities in this file:
+//! - Builds deterministic in-memory runtime/disk/catalog test fixtures.
+//! - Applies schema definitions and initializes heap pages for models.
+//! - Provides a thin request executor over `Session` + `ConnectionPool`.
 const std = @import("std");
 const bootstrap_mod = @import("../../runtime/bootstrap.zig");
 const catalog_mod = @import("../../catalog/catalog.zig");

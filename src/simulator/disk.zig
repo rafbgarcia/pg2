@@ -1,3 +1,10 @@
+//! Deterministic simulated disk with crash/fault injection.
+//!
+//! Responsibilities in this file:
+//! - Implements the `Storage` interface with durable vs pending write tiers.
+//! - Models fsync durability boundaries and crash loss of unflushed writes.
+//! - Provides deterministic one-shot fault injection for read/write/fsync paths.
+//! - Exposes helpers for crash/restart and durability assertions in tests.
 const std = @import("std");
 const io = @import("../storage/io.zig");
 

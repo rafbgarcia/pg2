@@ -1,3 +1,8 @@
+//! Deterministic simulated clock implementation.
+//!
+//! Responsibilities in this file:
+//! - Implements the `io.Clock` interface with explicit tick control.
+//! - Enables deterministic time progression in tests/simulation harnesses.
 const io = @import("../storage/io.zig");
 
 /// Deterministic clock for simulation. Time advances only when

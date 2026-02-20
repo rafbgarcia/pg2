@@ -1,3 +1,9 @@
+//! Deterministic storage/WAL fault-matrix simulation tests.
+//!
+//! Responsibilities in this file:
+//! - Runs seeded fault scenarios across WAL, buffer pool, heap, and btree paths.
+//! - Verifies replay/crash behavior remains deterministic per seed.
+//! - Produces compact scenario signatures for reproducibility checks.
 const std = @import("std");
 const disk_mod = @import("disk.zig");
 const wal_mod = @import("../storage/wal.zig");

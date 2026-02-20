@@ -1,3 +1,9 @@
+//! Request execution adapter at runtime boundary.
+//!
+//! Responsibilities in this file:
+//! - Converts checked-out pool/runtime state into executor context.
+//! - Executes parsed requests through a lease-owned transaction snapshot.
+//! - Centralizes request-to-executor wiring used by server session handling.
 const std = @import("std");
 const bootstrap_mod = @import("bootstrap.zig");
 const exec_mod = @import("../executor/executor.zig");
