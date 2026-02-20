@@ -9,6 +9,9 @@ comptime {
     _ = @import("constraints/not_null.zig");
     _ = @import("constraints/type_mismatch.zig");
     _ = @import("constraints/unknown_field.zig");
+    _ = @import("field_types/bigint.zig");
+    _ = @import("field_types/boolean.zig");
+    _ = @import("field_types/string.zig");
     _ = @import("mutations/delete.zig");
     _ = @import("mutations/insert.zig");
     _ = @import("overflow_reclaim_crash_matrix.zig");
