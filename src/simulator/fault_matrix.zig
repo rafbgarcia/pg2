@@ -4,12 +4,16 @@ const wal_mod = @import("../storage/wal.zig");
 const buffer_pool_mod = @import("../storage/buffer_pool.zig");
 const btree_mod = @import("../storage/btree.zig");
 const heap_mod = @import("../storage/heap.zig");
+const tx_mod = @import("../mvcc/transaction.zig");
+const undo_mod = @import("../mvcc/undo.zig");
 
 const SimulatedDisk = disk_mod.SimulatedDisk;
 const Wal = wal_mod.Wal;
 const BufferPool = buffer_pool_mod.BufferPool;
 const BTree = btree_mod.BTree;
 const RowId = heap_mod.RowId;
+const TxManager = tx_mod.TxManager;
+const UndoLog = undo_mod.UndoLog;
 
 const ScenarioOutcome = struct {
     signature: u64,
@@ -880,6 +884,78 @@ fn runExtendedWalBufferPoolCycles(seed: u64) !ScenarioOutcome {
     return .{ .signature = h.final() };
 }
 
+fn runRollbackVisibilityEdge(seed: u64) !ScenarioOutcome {
+    var prng = std.Random.DefaultPrng.init(seed);
+    const rand = prng.random();
+
+    var tm = TxManager.init(std.testing.allocator);
+    defer tm.deinit();
+    var undo_log = try UndoLog.init(std.testing.allocator, 128, 8 * 1024);
+    defer undo_log.deinit();
+
+    const page_id: u64 = 1200 + rand.uintLessThan(u64, 32);
+    const slot: u16 = rand.uintLessThan(u16, 16);
+
+    // Baseline committed transaction.
+    const tx_base = try tm.begin();
+    try tm.commit(tx_base);
+
+    // Reader starts before writer transactions.
+    const tx_reader_before = try tm.begin();
+    var snap_before = try tm.snapshot(tx_reader_before);
+    defer snap_before.deinit();
+
+    var old_v1: [24]u8 = undefined;
+    const old_v1_len = 8 + rand.uintLessThan(usize, 8);
+    rand.bytes(old_v1[0..old_v1_len]);
+
+    var old_v2: [24]u8 = undefined;
+    const old_v2_len = 8 + rand.uintLessThan(usize, 8);
+    rand.bytes(old_v2[0..old_v2_len]);
+
+    // First update commits.
+    const tx_writer_1 = try tm.begin();
+    _ = try undo_log.push(tx_writer_1, page_id, slot, old_v1[0..old_v1_len]);
+    try tm.commit(tx_writer_1);
+
+    // Head update aborts (rollback edge).
+    const tx_writer_2 = try tm.begin();
+    _ = try undo_log.push(tx_writer_2, page_id, slot, old_v2[0..old_v2_len]);
+    try tm.abort(tx_writer_2);
+
+    // Reader starts after the aborted head transaction.
+    const tx_reader_after = try tm.begin();
+    var snap_after = try tm.snapshot(tx_reader_after);
+    defer snap_after.deinit();
+
+    const before_visible = undo_log.findVisible(page_id, slot, &snap_before, &tm);
+    try std.testing.expect(before_visible != null);
+    try std.testing.expectEqualSlices(u8, old_v1[0..old_v1_len], before_visible.?);
+
+    const after_visible = undo_log.findVisible(page_id, slot, &snap_after, &tm);
+    try std.testing.expect(after_visible != null);
+    try std.testing.expectEqualSlices(u8, old_v2[0..old_v2_len], after_visible.?);
+
+    try tm.commit(tx_reader_before);
+    try tm.commit(tx_reader_after);
+
+    const old_len = undo_log.len();
+    undo_log.truncate(tm.getOldestActive());
+    try std.testing.expect(undo_log.len() <= old_len);
+    try std.testing.expectEqual(@as(u32, 0), undo_log.len());
+
+    var h = std.hash.Wyhash.init(seed ^ 0xA11CE00D);
+    h.update(std.mem.asBytes(&page_id));
+    h.update(std.mem.asBytes(&slot));
+    h.update(std.mem.asBytes(&old_len));
+    h.update(std.mem.asBytes(&undo_log.len()));
+    h.update(old_v1[0..old_v1_len]);
+    h.update(old_v2[0..old_v2_len]);
+    h.update(before_visible.?);
+    h.update(after_visible.?);
+    return .{ .signature = h.final() };
+}
+
 const seed_set = [_]u64{
     0xC0FFEE01,
     0xC0FFEEA5,
@@ -968,6 +1044,14 @@ test "seeded schedule: extended WAL + buffer-pool cycles remain replay-determini
     }
 }
 
+test "seeded schedule: rollback visibility edge remains replay-deterministic" {
+    for (seed_set) |seed| {
+        const first = try runRollbackVisibilityEdge(seed);
+        const second = try runRollbackVisibilityEdge(seed);
+        try std.testing.expectEqual(first.signature, second.signature);
+    }
+}
+
 test "seeded schedule: btree split flush crash interleaving remains replay-deterministic" {
     for (seed_set) |seed| {
         const first = try runBTreeSplitFlushCrashInterleaving(seed);
@@ -1025,6 +1109,11 @@ test "ci seed sweep: extended deterministic replay coverage for short schedules"
         "btree_split_protocol_crash_matrix",
         ci_short_seed_set[0..],
         runBTreeSplitProtocolCrashMatrix,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "rollback_visibility_edge",
+        ci_short_seed_set[0..],
+        runRollbackVisibilityEdge,
     );
 }
 
