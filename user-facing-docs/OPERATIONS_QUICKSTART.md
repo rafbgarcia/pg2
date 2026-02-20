@@ -24,7 +24,8 @@ zig build sim
 ## Query Session Output Contract
 
 - Requests return one text response per query.
-- Success starts with `OK rows=<n>`.
+- Success starts with
+  `OK returned_rows=<n> inserted_rows=<n> updated_rows=<n> deleted_rows=<n>`.
 - Errors start with `ERR ...`.
 - `inspect` adds deterministic diagnostic lines after row output.
   - includes overflow reclaim queue depth and reclaim counters.

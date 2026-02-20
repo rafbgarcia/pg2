@@ -63,6 +63,7 @@ pub fn classifyMutation(err: mutation_mod.MutationError) ErrorClass {
         error.BufferTooSmall => .resource_exhausted,
         error.TypeMismatch => .fatal,
         error.NullNotAllowed => .fatal,
+        error.DuplicateKey => .fatal,
         error.ColumnNotFound => .fatal,
         error.InvalidLiteral => .fatal,
         error.StackOverflow => .resource_exhausted,

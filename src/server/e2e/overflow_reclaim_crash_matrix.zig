@@ -75,11 +75,14 @@ fn runCrashScenario(crash_point: CrashPoint) !ScenarioOutcome {
     var insert_buf: [2800]u8 = undefined;
     const insert_req = try std.fmt.bufPrint(
         insert_buf[0..],
-        "User |> insert(id = 1, name = \"{s}\", bio = \"{s}\")",
+        "User |> insert(id = 1, name = \"{s}\", bio = \"{s}\") {{}}",
         .{ name_a[0..], bio_a[0..] },
     );
     var result = try executor.run(insert_req);
-    try std.testing.expectEqualStrings("OK rows=0\n", result);
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
 
     // Persist initial overflow chains so replay has durable pre-reclaim page state.
     try env.runtime.pool.flushAll();
@@ -91,11 +94,14 @@ fn runCrashScenario(crash_point: CrashPoint) !ScenarioOutcome {
     var update_buf: [3000]u8 = undefined;
     const update_req = try std.fmt.bufPrint(
         update_buf[0..],
-        "User |> where(id = 1) |> update(name = \"{s}\", bio = \"{s}\")",
+        "User |> where(id = 1) |> update(name = \"{s}\", bio = \"{s}\") {{}}",
         .{ name_b[0..], bio_b[0..] },
     );
     result = try executor.run(update_req);
-    try std.testing.expectEqualStrings("OK rows=0\n", result);
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=0 updated_rows=1 deleted_rows=0\n",
+        result,
+    );
     try std.testing.expectEqual(@as(usize, 1), env.catalog.overflow_reclaim_queue.len);
     try std.testing.expectEqual(
         overflow_mod.ReclaimEntryState.committed,
@@ -104,8 +110,11 @@ fn runCrashScenario(crash_point: CrashPoint) !ScenarioOutcome {
 
     if (crash_point == .after_followup_commit) {
         // Follow-up successful mutation creates another commit boundary that drains one more chain.
-        result = try executor.run("User |> insert(id = 2, name = \"n\", bio = \"b\")");
-        try std.testing.expectEqualStrings("OK rows=0\n", result);
+        result = try executor.run("User |> insert(id = 2, name = \"n\", bio = \"b\") {}");
+        try std.testing.expectEqualStrings(
+            "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+            result,
+        );
         try std.testing.expect(env.catalog.overflow_reclaim_queue.isEmpty());
     }
 
@@ -239,11 +248,14 @@ test "e2e crash matrix: repeated replay cycles remain idempotent after durable m
     var insert_buf: [2800]u8 = undefined;
     const insert_req = try std.fmt.bufPrint(
         insert_buf[0..],
-        "User |> insert(id = 1, name = \"{s}\", bio = \"{s}\")",
+        "User |> insert(id = 1, name = \"{s}\", bio = \"{s}\") {{}}",
         .{ name_a[0..], bio_a[0..] },
     );
     var result = try executor.run(insert_req);
-    try std.testing.expectEqualStrings("OK rows=0\n", result);
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
     try env.runtime.pool.flushAll();
 
     var name_b: [1200]u8 = undefined;
@@ -253,15 +265,21 @@ test "e2e crash matrix: repeated replay cycles remain idempotent after durable m
     var update_buf: [3000]u8 = undefined;
     const update_req = try std.fmt.bufPrint(
         update_buf[0..],
-        "User |> where(id = 1) |> update(name = \"{s}\", bio = \"{s}\")",
+        "User |> where(id = 1) |> update(name = \"{s}\", bio = \"{s}\") {{}}",
         .{ name_b[0..], bio_b[0..] },
     );
     result = try executor.run(update_req);
-    try std.testing.expectEqualStrings("OK rows=0\n", result);
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=0 updated_rows=1 deleted_rows=0\n",
+        result,
+    );
 
     // A second write commit boundary drains the second committed chain.
-    result = try executor.run("User |> insert(id = 2, name = \"n\", bio = \"b\")");
-    try std.testing.expectEqualStrings("OK rows=0\n", result);
+    result = try executor.run("User |> insert(id = 2, name = \"n\", bio = \"b\") {}");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
     try std.testing.expect(env.catalog.overflow_reclaim_queue.isEmpty());
 
     env.disk.crash();

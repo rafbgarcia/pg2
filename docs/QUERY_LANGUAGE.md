@@ -167,6 +167,8 @@ Rules:
 Model |> operator(...) |> ... { selection }
 ```
 
+Returning blocks are mandatory for CRUD statements. Use `{}` for no returned rows.
+
 Examples:
 
 ```pg2
@@ -210,7 +212,7 @@ Output lines:
 Example:
 
 ```text
-OK rows=0
+OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0
 INSPECT exec rows_scanned=0 rows_matched=0 rows_returned=0 rows_inserted=0 rows_updated=0 rows_deleted=0 pages_read=0 pages_written=0
 INSPECT pool policy=reject size=1 checked_out=1 pinned=0 exhausted_total=0
 INSPECT overflow reclaim_queue_depth=0 reclaim_enqueued_total=0 reclaim_dequeued_total=0 reclaim_chains_total=0 reclaim_pages_total=0 reclaim_failures_total=0
@@ -298,19 +300,19 @@ Post |> group(user_id) |> where(count(*) > 1) |> sort(count(*) desc) { user_id }
 ### Insert
 
 ```pg2
-User |> insert(id = 1, email = "a@x.com", active = true)
+User |> insert(id = 1, email = "a@x.com", active = true) {}
 ```
 
 ### Update
 
 ```pg2
-User |> where(id = 1) |> update(email = "new@x.com")
+User |> where(id = 1) |> update(email = "new@x.com") {}
 ```
 
 ### Delete
 
 ```pg2
-User |> where(id = 1) |> delete
+User |> where(id = 1) |> delete {}
 ```
 
 ---

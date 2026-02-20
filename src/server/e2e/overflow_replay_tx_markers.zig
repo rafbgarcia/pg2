@@ -53,11 +53,14 @@ test "e2e overflow replay fails closed for lifecycle record without tx markers" 
     var insert_req_buf: [1500]u8 = undefined;
     const insert_req = try std.fmt.bufPrint(
         insert_req_buf[0..],
-        "User |> insert(id = 1, name = \"{s}\")",
+        "User |> insert(id = 1, name = \"{s}\") {{}}",
         .{long_name[0..]},
     );
     const result = try executor.run(insert_req);
-    try std.testing.expectEqualStrings("OK rows=0\n", result);
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
     try env.runtime.pool.flushAll();
 
     var wal_records: [128]Record = undefined;

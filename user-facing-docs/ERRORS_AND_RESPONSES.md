@@ -4,7 +4,8 @@ pg2 server responses are line-oriented text.
 
 ## Success Shape
 
-- Query success starts with: `OK rows=<n>`
+- Query success starts with:
+  `OK returned_rows=<n> inserted_rows=<n> updated_rows=<n> deleted_rows=<n>`
 - Each returned row is comma-separated on its own line.
 - `inspect` appends `INSPECT ...` lines after rows.
   - includes `INSPECT overflow ...` reclaim backlog/throughput counters.
@@ -12,7 +13,7 @@ pg2 server responses are line-oriented text.
 Example:
 
 ```text
-OK rows=2
+OK returned_rows=2 inserted_rows=0 updated_rows=0 deleted_rows=0
 2,Alice,true
 1,Charlie,true
 ```

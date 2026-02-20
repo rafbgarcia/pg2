@@ -65,6 +65,7 @@ pub const MutationError = error{
     BufferTooSmall,
     TypeMismatch,
     NullNotAllowed,
+    DuplicateKey,
     // Filter/scan errors
     ColumnNotFound,
     InvalidLiteral,
@@ -162,6 +163,12 @@ pub fn executeInsert(
         schema,
         first_assignment_node,
         &values,
+    );
+    try enforceInsertUniqueness(
+        catalog,
+        pool,
+        model_id,
+        values[0..schema.column_count],
     );
     try enforceOutgoingReferentialIntegrity(
         catalog,
@@ -1370,6 +1377,86 @@ fn rowExistsForValue(
             if (row_mod.compareValues(decoded[col_idx], key) == .eq) {
                 return true;
             }
+        }
+    }
+    return false;
+}
+
+fn enforceInsertUniqueness(
+    catalog: *const Catalog,
+    pool: *BufferPool,
+    model_id: ModelId,
+    values: []const Value,
+) MutationError!void {
+    const model = &catalog.models[model_id];
+
+    var col_id: catalog_mod.ColumnId = 0;
+    while (col_id < model.column_count) : (col_id += 1) {
+        if (model.columns[col_id].is_primary_key) {
+            if (rowExistsForValue(catalog, pool, model_id, col_id, values[col_id])) {
+                return error.DuplicateKey;
+            }
+            break;
+        }
+    }
+
+    var idx_id: u16 = 0;
+    while (idx_id < model.index_count) : (idx_id += 1) {
+        const idx = model.indexes[idx_id];
+        if (!idx.is_unique or idx.column_count == 0) continue;
+        if (uniqueKeyHasNull(values, idx.column_ids[0..idx.column_count])) continue;
+        if (rowExistsForUniqueIndex(catalog, pool, model_id, &idx, values)) {
+            return error.DuplicateKey;
+        }
+    }
+}
+
+fn uniqueKeyHasNull(
+    values: []const Value,
+    key_column_ids: []const catalog_mod.ColumnId,
+) bool {
+    for (key_column_ids) |col_id| {
+        if (col_id >= values.len) return true;
+        if (values[col_id] == .null_value) return true;
+    }
+    return false;
+}
+
+fn rowExistsForUniqueIndex(
+    catalog: *const Catalog,
+    pool: *BufferPool,
+    model_id: ModelId,
+    index: *const catalog_mod.IndexInfo,
+    key_values: []const Value,
+) bool {
+    const model = &catalog.models[model_id];
+    const schema = &model.row_schema;
+
+    var page_idx: u32 = 0;
+    while (page_idx < model.total_pages) : (page_idx += 1) {
+        const page_id: u64 = @as(u64, model.heap_first_page_id) + page_idx;
+        const page = pool.pin(page_id) catch return false;
+        defer pool.unpin(page_id, false);
+
+        const slot_count = HeapPage.slot_count(page);
+        var slot_idx: u16 = 0;
+        while (slot_idx < slot_count) : (slot_idx += 1) {
+            const row_data = HeapPage.read(page, slot_idx) catch continue;
+            var decoded: [max_assignments]Value = undefined;
+            row_mod.decodeRowChecked(schema, row_data, decoded[0..schema.column_count]) catch
+                return false;
+
+            var all_match = true;
+            for (index.column_ids[0..index.column_count]) |col_id| {
+                if (col_id >= schema.column_count or col_id >= key_values.len) {
+                    return false;
+                }
+                if (row_mod.compareValues(decoded[col_id], key_values[col_id]) != .eq) {
+                    all_match = false;
+                    break;
+                }
+            }
+            if (all_match) return true;
         }
     }
     return false;

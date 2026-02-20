@@ -17,23 +17,34 @@ test "e2e query returns deterministic rows via session path" {
     );
 
     var result = try executor.run(
-        "User |> insert(id = 1, name = \"Charlie\", active = true)",
+        "User |> insert(id = 1, name = \"Charlie\", active = true) {}",
     );
-    try std.testing.expectEqualStrings("OK rows=0\n", result);
-
-    result = try executor.run(
-        "User |> insert(id = 2, name = \"Alice\", active = true)",
-    );
-    try std.testing.expectEqualStrings("OK rows=0\n", result);
-
-    result = try executor.run(
-        "User |> insert(id = 3, name = \"Bob\", active = false)",
-    );
-    try std.testing.expectEqualStrings("OK rows=0\n", result);
-
-    result = try executor.run("User |> where(active = true) |> sort(name asc)");
     try std.testing.expectEqualStrings(
-        "OK rows=2\n2,Alice,true\n1,Charlie,true\n",
+        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run(
+        "User |> insert(id = 2, name = \"Alice\", active = true) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run(
+        "User |> insert(id = 3, name = \"Bob\", active = false) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run(
+        "User |> where(active = true) |> sort(name asc) { id name active }",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=2 inserted_rows=0 updated_rows=0 deleted_rows=0\n2,Alice,true\n1,Charlie,true\n",
         result,
     );
 }

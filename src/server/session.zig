@@ -28,6 +28,7 @@ const ConnectionPool = pool_mod.ConnectionPool;
 const PoolConn = pool_mod.PoolConn;
 const PoolStats = pool_mod.PoolStats;
 const NodeTag = ast_mod.NodeTag;
+const null_node = ast_mod.null_node;
 const Value = row_mod.Value;
 const Acceptor = transport_mod.Acceptor;
 const Connection = transport_mod.Connection;
@@ -90,6 +91,16 @@ pub const Session = struct {
             const message = fixedMessage(parsed.error_message[0..]);
             writer.print("ERR parse: {s}\n", .{message}) catch
                 return error.ResponseTooLarge;
+            return .{
+                .bytes_written = stream.pos,
+                .is_query_error = true,
+                .had_mutation = false,
+            };
+        }
+        if (missingCrudReturningBlock(&parsed.ast)) {
+            writer.writeAll(
+                "ERR query: returning block required for CRUD statements; use {} for no returned rows\n",
+            ) catch return error.ResponseTooLarge;
             return .{
                 .bytes_written = stream.pos,
                 .is_query_error = true,
@@ -293,8 +304,15 @@ fn serializeQueryResult(
         return;
     }
 
-    writer.print("OK rows={d}\n", .{result.row_count}) catch
-        return error.ResponseTooLarge;
+    writer.print(
+        "OK returned_rows={d} inserted_rows={d} updated_rows={d} deleted_rows={d}\n",
+        .{
+            result.row_count,
+            result.stats.rows_inserted,
+            result.stats.rows_updated,
+            result.stats.rows_deleted,
+        },
+    ) catch return error.ResponseTooLarge;
 
     var row_index: usize = 0;
     while (row_index < result.row_count) : (row_index += 1) {
@@ -435,6 +453,31 @@ fn astHasInspectOp(ast: *const ast_mod.Ast) bool {
     return false;
 }
 
+fn missingCrudReturningBlock(ast: *const ast_mod.Ast) bool {
+    if (ast.root == null_node) return false;
+    const root = ast.getNode(ast.root);
+    if (root.tag != .root) return false;
+
+    var stmt = root.data.unary;
+    while (stmt != null_node) {
+        const node = ast.getNode(stmt);
+        if (node.tag == .pipeline and node.extra == 0) {
+            return true;
+        }
+        if (node.tag == .let_binding) {
+            const bound = node.data.unary;
+            if (bound != null_node) {
+                const bound_node = ast.getNode(bound);
+                if (bound_node.tag == .pipeline and bound_node.extra == 0) {
+                    return true;
+                }
+            }
+        }
+        stmt = node.next;
+    }
+    return false;
+}
+
 fn serializeValue(
     writer: anytype,
     value: Value,
@@ -498,13 +541,13 @@ test "session request path releases leased query slot after serialization" {
     const first = try session.handleRequest(
         &pool,
         &first_conn,
-        "User",
+        "User {}",
         response_buf[0..],
     );
     try pool.checkin(&first_conn);
     try std.testing.expect(!first.is_query_error);
     try std.testing.expectEqualStrings(
-        "OK rows=0\n",
+        "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
         response_buf[0..first.bytes_written],
     );
 
@@ -512,13 +555,13 @@ test "session request path releases leased query slot after serialization" {
     const second = try session.handleRequest(
         &pool,
         &second_conn,
-        "User",
+        "User {}",
         response_buf[0..],
     );
     try pool.checkin(&second_conn);
     try std.testing.expect(!second.is_query_error);
     try std.testing.expectEqualStrings(
-        "OK rows=0\n",
+        "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
         response_buf[0..second.bytes_written],
     );
 }
@@ -550,7 +593,7 @@ test "session request path serializes query results" {
     _ = try session.handleRequest(
         &pool,
         &insert_conn,
-        "User |> insert(id = 1, name = \"Alice\", active = true)",
+        "User |> insert(id = 1, name = \"Alice\", active = true) {}",
         response_buf[0..],
     );
     try pool.checkin(&insert_conn);
@@ -559,13 +602,54 @@ test "session request path serializes query results" {
     const result = try session.handleRequest(
         &pool,
         &read_conn,
-        "User",
+        "User { id name active }",
         response_buf[0..],
     );
     try pool.checkin(&read_conn);
     try std.testing.expect(!result.is_query_error);
     try std.testing.expectEqualStrings(
-        "OK rows=1\n1,Alice,true\n",
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,Alice,true\n",
+        response_buf[0..result.bytes_written],
+    );
+}
+
+test "session rejects CRUD pipeline without explicit returning block" {
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    const backing_memory = try std.testing.allocator.alloc(
+        u8,
+        256 * 1024 * 1024,
+    );
+    defer std.testing.allocator.free(backing_memory);
+
+    var runtime = try BootstrappedRuntime.init(
+        backing_memory,
+        disk.storage(),
+        .{ .max_query_slots = 1 },
+    );
+
+    var catalog = Catalog{};
+    try initUserModel(&catalog, &runtime);
+
+    var session = Session.init(&runtime, &catalog);
+    var pool = ConnectionPool.init(&runtime);
+    var response_buf: [1024]u8 = undefined;
+
+    var conn = try pool.checkout();
+    defer pool.checkin(&conn) catch {
+        @panic("pool checkin failed");
+    };
+
+    const result = try session.handleRequest(
+        &pool,
+        &conn,
+        "User |> where(id = 1)",
+        response_buf[0..],
+    );
+    try std.testing.expect(result.is_query_error);
+    try std.testing.expectEqualStrings(
+        "ERR query: returning block required for CRUD statements; use {} for no returned rows\n",
         response_buf[0..result.bytes_written],
     );
 }
@@ -597,14 +681,20 @@ test "session inspect appends execution and pool stats" {
     const result = try session.handleRequest(
         &pool,
         &conn,
-        "User |> inspect",
+        "User |> inspect {}",
         response_buf[0..],
     );
     try pool.checkin(&conn);
     try std.testing.expect(!result.is_query_error);
 
     const output = response_buf[0..result.bytes_written];
-    try std.testing.expect(std.mem.indexOf(u8, output, "OK rows=0\n") != null);
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
+        ) != null,
+    );
     try std.testing.expect(
         std.mem.indexOf(
             u8,
@@ -736,13 +826,13 @@ test "session accept loop routes multiple connections through handleRequest" {
 
     var conn_a = TestConnection{
         .requests = &[_][]const u8{
-            "User |> insert(id = 1, name = \"Alice\", active = true)",
-            "User",
+            "User |> insert(id = 1, name = \"Alice\", active = true) {}",
+            "User { id name active }",
         },
     };
     var conn_b = TestConnection{
         .requests = &[_][]const u8{
-            "User",
+            "User { id name active }",
         },
     };
 
@@ -768,15 +858,15 @@ test "session accept loop routes multiple connections through handleRequest" {
     try std.testing.expectEqual(@as(usize, 2), served);
 
     try std.testing.expectEqualStrings(
-        "OK rows=0\n",
+        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
         conn_a.response_log[0][0..conn_a.response_lens[0]],
     );
     try std.testing.expectEqualStrings(
-        "OK rows=1\n1,Alice,true\n",
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,Alice,true\n",
         conn_a.response_log[1][0..conn_a.response_lens[1]],
     );
     try std.testing.expectEqualStrings(
-        "OK rows=1\n1,Alice,true\n",
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,Alice,true\n",
         conn_b.response_log[0][0..conn_b.response_lens[0]],
     );
 }
@@ -849,7 +939,7 @@ test "session accept loop emits classified boundary error on pool exhaustion" {
     try initUserModel(&catalog, &runtime);
 
     var conn = TestConnection{
-        .request = "User",
+        .request = "User {}",
     };
 
     var session = Session.init(&runtime, &catalog);

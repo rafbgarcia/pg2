@@ -18,7 +18,8 @@ Status labels:
 - `supported`: `insert(...)`
 - `supported`: `where(...) |> update(...)` including row-growth update flow.
 - `supported`: `where(...) |> delete`
-- `supported`: model scan reads (`User`) and filtered reads (`User |> where(...)`)
+- `supported`: model scan reads and filtered reads with explicit returning blocks (for example `User { id }`, `User |> where(...) { id }`).
+- `supported`: CRUD statements without returning blocks are rejected fail-closed (`use {} for no returned rows`).
 
 String storage behavior (current):
 - `supported`: strings above 1024 bytes are stored through overflow chains transparently.
