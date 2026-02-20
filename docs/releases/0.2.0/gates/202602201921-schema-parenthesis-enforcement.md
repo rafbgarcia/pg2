@@ -1,7 +1,7 @@
 # Quality Gate Artifact: 202602201921-schema-parenthesis-enforcement
 
 - Artifact ID: `202602201921-schema-parenthesis-enforcement`
-- Commit: `pending`
+- Commit: `632bc45`
 - Release: `0.2.0`
 - Title: `Fail-closed schema parser contract for parenthesized declarations`
 - Scope: `Remove legacy non-parenthesized schema parsing fallbacks and enforce one obvious syntax for field/index declarations.`
