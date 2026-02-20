@@ -1,7 +1,7 @@
 # Quality Gate Artifact: 202602202520-overflow-reclaim-durable-write-commit-replay-matrix
 
 - Artifact ID: `202602202520-overflow-reclaim-durable-write-commit-replay-matrix`
-- Commit: `d92e3089200f4f2063a756a192980d650a234807`
+- Commit: `1f0cd0886d7f9446bb3762d8256c07d741b8633d`
 - Title: `durable reclaim via write-commit drain plus repeated replay matrix`
 - Scope: `Finalizes reclaim durability semantics by draining only on successful write commits and validates durable multi-chain reclaim across crash/restart and repeated idempotent replay cycles.`
 
