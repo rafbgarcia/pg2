@@ -2379,7 +2379,7 @@ test "mutation coercion accepts signed i64 minimum literal" {
     var expr_ast = Ast{};
     const source = "-9223372036854775808";
     const tokens = tokenizer_mod.tokenize(source);
-    const expr = try expression_mod.parseExpression(&expr_ast, &tokens, 0);
+    const expr = try expression_mod.parseExpression(&expr_ast, &tokens, "", 0);
     const schema = RowSchema{};
     const value = try filter_mod.evaluateExpression(
         &expr_ast,
@@ -2405,7 +2405,7 @@ test "mutation coercion fails closed for i8 underflow literal" {
     var expr_ast = Ast{};
     const source = "-129";
     const tokens = tokenizer_mod.tokenize(source);
-    const expr = try expression_mod.parseExpression(&expr_ast, &tokens, 0);
+    const expr = try expression_mod.parseExpression(&expr_ast, &tokens, "", 0);
     const schema = RowSchema{};
     const value = try filter_mod.evaluateExpression(
         &expr_ast,

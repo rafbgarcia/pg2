@@ -35,6 +35,7 @@ pub fn isSchemaKeyword(tok_type: TokenType) bool {
 pub fn parseSchemaDefinition(
     ast: *Ast,
     tokens: *const TokenizeResult,
+    source: []const u8,
     start_pos: u16,
 ) ParseError!NodeResult {
     const model_tok = start_pos;
@@ -49,7 +50,7 @@ pub fn parseSchemaDefinition(
     var last_member: NodeIndex = null_node;
 
     while (pos < tokens.count and tokens.tokens[pos].token_type != .right_brace) {
-        const member = try parseSchemaMember(ast, tokens, pos);
+        const member = try parseSchemaMember(ast, tokens, source, pos);
         if (first_member == null_node) {
             first_member = member.node;
             last_member = member.node;
@@ -74,6 +75,7 @@ pub fn parseSchemaDefinition(
 fn parseSchemaMember(
     ast: *Ast,
     tokens: *const TokenizeResult,
+    source: []const u8,
     start_pos: u16,
 ) ParseError!NodeResult {
     const tok_type = tokens.tokens[start_pos].token_type;
@@ -96,7 +98,7 @@ fn parseSchemaMember(
         var last_op: NodeIndex = null_node;
         while (pos < tokens.count and tokens.tokens[pos].token_type == .pipe_arrow) {
             pos += 1;
-            const op = try parser_ops.parseOperator(ast, tokens, pos);
+            const op = try parser_ops.parseOperator(ast, tokens, source, pos);
             if (first_op == null_node) {
                 first_op = op.node;
                 last_op = op.node;

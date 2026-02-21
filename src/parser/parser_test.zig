@@ -124,6 +124,20 @@ test "parse computed field" {
     try testing.expect(!result.has_error);
 }
 
+test "parse where membership call with list literal" {
+    const source = "User |> where(in(status, [\"active\", \"pending\"])) { id }";
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(!result.has_error);
+}
+
+test "parse where membership call rejects non-list second argument" {
+    const source = "User |> where(in(status, status_list)) { id }";
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(result.has_error);
+}
+
 test "parse error on invalid syntax" {
     const source = "|> where";
     const tokens = tokenizer_mod.tokenize(source);

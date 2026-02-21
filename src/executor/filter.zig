@@ -1113,7 +1113,7 @@ test "unary minus supports signed i64 minimum literal through expression path" {
     var tree = Ast{};
     const source = "-9223372036854775808";
     const tokens = tokenizer_mod.tokenize(source);
-    const expr = try expression_mod.parseExpression(&tree, &tokens, 0);
+    const expr = try expression_mod.parseExpression(&tree, &tokens, "", 0);
     const schema = RowSchema{};
     const result = try evaluateExpression(
         &tree,
@@ -1131,7 +1131,7 @@ test "unary minus rejects values below signed i64 minimum" {
     var tree = Ast{};
     const source = "-9223372036854775809";
     const tokens = tokenizer_mod.tokenize(source);
-    const expr = try expression_mod.parseExpression(&tree, &tokens, 0);
+    const expr = try expression_mod.parseExpression(&tree, &tokens, "", 0);
     const schema = RowSchema{};
     const result = evaluateExpression(
         &tree,

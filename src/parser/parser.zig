@@ -39,7 +39,6 @@ pub const ParseResult = struct {
 
 /// Parse a tokenized source into an AST.
 pub fn parse(tokens: *const TokenizeResult, source: []const u8) ParseResult {
-    _ = source;
     var result = ParseResult{
         .ast = Ast{},
         .has_error = false,
@@ -52,7 +51,7 @@ pub fn parse(tokens: *const TokenizeResult, source: []const u8) ParseResult {
     var last_stmt: NodeIndex = null_node;
 
     while (pos < tokens.count and tokens.tokens[pos].token_type != .end_of_input) {
-        const stmt = parseStatement(&result.ast, tokens, pos) catch |err| {
+        const stmt = parseStatement(&result.ast, tokens, source, pos) catch |err| {
             setParseError(&result, tokens, pos, err);
             return result;
         };
@@ -79,17 +78,19 @@ pub fn parse(tokens: *const TokenizeResult, source: []const u8) ParseResult {
 fn parseStatement(
     ast: *Ast,
     tokens: *const TokenizeResult,
+    source: []const u8,
     start_pos: u16,
 ) ParseError!NodeResult {
     const tok = tokens.tokens[start_pos];
-    if (tok.token_type == .kw_let) return parseLetBinding(ast, tokens, start_pos);
-    if (tok.token_type == .model_name) return parseModelStatement(ast, tokens, start_pos);
+    if (tok.token_type == .kw_let) return parseLetBinding(ast, tokens, source, start_pos);
+    if (tok.token_type == .model_name) return parseModelStatement(ast, tokens, source, start_pos);
     return error.UnexpectedToken;
 }
 
 fn parseLetBinding(
     ast: *Ast,
     tokens: *const TokenizeResult,
+    source: []const u8,
     start_pos: u16,
 ) ParseError!NodeResult {
     var pos = start_pos + 1; // skip 'let'
@@ -105,7 +106,7 @@ fn parseLetBinding(
     pos += 1;
 
     if (pos < tokens.count and tokens.tokens[pos].token_type == .model_name) {
-        const pipeline = try parsePipeline(ast, tokens, pos);
+        const pipeline = try parsePipeline(ast, tokens, source, pos);
         const node = try ast.addNodeFull(
             .let_binding,
             .{ .unary = pipeline.node },
@@ -115,7 +116,7 @@ fn parseLetBinding(
         return .{ .node = node, .pos = pipeline.pos };
     }
 
-    const expr = try expression_mod.parseExpression(ast, tokens, pos);
+    const expr = try expression_mod.parseExpression(ast, tokens, source, pos);
     const node = try ast.addNodeFull(
         .let_binding,
         .{ .unary = expr.node },
@@ -128,6 +129,7 @@ fn parseLetBinding(
 fn parseModelStatement(
     ast: *Ast,
     tokens: *const TokenizeResult,
+    source: []const u8,
     start_pos: u16,
 ) ParseError!NodeResult {
     var lookahead = start_pos + 1;
@@ -143,16 +145,17 @@ fn parseModelStatement(
         if (lookahead + 1 < tokens.count and
             parser_schema.isSchemaKeyword(tokens.tokens[lookahead + 1].token_type))
         {
-            return parser_schema.parseSchemaDefinition(ast, tokens, start_pos);
+            return parser_schema.parseSchemaDefinition(ast, tokens, source, start_pos);
         }
     }
 
-    return parsePipeline(ast, tokens, start_pos);
+    return parsePipeline(ast, tokens, source, start_pos);
 }
 
 fn parsePipeline(
     ast: *Ast,
     tokens: *const TokenizeResult,
+    source: []const u8,
     start_pos: u16,
 ) ParseError!NodeResult {
     var pos = start_pos;
@@ -186,7 +189,7 @@ fn parsePipeline(
     while (pos < tokens.count) {
         if (tokens.tokens[pos].token_type == .pipe_arrow) {
             pos += 1;
-            const op = try parser_ops.parseOperator(ast, tokens, pos);
+            const op = try parser_ops.parseOperator(ast, tokens, source, pos);
             if (first_op == null_node) {
                 first_op = op.node;
                 last_op = op.node;
@@ -211,7 +214,7 @@ fn parsePipeline(
     // Parse optional selection set.
     var selection: NodeIndex = null_node;
     if (pos < tokens.count and tokens.tokens[pos].token_type == .left_brace) {
-        const sel = try parseSelectionSet(ast, tokens, pos, 0);
+        const sel = try parseSelectionSet(ast, tokens, source, pos, 0);
         selection = sel.node;
         pos = sel.pos;
     }
@@ -229,6 +232,7 @@ fn parsePipeline(
 fn parseSelectionSet(
     ast: *Ast,
     tokens: *const TokenizeResult,
+    source: []const u8,
     start_pos: u16,
     depth: u16,
 ) ParseError!NodeResult {
@@ -239,7 +243,7 @@ fn parseSelectionSet(
     var last_field: NodeIndex = null_node;
 
     while (pos < tokens.count and tokens.tokens[pos].token_type != .right_brace) {
-        const field = try parseSelectionField(ast, tokens, pos, depth);
+        const field = try parseSelectionField(ast, tokens, source, pos, depth);
 
         if (first_field == null_node) {
             first_field = field.node;
@@ -264,6 +268,7 @@ fn parseSelectionSet(
 fn parseSelectionField(
     ast: *Ast,
     tokens: *const TokenizeResult,
+    source: []const u8,
     start_pos: u16,
     depth: u16,
 ) ParseError!NodeResult {
@@ -276,7 +281,7 @@ fn parseSelectionField(
     {
         const alias_tok = pos;
         pos += 2;
-        const expr = try expression_mod.parseExpression(ast, tokens, pos);
+        const expr = try expression_mod.parseExpression(ast, tokens, source, pos);
         pos = expr.pos;
         const node = try ast.addNodeFull(
             .select_computed,
@@ -294,7 +299,7 @@ fn parseSelectionField(
             (tokens.tokens[next_pos].token_type == .pipe_arrow or
                 tokens.tokens[next_pos].token_type == .left_brace))
         {
-            return parseNestedRelation(ast, tokens, pos, depth);
+            return parseNestedRelation(ast, tokens, source, pos, depth);
         }
 
         const node = try ast.addNode(.select_field, .{ .token = pos });
@@ -303,7 +308,7 @@ fn parseSelectionField(
 
     // Aggregate in selection.
     if (parser_ops.isAggOrFn(tokens.tokens[pos].token_type)) {
-        const expr = try expression_mod.parseExpression(ast, tokens, pos);
+        const expr = try expression_mod.parseExpression(ast, tokens, source, pos);
         const node = try ast.addNodeFull(
             .select_computed,
             .{ .unary = expr.node },
@@ -319,6 +324,7 @@ fn parseSelectionField(
 fn parseNestedRelation(
     ast: *Ast,
     tokens: *const TokenizeResult,
+    source: []const u8,
     start_pos: u16,
     depth: u16,
 ) ParseError!NodeResult {
@@ -331,7 +337,7 @@ fn parseNestedRelation(
 
     while (pos < tokens.count and tokens.tokens[pos].token_type == .pipe_arrow) {
         pos += 1;
-        const op = try parser_ops.parseOperator(ast, tokens, pos);
+        const op = try parser_ops.parseOperator(ast, tokens, source, pos);
         if (first_op == null_node) {
             first_op = op.node;
             last_op = op.node;
@@ -344,7 +350,7 @@ fn parseNestedRelation(
 
     var selection: NodeIndex = null_node;
     if (pos < tokens.count and tokens.tokens[pos].token_type == .left_brace) {
-        const sel = try parseSelectionSet(ast, tokens, pos, depth + 1);
+        const sel = try parseSelectionSet(ast, tokens, source, pos, depth + 1);
         selection = sel.node;
         pos = sel.pos;
     }

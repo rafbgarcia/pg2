@@ -122,6 +122,7 @@ const ContainerFrame = struct {
 pub fn parseExpression(
     ast: *Ast,
     tokens: *const TokenizeResult,
+    source: []const u8,
     start_pos: u16,
 ) ExprError!ParseExpressionResult {
     var op_stack: [max_operator_stack]OpEntry = undefined;
@@ -157,6 +158,8 @@ pub fn parseExpression(
                     try closeContainer(
                         ast,
                         top.*,
+                        tokens,
+                        source,
                         &op_stack,
                         &op_count,
                         &output_stack,
@@ -299,6 +302,8 @@ pub fn parseExpression(
                 try closeContainer(
                     ast,
                     top.*,
+                    tokens,
+                    source,
                     &op_stack,
                     &op_count,
                     &output_stack,
@@ -403,6 +408,8 @@ fn captureContainerItem(
 fn closeContainer(
     ast: *Ast,
     frame_value: ContainerFrame,
+    tokens: *const TokenizeResult,
+    source: []const u8,
     op_stack: *[max_operator_stack]OpEntry,
     op_count: *u16,
     output_stack: *[max_output_stack]NodeIndex,
@@ -420,6 +427,15 @@ fn closeContainer(
     }
 
     if (frame.kind == .aggregate_call and frame.item_count > 1) return error.UnexpectedToken;
+    if (frame.kind == .function_call and isMembershipCall(tokens, source, frame.token_index)) {
+        if (frame.item_count != 2) return error.UnexpectedToken;
+        const value_arg = frame.first;
+        if (value_arg == null_node) return error.UnexpectedToken;
+        const list_arg = ast.getNode(value_arg).next;
+        if (list_arg == null_node) return error.UnexpectedToken;
+        if (ast.getNode(list_arg).next != null_node) return error.UnexpectedToken;
+        if (ast.getNode(list_arg).tag != .expr_list) return error.UnexpectedToken;
+    }
 
     const node = switch (frame.kind) {
         .list => ast.addNode(.expr_list, .{ .unary = frame.first }) catch return error.AstFull,
@@ -449,6 +465,14 @@ fn closeContainer(
 
     if (container_count.* == 0) return error.StackUnderflow;
     container_count.* -= 1;
+}
+
+fn isMembershipCall(tokens: *const TokenizeResult, source: []const u8, token_index: u16) bool {
+    if (source.len == 0) return false;
+    if (token_index >= tokens.count) return false;
+    if (tokens.tokens[token_index].token_type != .identifier) return false;
+    const name = tokens.getText(token_index, source);
+    return std.mem.eql(u8, name, "in");
 }
 
 fn flushOperators(
@@ -561,7 +585,7 @@ const testing = std.testing;
 test "simple literal expression" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("42");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_literal, node.tag);
 }
@@ -569,7 +593,7 @@ test "simple literal expression" {
 test "binary addition" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("1 + 2");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_binary, node.tag);
 
@@ -583,7 +607,7 @@ test "precedence: multiply before add" {
     var ast = Ast{};
     // 1 + 2 * 3 should parse as 1 + (2 * 3)
     const tokens = tokenizer_mod.tokenize("1 + 2 * 3");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_binary, node.tag);
 
@@ -596,7 +620,7 @@ test "parentheses override precedence" {
     var ast = Ast{};
     // (1 + 2) * 3 should have * at top with + on lhs
     const tokens = tokenizer_mod.tokenize("(1 + 2) * 3");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_binary, node.tag);
 
@@ -607,7 +631,7 @@ test "parentheses override precedence" {
 test "unary bang" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("!true");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_unary, node.tag);
 
@@ -618,7 +642,7 @@ test "unary bang" {
 test "unary minus parses as unary expression" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("-5");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_unary, node.tag);
     const operand = ast.getNode(node.data.unary);
@@ -628,7 +652,7 @@ test "unary minus parses as unary expression" {
 test "contextual keyword parses as column reference in expression" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("offset = 1");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_binary, node.tag);
     const lhs = ast.getNode(node.data.binary.lhs);
@@ -638,7 +662,7 @@ test "contextual keyword parses as column reference in expression" {
 test "comparison operators" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("x = 5");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_binary, node.tag);
 }
@@ -648,7 +672,7 @@ test "logical &&/||" {
     // a = 1 && b = 2 || c = 3
     // && binds tighter than ||, so: (a=1 && b=2) || c=3
     const tokens = tokenizer_mod.tokenize("a = 1 && b = 2 || c = 3");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_binary, node.tag);
     // Top should be '||'
@@ -657,7 +681,7 @@ test "logical &&/||" {
 test "function call" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("lower(email)");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_function_call, node.tag);
 }
@@ -665,7 +689,7 @@ test "function call" {
 test "aggregate count star" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("count(*)");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_aggregate, node.tag);
     try testing.expectEqual(null_node, node.data.unary); // count(*) has no arg
@@ -674,7 +698,7 @@ test "aggregate count star" {
 test "aggregate sum" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("sum(amount)");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_aggregate, node.tag);
     try testing.expect(node.data.unary != null_node); // has argument
@@ -683,7 +707,7 @@ test "aggregate sum" {
 test "list literal" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("[1, 2, 3]");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_list, node.tag);
     // Should have 3 elements linked by next.
@@ -693,7 +717,7 @@ test "list literal" {
 test "column reference" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("email");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_column_ref, node.tag);
 }
@@ -701,7 +725,7 @@ test "column reference" {
 test "parameter reference" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("$user_id");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_parameter, node.tag);
 }
@@ -709,7 +733,7 @@ test "parameter reference" {
 test "nested expression" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("(a + b) * (c - d)");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_binary, node.tag);
 
@@ -722,7 +746,7 @@ test "nested expression" {
 test "expression stops at pipe arrow" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("x = 5 |> sort");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     // Should stop before |>
     try testing.expectEqual(@as(u16, 3), result.pos); // consumed "x = 5" (tokens 0,1,2), stopped at |> (token 3)
 }
@@ -730,14 +754,15 @@ test "expression stops at pipe arrow" {
 test "expression stops at right brace" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("x = 5 }");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     try testing.expectEqual(@as(u16, 3), result.pos);
 }
 
 test "in function call with list" {
     var ast = Ast{};
-    const tokens = tokenizer_mod.tokenize("in(status, [1, 2, 3])");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const source = "in(status, [1, 2, 3])";
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = try parseExpression(&ast, &tokens, source, 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_function_call, node.tag);
     try testing.expectEqual(@as(u16, 2), ast.listLen(node.data.unary));
@@ -745,18 +770,43 @@ test "in function call with list" {
 
 test "negated in function call with list" {
     var ast = Ast{};
-    const tokens = tokenizer_mod.tokenize("!in(status, [1, 2, 3])");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const source = "!in(status, [1, 2, 3])";
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = try parseExpression(&ast, &tokens, source, 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_unary, node.tag);
     const operand = ast.getNode(node.data.unary);
     try testing.expectEqual(NodeTag.expr_function_call, operand.tag);
 }
 
+test "membership function rejects non-list second argument" {
+    var ast = Ast{};
+    const source = "in(status, status_list)";
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parseExpression(&ast, &tokens, source, 0);
+    try testing.expectError(error.UnexpectedToken, result);
+}
+
+test "membership function rejects wrong arity" {
+    var ast = Ast{};
+    const source = "in(status)";
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parseExpression(&ast, &tokens, source, 0);
+    try testing.expectError(error.UnexpectedToken, result);
+}
+
+test "membership function rejects more than two arguments" {
+    var ast = Ast{};
+    const source = "in(status, [1, 2], 3)";
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parseExpression(&ast, &tokens, source, 0);
+    try testing.expectError(error.UnexpectedToken, result);
+}
+
 test "multi-arg function" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("coalesce(a, b)");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_function_call, node.tag);
     // Should have 2 args linked by next.
@@ -766,7 +816,7 @@ test "multi-arg function" {
 test "nested containers parse iteratively" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("coalesce(lower(a), [1, 2, 3])");
-    const result = try parseExpression(&ast, &tokens, 0);
+    const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_function_call, node.tag);
     try testing.expectEqual(@as(u16, 2), ast.listLen(node.data.unary));

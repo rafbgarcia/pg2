@@ -17,6 +17,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - Negated membership is written as `!in(value, list)`.
 - Keep query pipeline `|>` only at query/operator level in v1.
 - `and`, `or`, `not`, and `in` are not keywords; they are plain identifiers and valid as user-defined names.
+- Do not implement reserved-token handling or keyword-specific rejection paths for `and`/`or`/`not`/`in`.
 - No backward compatibility aliases for legacy textual logical/membership forms.
 - Legacy spellings (for example `a and b`, `status not in [...]`) must fail closed as invalid expression shape.
 
@@ -61,20 +62,19 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 ## Phase 1: Language Surface and Parsing
 ### Gate
 - Tokenizer/parser accept `!`, `&&`, `||` and function-form membership `in(value, list)`.
-- Parser tests cover valid symbolic forms and fail-closed invalid legacy forms.
+- Parser tests cover valid symbolic forms and fail-closed invalid legacy textual forms, without keyword-specific parsing branches.
 
 ### Tasks
 - [x] `E01` Add tokenizer support for symbolic logical operators.
   - Accept: `!`, `&&`, `||`.
-  - Ensure `not`, `and`, `or`, `in` tokenize as identifiers.
+  - Ensure `not`, `and`, `or`, `in` tokenize as plain identifiers (no dedicated token kinds).
 - [x] `E02` Remove parser support for keyword logical operators.
   - Remove unary/binary logical parsing via textual `not`/`and`/`or`; support symbolic forms only.
+  - Do not add keyword-specific fallback/rejection logic for textual forms.
 - [x] `E03` Remove parser support for infix membership operators.
   - `in` is function-form only; infix and camelCase legacy forms fail closed.
 - [ ] `E04` Parse membership only as stdlib call: `in(value, list)`.
   - Enforce argument count and argument shape at parse boundary where possible.
-- [ ] `E05` Parser regression tests for fail-closed legacy forms.
-  - `a and b`, `not a`, `status in [1]`, `notIn`, `isNotIn`, `not in`, `is null`, `is not null`.
 - [ ] `E06` Precedence tests for symbolic boolean logic.
   - Ensure `!` binds tighter than comparison, `&&` tighter than `||`, with explicit parentheses cases.
 
@@ -127,19 +127,21 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - [ ] `T03` `test/features/expressions/division_test.zig`
 - [ ] `T04` `test/features/expressions/unary_minus_test.zig`
 - [ ] `T05` `test/features/expressions/precedence_parentheses_test.zig`
-- [ ] `T06` `test/features/expressions/comparisons_test.zig`
+- [ ] `T06` `test/features/expressions/lt_test.zig`
+- [ ] `T06` `test/features/expressions/lte_test.zig`
+- [ ] `T06` `test/features/expressions/gt_test.zig`
+- [ ] `T06` `test/features/expressions/gte_test.zig`
+- [ ] `T06` `test/features/expressions/different_test.zig` (i.e. !=)
 - [ ] `T07` `test/features/expressions/boolean_logic_test.zig`
-- [ ] `T08` `test/features/expressions/in_test.zig`
-- [ ] `T09` `test/features/expressions/not_in_test.zig` (uses `!in(value, list)`)
+- [ ] `T08` `test/features/expressions/in_test.zig` (includes `!in(value, list)` cases)
 - [ ] `T10` `test/features/expressions/symbolic_logic_tokens_test.zig` (covers `!`, `&&`, `||`)
-- [ ] `T11` `test/features/expressions/legacy_keyword_rejection_test.zig` (rejects `not`, `and`, `or`, `notIn`, `isNotIn`)
 - [ ] `T12` `test/features/expressions/parameters_test.zig`
-- [ ] `T13` `test/features/expressions/functions_numeric_test.zig`
-- [ ] `T14` `test/features/expressions/functions_string_test.zig`
-- [ ] `T15` `test/features/expressions/functions_time_test.zig`
-- [ ] `T16` `test/features/expressions/null_semantics_test.zig`
-- [ ] `T17` `test/features/expressions/cross_context_test.zig`
-- [ ] `T18` `test/features/expressions/diagnostics_test.zig`
+- [ ] `T13` `test/features/expressions/functions_numeric_test.zig` (side note: numeric builtin behavior and type/arity validation; e.g. `abs`, `sqrt`, `round`)
+- [ ] `T14` `test/features/expressions/functions_string_test.zig` (side note: string builtin behavior and edge cases; e.g. `lower`, `upper`, `trim`, `length`)
+- [ ] `T15` `test/features/expressions/functions_time_test.zig` (side note: deterministic time function behavior via injected clock; `now()` and related comparisons)
+- [ ] `T16` `test/features/expressions/null_semantics_test.zig` (side note: null propagation and boolean/null truth-table behavior across arithmetic, comparisons, and predicates)
+- [ ] `T17` `test/features/expressions/cross_context_test.zig` (side note: same expression semantics in `where`, `update`, computed `select`, `sort(expr)`, and `having`)
+- [ ] `T18` `test/features/expressions/diagnostics_test.zig` (side note: deterministic fail-closed parser/evaluator errors with precise messages/locations for invalid shapes and type/null violations)
 - [ ] `T19` Import all new expression files in `test/features/features_specs_test.zig`.
 
 ## Phase 6: Diagnostics and Hardening
@@ -147,10 +149,10 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - Diagnostics are explicit, deterministic, and context-aware.
 
 ### Tasks
-- [ ] `D01` Normalize parser error messages for invalid legacy logical/membership textual forms.
+- [ ] `D01` Normalize parser error messages for invalid legacy logical/membership textual forms (shape errors, not keyword errors).
 - [ ] `D02` Normalize evaluator errors for null arithmetic, type mismatch, and invalid predicate result.
 - [ ] `D03` Ensure mutation-path diagnostics include precise assignment path for expression failures.
-- [ ] `D04` Add regression tests for fail-closed behavior on removed keyword forms and unsupported expression shapes.
+- [ ] `D04` Add regression tests for fail-closed behavior on unsupported textual expression shapes.
 
 ## Phase 7: Pending Product Decision
 ### Gate
@@ -161,10 +163,3 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - Candidate (pending): `status |> in([a, b, c])`.
   - Keep query-level pipeline `|>` behavior unchanged.
   - Do not implement until explicit product sign-off.
-
-## Implementation Log
-- `2026-02-21`: (Decision update) Language direction changed to symbolic logic (`!`, `&&`, `||`) and function-only membership (`in(value, list)`, `!in(value, list)`), with no backward compatibility aliases.
-- `2026-02-21`: (Decision update) `and`, `or`, `not`, and `in` are ordinary identifiers (not reserved words) and may be used as user-defined names.
-- `2026-02-21`: (Superseded) Earlier `notIn`-oriented `E01` implementation is superseded by the decision update above and must be replaced by new Phase 1 tasks before merge.
-- `2026-02-21`: (`E01`,`E02`,`E03`) tokenizer/parser/evaluator migrated to symbolic boolean operators and function-form membership only; textual forms now tokenize as identifiers and fail as invalid expression shapes. commit=`<pending>`. tests=`zig test src/parser/tokenizer.zig`, `zig test src/parser/expression.zig`, `zig test src/parser/parser_test.zig`, `zig build test` (1 unrelated pre-existing failure in `features.mutations.delete_test`).
-- `YYYY-MM-DD`: (task id) short note, commit hash, tests run.

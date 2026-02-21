@@ -20,17 +20,18 @@ const sort_key_expr_mask: u16 = 0x8000;
 pub fn parseOperator(
     ast: *Ast,
     tokens: *const TokenizeResult,
+    source: []const u8,
     pos: u16,
 ) ParseError!NodeResult {
     const tok_type = tokens.tokens[pos].token_type;
 
-    if (tok_type == .kw_where) return parseWhereOp(ast, tokens, pos);
-    if (tok_type == .kw_sort) return parseSortOp(ast, tokens, pos);
-    if (tok_type == .kw_limit) return parseSingleExprOp(ast, tokens, pos, .op_limit);
-    if (tok_type == .kw_offset) return parseSingleExprOp(ast, tokens, pos, .op_offset);
+    if (tok_type == .kw_where) return parseWhereOp(ast, tokens, source, pos);
+    if (tok_type == .kw_sort) return parseSortOp(ast, tokens, source, pos);
+    if (tok_type == .kw_limit) return parseSingleExprOp(ast, tokens, source, pos, .op_limit);
+    if (tok_type == .kw_offset) return parseSingleExprOp(ast, tokens, source, pos, .op_offset);
     if (tok_type == .kw_group) return parseGroupOp(ast, tokens, pos);
-    if (tok_type == .kw_insert) return parseMutationOp(ast, tokens, pos, .op_insert);
-    if (tok_type == .kw_update) return parseMutationOp(ast, tokens, pos, .op_update);
+    if (tok_type == .kw_insert) return parseMutationOp(ast, tokens, source, pos, .op_insert);
+    if (tok_type == .kw_update) return parseMutationOp(ast, tokens, source, pos, .op_update);
     if (tok_type == .identifier) {
         const node = try ast.addNode(.op_scope_ref, .{ .token = pos });
         return .{ .node = node, .pos = pos + 1 };
@@ -54,6 +55,7 @@ pub fn parseOperator(
 fn parseWhereOp(
     ast: *Ast,
     tokens: *const TokenizeResult,
+    source: []const u8,
     start_pos: u16,
 ) ParseError!NodeResult {
     var pos = start_pos + 1;
@@ -63,7 +65,7 @@ fn parseWhereOp(
     }
     pos += 1;
 
-    const expr = try expression_mod.parseExpression(ast, tokens, pos);
+    const expr = try expression_mod.parseExpression(ast, tokens, source, pos);
     pos = expr.pos;
 
     if (pos >= tokens.count or tokens.tokens[pos].token_type != .right_paren) {
@@ -78,6 +80,7 @@ fn parseWhereOp(
 fn parseSortOp(
     ast: *Ast,
     tokens: *const TokenizeResult,
+    source: []const u8,
     start_pos: u16,
 ) ParseError!NodeResult {
     var pos = start_pos + 1;
@@ -97,7 +100,7 @@ fn parseSortOp(
         }
 
         if (isAggOrFn(tokens.tokens[pos].token_type)) {
-            const expr = try expression_mod.parseExpression(ast, tokens, pos);
+            const expr = try expression_mod.parseExpression(ast, tokens, source, pos);
             pos = expr.pos;
             var direction: u16 = 0;
             if (pos < tokens.count and tokens.tokens[pos].token_type == .kw_desc) {
@@ -158,6 +161,7 @@ fn parseSortOp(
 fn parseSingleExprOp(
     ast: *Ast,
     tokens: *const TokenizeResult,
+    source: []const u8,
     start_pos: u16,
     tag: NodeTag,
 ) ParseError!NodeResult {
@@ -168,7 +172,7 @@ fn parseSingleExprOp(
     }
     pos += 1;
 
-    const expr = try expression_mod.parseExpression(ast, tokens, pos);
+    const expr = try expression_mod.parseExpression(ast, tokens, source, pos);
     pos = expr.pos;
 
     if (pos >= tokens.count or tokens.tokens[pos].token_type != .right_paren) {
@@ -222,6 +226,7 @@ fn parseGroupOp(
 fn parseMutationOp(
     ast: *Ast,
     tokens: *const TokenizeResult,
+    source: []const u8,
     start_pos: u16,
     tag: NodeTag,
 ) ParseError!NodeResult {
@@ -249,7 +254,7 @@ fn parseMutationOp(
         }
         pos += 1;
 
-        const expr = try expression_mod.parseExpression(ast, tokens, pos);
+        const expr = try expression_mod.parseExpression(ast, tokens, source, pos);
         pos = expr.pos;
 
         const assign_node = try ast.addNodeFull(
