@@ -73,12 +73,13 @@ test "feature query projection returns only requested columns via session path" 
 
     result = try executor.run("User |> where(id = 1) { id name }");
     try std.testing.expectEqualStrings(
-        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,Alice\n",
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n" ++
+        "1,Alice\n",
         result,
     );
 }
 
-test "feature query nested projection returns only selected root and nested columns" {
+test "feature query nested projection returns tree-shaped roots with nested lists including empty list" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
@@ -130,7 +131,7 @@ test "feature query nested projection returns only selected root and nested colu
     );
 
     result = try executor.run(
-        "Post |> insert(id = 30, user_id = 2, title = \"Ignored\") {}",
+        "Post |> insert(id = 30, user_id = 1, title = \"Ignored\") {}",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
@@ -138,11 +139,21 @@ test "feature query nested projection returns only selected root and nested colu
     );
 
     result = try executor.run(
-        "User |> where(id = 1) { name posts |> sort(id asc) { id title } }",
+        "User |> insert(id = 3, name = \"Trish\") {}",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run(
+        "User |> sort(id asc) { name posts |> sort(id asc) { id title } }",
     );
     const expected =
-        "OK returned_rows=2 inserted_rows=0 updated_rows=0 deleted_rows=0\n" ++
-        "Alice,10,Hello\n" ++
-        "Alice,20,World\n";
+        "OK returned_rows=3 inserted_rows=0 updated_rows=0 deleted_rows=0\n" ++
+        "{name:str,posts:[{id:i64,title:str}]}\n" ++
+        "\"Alice\",[[10,\"Hello\"],[20,\"World\"],[30,\"Ignored\"]]\n" ++
+        "\"Bob\",[]\n" ++
+        "\"Trish\",[]\n";
     try std.testing.expectEqualStrings(expected, result);
 }

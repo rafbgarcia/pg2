@@ -28,8 +28,12 @@ const ConnectionPool = pool_mod.ConnectionPool;
 const PoolConn = pool_mod.PoolConn;
 const PoolStats = pool_mod.PoolStats;
 const NodeTag = ast_mod.NodeTag;
+const Ast = ast_mod.Ast;
+const NodeIndex = ast_mod.NodeIndex;
 const null_node = ast_mod.null_node;
 const Value = row_mod.Value;
+const ColumnType = row_mod.ColumnType;
+const compareValues = row_mod.compareValues;
 const Acceptor = transport_mod.Acceptor;
 const Connection = transport_mod.Connection;
 
@@ -122,7 +126,15 @@ pub const Session = struct {
         defer result.deinit();
 
         const pool_stats: ?PoolStats = if (include_inspect) pool.snapshotStats() else null;
-        try serializeQueryResult(writer, &result, self.catalog, pool_stats);
+        try serializeQueryResult(
+            writer,
+            &result,
+            self.catalog,
+            pool_stats,
+            &parsed.ast,
+            &tokens,
+            source,
+        );
         const had_mutation =
             result.stats.rows_inserted > 0 or
             result.stats.rows_updated > 0 or
@@ -296,6 +308,9 @@ fn serializeQueryResult(
     result: *const exec_mod.QueryResult,
     catalog: *const Catalog,
     pool_stats: ?PoolStats,
+    ast: *const Ast,
+    tokens: *const tokenizer_mod.TokenizeResult,
+    source: []const u8,
 ) error{ResponseTooLarge}!void {
     std.debug.assert(result.row_count <= result.rows.len);
     if (result.getError()) |message| {
@@ -304,15 +319,34 @@ fn serializeQueryResult(
         return;
     }
 
+    const tree_projection = buildTreeProjection(ast, tokens, source, catalog);
+    const returned_rows: u16 = if (tree_projection) |projection|
+        countProtocolRootRows(result, &projection)
+    else
+        result.row_count;
+
     writer.print(
         "OK returned_rows={d} inserted_rows={d} updated_rows={d} deleted_rows={d}\n",
         .{
-            result.row_count,
+            returned_rows,
             result.stats.rows_inserted,
             result.stats.rows_updated,
             result.stats.rows_deleted,
         },
     ) catch return error.ResponseTooLarge;
+
+    if (tree_projection) |projection| {
+        try serializeTreeProtocol(writer, result, &projection, catalog, tokens, source);
+        if (pool_stats) |stats| {
+            try serializeInspectStats(
+                writer,
+                &result.stats,
+                stats,
+                catalog.snapshotOverflowReclaimStats(),
+            );
+        }
+        return;
+    }
 
     var row_index: usize = 0;
     while (row_index < result.row_count) : (row_index += 1) {
@@ -336,6 +370,363 @@ fn serializeQueryResult(
             catalog.snapshotOverflowReclaimStats(),
         );
     }
+}
+
+const max_protocol_fields = row_mod.max_columns;
+
+const SelectionEntryKind = enum {
+    scalar,
+    nested,
+};
+
+const SelectionEntry = struct {
+    kind: SelectionEntryKind,
+    token_idx: u16,
+    column_pos: u16,
+};
+
+const TreeProjection = struct {
+    root_model_id: catalog_mod.ModelId,
+    entry_count: u16 = 0,
+    entries: [max_protocol_fields]SelectionEntry = undefined,
+    root_scalar_count: u16 = 0,
+    root_scalar_positions: [max_protocol_fields]u16 = undefined,
+    nested_field_token: u16 = 0,
+    nested_model_id: catalog_mod.ModelId = 0,
+    nested_scalar_count: u16 = 0,
+    nested_scalar_tokens: [max_protocol_fields]u16 = undefined,
+    nested_scalar_positions: [max_protocol_fields]u16 = undefined,
+};
+
+fn serializeTreeProtocol(
+    writer: anytype,
+    result: *const exec_mod.QueryResult,
+    projection: *const TreeProjection,
+    catalog: *const Catalog,
+    tokens: *const tokenizer_mod.TokenizeResult,
+    source: []const u8,
+) error{ResponseTooLarge}!void {
+    try writeShape(writer, projection, catalog, tokens, source);
+
+    if (result.row_count == 0) return;
+
+    var row_index: u16 = 0;
+    while (row_index < result.row_count) {
+        const group_start = row_index;
+        var group_end = row_index + 1;
+        while (group_end < result.row_count and
+            rowsShareRoot(result, projection, group_start, group_end))
+        {
+            group_end += 1;
+        }
+
+        var entry_index: u16 = 0;
+        while (entry_index < projection.entry_count) : (entry_index += 1) {
+            if (entry_index > 0) {
+                writer.writeAll(",") catch return error.ResponseTooLarge;
+            }
+            const entry = projection.entries[entry_index];
+            switch (entry.kind) {
+                .scalar => try writeProtocolValue(
+                    writer,
+                    result.rows[group_start].values[entry.column_pos],
+                ),
+                .nested => try writeNestedList(
+                    writer,
+                    result,
+                    projection,
+                    group_start,
+                    group_end,
+                ),
+            }
+        }
+        writer.writeAll("\n") catch return error.ResponseTooLarge;
+        row_index = group_end;
+    }
+}
+
+fn buildTreeProjection(
+    ast: *const Ast,
+    tokens: *const tokenizer_mod.TokenizeResult,
+    source: []const u8,
+    catalog: *const Catalog,
+) ?TreeProjection {
+    const pipeline = getTopPipeline(ast) orelse return null;
+    const pipeline_node = ast.getNode(pipeline);
+    if (pipeline_node.tag != .pipeline) return null;
+    const source_node = ast.getNode(pipeline_node.data.binary.lhs);
+    if (source_node.tag != .pipe_source) return null;
+
+    const source_model_name = tokens.getText(source_node.data.token, source);
+    const source_model_id = catalog.findModel(source_model_name) orelse return null;
+    const selection = pipeline_node.extra;
+    if (selection == 0 or selection >= ast.node_count) return null;
+    const selection_node = ast.getNode(selection);
+    if (selection_node.tag != .selection_set) return null;
+
+    var projection = TreeProjection{
+        .root_model_id = source_model_id,
+    };
+
+    const source_schema = &catalog.models[source_model_id].row_schema;
+    var projection_col_pos: u16 = 0;
+    var nested_count: u16 = 0;
+    var field = selection_node.data.unary;
+    while (field != null_node) {
+        const node = ast.getNode(field);
+        switch (node.tag) {
+            .select_field => {
+                const field_name = tokens.getText(node.data.token, source);
+                _ = source_schema.findColumn(field_name) orelse return null;
+                projection.entries[projection.entry_count] = .{
+                    .kind = .scalar,
+                    .token_idx = node.data.token,
+                    .column_pos = projection_col_pos,
+                };
+                projection.entry_count += 1;
+                projection.root_scalar_positions[projection.root_scalar_count] = projection_col_pos;
+                projection.root_scalar_count += 1;
+                projection_col_pos += 1;
+            },
+            .select_nested => {
+                if (nested_count > 0) return null;
+                nested_count += 1;
+
+                const relation_name = tokens.getText(node.extra, source);
+                const assoc_id = catalog.findAssociation(source_model_id, relation_name) orelse
+                    return null;
+                const assoc = &catalog.models[source_model_id].associations[assoc_id];
+                if (assoc.target_model_id == catalog_mod.null_model) return null;
+
+                projection.entries[projection.entry_count] = .{
+                    .kind = .nested,
+                    .token_idx = node.extra,
+                    .column_pos = 0,
+                };
+                projection.entry_count += 1;
+                projection.nested_field_token = node.extra;
+                projection.nested_model_id = assoc.target_model_id;
+
+                const nested_selection = getNestedSelection(ast, field) orelse return null;
+                var nested_field = ast.getNode(nested_selection).data.unary;
+                while (nested_field != null_node) {
+                    const nested_node = ast.getNode(nested_field);
+                    if (nested_node.tag != .select_field) return null;
+                    projection.nested_scalar_tokens[projection.nested_scalar_count] = nested_node.data.token;
+                    projection.nested_scalar_positions[projection.nested_scalar_count] = projection_col_pos;
+                    projection.nested_scalar_count += 1;
+                    projection_col_pos += 1;
+                    nested_field = nested_node.next;
+                }
+            },
+            else => return null,
+        }
+        field = node.next;
+    }
+
+    if (nested_count != 1) return null;
+    if (projection.root_scalar_count == 0) return null;
+    if (projection.entry_count == 0 or projection.nested_scalar_count == 0) return null;
+    return projection;
+}
+
+fn countProtocolRootRows(
+    result: *const exec_mod.QueryResult,
+    projection: *const TreeProjection,
+) u16 {
+    if (result.row_count == 0) return 0;
+    var root_count: u16 = 0;
+    var row_idx: u16 = 0;
+    while (row_idx < result.row_count) {
+        root_count += 1;
+        var next_idx = row_idx + 1;
+        while (next_idx < result.row_count and
+            rowsShareRoot(result, projection, row_idx, next_idx))
+        {
+            next_idx += 1;
+        }
+        row_idx = next_idx;
+    }
+    return root_count;
+}
+
+fn getTopPipeline(ast: *const Ast) ?NodeIndex {
+    if (ast.root == null_node) return null;
+    const root = ast.getNode(ast.root);
+    if (root.tag != .root) return null;
+    const first_stmt = root.data.unary;
+    if (first_stmt == null_node) return null;
+    const first = ast.getNode(first_stmt);
+    if (first.tag == .pipeline) return first_stmt;
+    if (first.tag == .let_binding and first.data.unary != null_node) {
+        const bound = ast.getNode(first.data.unary);
+        if (bound.tag == .pipeline) return first.data.unary;
+    }
+    return null;
+}
+
+fn getNestedSelection(ast: *const Ast, nested_node: NodeIndex) ?NodeIndex {
+    const nested = ast.getNode(nested_node);
+    if (nested.tag != .select_nested) return null;
+    if (nested.data.unary == null_node) return null;
+    const nested_pipeline = ast.getNode(nested.data.unary);
+    if (nested_pipeline.tag != .pipeline) return null;
+    const selection = nested_pipeline.extra;
+    if (selection == 0 or selection >= ast.node_count) return null;
+    if (ast.getNode(selection).tag != .selection_set) return null;
+    return selection;
+}
+
+fn rowsShareRoot(
+    result: *const exec_mod.QueryResult,
+    projection: *const TreeProjection,
+    lhs_idx: u16,
+    rhs_idx: u16,
+) bool {
+    const lhs = result.rows[lhs_idx];
+    const rhs = result.rows[rhs_idx];
+    var i: u16 = 0;
+    while (i < projection.root_scalar_count) : (i += 1) {
+        const pos = projection.root_scalar_positions[i];
+        if (compareValues(lhs.values[pos], rhs.values[pos]) != .eq) return false;
+    }
+    return true;
+}
+
+fn writeShape(
+    writer: anytype,
+    projection: *const TreeProjection,
+    catalog: *const Catalog,
+    tokens: *const tokenizer_mod.TokenizeResult,
+    source: []const u8,
+) error{ResponseTooLarge}!void {
+    writer.writeAll("{") catch return error.ResponseTooLarge;
+    const root_schema = &catalog.models[projection.root_model_id].row_schema;
+    const nested_schema = &catalog.models[projection.nested_model_id].row_schema;
+
+    var entry_index: u16 = 0;
+    while (entry_index < projection.entry_count) : (entry_index += 1) {
+        if (entry_index > 0) {
+            writer.writeAll(",") catch return error.ResponseTooLarge;
+        }
+        const entry = projection.entries[entry_index];
+        switch (entry.kind) {
+            .scalar => {
+                const field_name = tokens.getText(entry.token_idx, source);
+                const col_idx = root_schema.findColumn(field_name) orelse
+                    return error.ResponseTooLarge;
+                const col = root_schema.columns[col_idx];
+                writer.print(
+                    "{s}:{s}",
+                    .{ field_name, protocolTypeName(col.column_type) },
+                ) catch return error.ResponseTooLarge;
+            },
+            .nested => {
+                const relation_name = tokens.getText(projection.nested_field_token, source);
+                writer.print("{s}:[{{", .{relation_name}) catch return error.ResponseTooLarge;
+                var nested_i: u16 = 0;
+                while (nested_i < projection.nested_scalar_count) : (nested_i += 1) {
+                    if (nested_i > 0) {
+                        writer.writeAll(",") catch return error.ResponseTooLarge;
+                    }
+                    const field_name = tokens.getText(
+                        projection.nested_scalar_tokens[nested_i],
+                        source,
+                    );
+                    const col_idx = nested_schema.findColumn(field_name) orelse
+                        return error.ResponseTooLarge;
+                    const col = nested_schema.columns[col_idx];
+                    writer.print(
+                        "{s}:{s}",
+                        .{ field_name, protocolTypeName(col.column_type) },
+                    ) catch return error.ResponseTooLarge;
+                }
+                writer.writeAll("}]") catch return error.ResponseTooLarge;
+            },
+        }
+    }
+    writer.writeAll("}\n") catch return error.ResponseTooLarge;
+}
+
+fn writeNestedList(
+    writer: anytype,
+    result: *const exec_mod.QueryResult,
+    projection: *const TreeProjection,
+    start_row: u16,
+    end_row: u16,
+) error{ResponseTooLarge}!void {
+    writer.writeAll("[") catch return error.ResponseTooLarge;
+    var emitted_any = false;
+    var row_idx = start_row;
+    while (row_idx < end_row) : (row_idx += 1) {
+        if (isNestedNullRow(result.rows[row_idx].values[0..], projection)) continue;
+        if (emitted_any) {
+            writer.writeAll(",") catch return error.ResponseTooLarge;
+        }
+        emitted_any = true;
+        writer.writeAll("[") catch return error.ResponseTooLarge;
+        var col_idx: u16 = 0;
+        while (col_idx < projection.nested_scalar_count) : (col_idx += 1) {
+            if (col_idx > 0) {
+                writer.writeAll(",") catch return error.ResponseTooLarge;
+            }
+            const pos = projection.nested_scalar_positions[col_idx];
+            try writeProtocolValue(writer, result.rows[row_idx].values[pos]);
+        }
+        writer.writeAll("]") catch return error.ResponseTooLarge;
+    }
+    writer.writeAll("]") catch return error.ResponseTooLarge;
+}
+
+fn isNestedNullRow(
+    row_values: []const Value,
+    projection: *const TreeProjection,
+) bool {
+    var col_idx: u16 = 0;
+    while (col_idx < projection.nested_scalar_count) : (col_idx += 1) {
+        const pos = projection.nested_scalar_positions[col_idx];
+        if (row_values[pos] != .null_value) return false;
+    }
+    return true;
+}
+
+fn protocolTypeName(column_type: ColumnType) []const u8 {
+    return switch (column_type) {
+        .bigint => "i64",
+        .int => "i32",
+        .float => "f64",
+        .boolean => "bool",
+        .string => "str",
+        .timestamp => "ts",
+    };
+}
+
+fn writeProtocolValue(
+    writer: anytype,
+    value: Value,
+) error{ResponseTooLarge}!void {
+    switch (value) {
+        .string => |v| try writeQuotedString(writer, v),
+        else => try serializeValue(writer, value),
+    }
+}
+
+fn writeQuotedString(
+    writer: anytype,
+    value: []const u8,
+) error{ResponseTooLarge}!void {
+    writer.writeAll("\"") catch return error.ResponseTooLarge;
+    for (value) |byte| {
+        switch (byte) {
+            '\\' => writer.writeAll("\\\\") catch return error.ResponseTooLarge,
+            '"' => writer.writeAll("\\\"") catch return error.ResponseTooLarge,
+            '\n' => writer.writeAll("\\n") catch return error.ResponseTooLarge,
+            '\r' => writer.writeAll("\\r") catch return error.ResponseTooLarge,
+            '\t' => writer.writeAll("\\t") catch return error.ResponseTooLarge,
+            else => writer.writeByte(byte) catch return error.ResponseTooLarge,
+        }
+    }
+    writer.writeAll("\"") catch return error.ResponseTooLarge;
 }
 
 fn serializeInspectStats(
