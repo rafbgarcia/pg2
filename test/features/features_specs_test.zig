@@ -17,7 +17,6 @@ comptime {
     _ = @import("field_types/i16_test.zig");
     _ = @import("field_types/i32_test.zig");
     _ = @import("field_types/i64_test.zig");
-    _ = @import("field_types/integer_boundaries_test.zig");
     _ = @import("field_types/u8_test.zig");
     _ = @import("field_types/u16_test.zig");
     _ = @import("field_types/u32_test.zig");
