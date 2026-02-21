@@ -14,6 +14,9 @@ Each functionality should have its own test file so that we can easily know what
 Think carefully to create real-world test cases, think and cover edge cases, etc.
 `ls test/features/`
 
+**Guidelines**
+Commit as you go with user-value code changes and commit messages.
+
 # pg2
 
 A database built from scratch in Zig, focused on developer experience and transparency.
