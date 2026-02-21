@@ -57,6 +57,7 @@ const WorkItem = union(enum) {
     apply_literal: u16,
     apply_aggregate: NodeIndex,
     apply_function: struct { token_index: u16, arg_count: u16 },
+    apply_membership: struct { token_index: u16, list_count: u16 },
 };
 
 /// Evaluate an AST expression node to a Value using iterative traversal.
@@ -104,6 +105,7 @@ pub fn evaluateExpressionWithResolver(
             .evaluate => |idx| try pushNodeWork(
                 tree,
                 tokens,
+                source,
                 idx,
                 &work_stack,
                 &work_count,
@@ -159,6 +161,24 @@ pub fn evaluateExpressionWithResolver(
                 );
                 try evalPush(&eval_stack, &eval_count, val);
             },
+            .apply_membership => |info| {
+                if (eval_count < info.list_count + 1) return error.StackUnderflow;
+                var list_values: [64]Value = undefined;
+                var i: u16 = info.list_count;
+                while (i > 0) {
+                    i -= 1;
+                    list_values[i] = evalPop(&eval_stack, &eval_count);
+                }
+                const needle = evalPop(&eval_stack, &eval_count);
+                const result = try applyMembershipFunction(
+                    tokens,
+                    source,
+                    info.token_index,
+                    needle,
+                    list_values[0..info.list_count],
+                );
+                try evalPush(&eval_stack, &eval_count, result);
+            },
         }
     }
 
@@ -213,6 +233,7 @@ pub fn evaluatePredicateWithResolver(
 fn pushNodeWork(
     tree: *const Ast,
     tokens: *const TokenizeResult,
+    source: []const u8,
     idx: NodeIndex,
     work_stack: *[max_work_stack]WorkItem,
     work_count: *u16,
@@ -251,21 +272,51 @@ fn pushNodeWork(
         },
         .expr_function_call => {
             const fn_tok = node.extra;
-            const arg_count = tree.listLen(node.data.unary);
-            try workPush(work_stack, work_count, .{
-                .apply_function = .{
-                    .token_index = fn_tok,
-                    .arg_count = arg_count,
-                },
-            });
-            // Push args in reverse order (last arg pushed first onto work stack).
-            try pushLinkedListReverse(
-                tree,
-                work_stack,
-                work_count,
-                node.data.unary,
-                arg_count,
-            );
+            if (isMembershipFunction(tokens, source, fn_tok)) {
+                const arg_count = tree.listLen(node.data.unary);
+                if (arg_count != 2) return error.TypeMismatch;
+
+                const value_arg = node.data.unary;
+                const list_arg = tree.getNode(value_arg).next;
+                if (list_arg == null_node) return error.TypeMismatch;
+                if (tree.getNode(list_arg).tag != .expr_list) return error.TypeMismatch;
+
+                const list_head = tree.getNode(list_arg).data.unary;
+                const list_count = tree.listLen(list_head);
+
+                try workPush(work_stack, work_count, .{
+                    .apply_membership = .{
+                        .token_index = fn_tok,
+                        .list_count = list_count,
+                    },
+                });
+                try pushLinkedListReverse(
+                    tree,
+                    work_stack,
+                    work_count,
+                    list_head,
+                    list_count,
+                );
+                try workPush(work_stack, work_count, .{
+                    .evaluate = value_arg,
+                });
+            } else {
+                const arg_count = tree.listLen(node.data.unary);
+                try workPush(work_stack, work_count, .{
+                    .apply_function = .{
+                        .token_index = fn_tok,
+                        .arg_count = arg_count,
+                    },
+                });
+                // Push args in reverse order (last arg pushed first onto work stack).
+                try pushLinkedListReverse(
+                    tree,
+                    work_stack,
+                    work_count,
+                    node.data.unary,
+                    arg_count,
+                );
+            }
         },
         .expr_aggregate => {
             try workPush(work_stack, work_count, .{
@@ -284,6 +335,20 @@ fn pushNodeWork(
             }
         },
     }
+}
+
+fn isMembershipFunction(
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    token_index: u16,
+) bool {
+    if (token_index >= tokens.count) return false;
+    if (tokens.tokens[token_index].token_type != .identifier) return false;
+    return std.mem.eql(
+        u8,
+        tokens.getText(token_index, source),
+        "in",
+    );
 }
 
 /// Push linked list nodes in reverse order onto work stack.
@@ -653,6 +718,55 @@ fn toBool(v: Value) ?bool {
     };
 }
 
+fn isNumericValue(v: Value) bool {
+    return switch (v) {
+        .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64, .f64 => true,
+        else => false,
+    };
+}
+
+fn membershipElementEquals(needle: Value, element: Value) EvalError!bool {
+    if (isNumericValue(needle) and isNumericValue(element)) {
+        const ord = numericOrder(needle, element) orelse return error.TypeMismatch;
+        return ord == .eq;
+    }
+
+    if (needle.columnType()) |needle_type| {
+        const element_type = element.columnType() orelse return error.TypeMismatch;
+        if (needle_type != element_type) return error.TypeMismatch;
+        return row_mod.compareValues(needle, element) == .eq;
+    }
+
+    return error.TypeMismatch;
+}
+
+fn applyMembershipFunction(
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    token_index: u16,
+    needle: Value,
+    list_values: []const Value,
+) EvalError!Value {
+    if (!isMembershipFunction(tokens, source, token_index)) {
+        return error.UnknownFunction;
+    }
+
+    if (needle == .null_value) return Value{ .null_value = {} };
+    var saw_null = false;
+    for (list_values) |element| {
+        if (element == .null_value) {
+            saw_null = true;
+            continue;
+        }
+        if (try membershipElementEquals(needle, element)) {
+            return Value{ .bool = true };
+        }
+    }
+
+    if (saw_null) return Value{ .null_value = {} };
+    return Value{ .bool = false };
+}
+
 /// Apply a unary operator.
 pub fn applyUnaryOp(operand: Value, op: TokenType) EvalError!Value {
     if (operand == .null_value) return Value{ .null_value = {} };
@@ -1014,6 +1128,128 @@ test "function call — coalesce" {
         .{ .i64 = 42 },
     });
     try testing.expectEqual(@as(i64, 42), result.i64);
+}
+
+test "membership function returns true for contained value" {
+    var tree = Ast{};
+    const source = "in(status, [\"active\", \"pending\"])";
+    const tokens = tokenizer_mod.tokenize(source);
+    const expr = try expression_mod.parseExpression(&tree, &tokens, source, 0);
+    var schema = RowSchema{};
+    _ = try schema.addColumn("status", .string, true);
+    const row_values = [_]Value{.{ .string = "active" }};
+
+    const result = try evaluateExpression(
+        &tree,
+        &tokens,
+        source,
+        expr.node,
+        &row_values,
+        &schema,
+    );
+    try testing.expect(result == .bool);
+    try testing.expect(result.bool);
+}
+
+test "membership function returns false for non-matching list without nulls" {
+    var tree = Ast{};
+    const source = "in(status, [\"active\", \"pending\"])";
+    const tokens = tokenizer_mod.tokenize(source);
+    const expr = try expression_mod.parseExpression(&tree, &tokens, source, 0);
+    var schema = RowSchema{};
+    _ = try schema.addColumn("status", .string, true);
+    const row_values = [_]Value{.{ .string = "archived" }};
+
+    const result = try evaluateExpression(
+        &tree,
+        &tokens,
+        source,
+        expr.node,
+        &row_values,
+        &schema,
+    );
+    try testing.expect(result == .bool);
+    try testing.expect(!result.bool);
+}
+
+test "membership function returns null when list has null and no match" {
+    var tree = Ast{};
+    const source = "in(status, [\"active\", null])";
+    const tokens = tokenizer_mod.tokenize(source);
+    const expr = try expression_mod.parseExpression(&tree, &tokens, source, 0);
+    var schema = RowSchema{};
+    _ = try schema.addColumn("status", .string, true);
+    const row_values = [_]Value{.{ .string = "archived" }};
+
+    const result = try evaluateExpression(
+        &tree,
+        &tokens,
+        source,
+        expr.node,
+        &row_values,
+        &schema,
+    );
+    try testing.expect(result == .null_value);
+}
+
+test "membership function returns null when value is null" {
+    var tree = Ast{};
+    const source = "in(status, [\"active\", null])";
+    const tokens = tokenizer_mod.tokenize(source);
+    const expr = try expression_mod.parseExpression(&tree, &tokens, source, 0);
+    var schema = RowSchema{};
+    _ = try schema.addColumn("status", .string, true);
+    const row_values = [_]Value{.{ .null_value = {} }};
+
+    const result = try evaluateExpression(
+        &tree,
+        &tokens,
+        source,
+        expr.node,
+        &row_values,
+        &schema,
+    );
+    try testing.expect(result == .null_value);
+}
+
+test "membership function fails closed on type mismatch" {
+    var tree = Ast{};
+    const source = "in(status, [1, 2])";
+    const tokens = tokenizer_mod.tokenize(source);
+    const expr = try expression_mod.parseExpression(&tree, &tokens, source, 0);
+    var schema = RowSchema{};
+    _ = try schema.addColumn("status", .string, true);
+    const row_values = [_]Value{.{ .string = "1" }};
+
+    const result = evaluateExpression(
+        &tree,
+        &tokens,
+        source,
+        expr.node,
+        &row_values,
+        &schema,
+    );
+    try testing.expectError(error.TypeMismatch, result);
+}
+
+test "negated membership function propagates null when membership is null" {
+    var tree = Ast{};
+    const source = "!in(status, [\"active\", null])";
+    const tokens = tokenizer_mod.tokenize(source);
+    const expr = try expression_mod.parseExpression(&tree, &tokens, source, 0);
+    var schema = RowSchema{};
+    _ = try schema.addColumn("status", .string, true);
+    const row_values = [_]Value{.{ .string = "archived" }};
+
+    const result = try evaluateExpression(
+        &tree,
+        &tokens,
+        source,
+        expr.node,
+        &row_values,
+        &schema,
+    );
+    try testing.expect(result == .null_value);
 }
 
 test "arithmetic rejects null operands" {

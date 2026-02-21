@@ -92,11 +92,11 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - Evaluator handles all parsed expression node forms and enforces type/null rules.
 
 ### Tasks
-- [ ] `E07` Implement evaluator semantics for `in(value, list)`.
+- [x] `E07` Implement evaluator semantics for `in(value, list)`.
   - Scalar membership against list literal/expression.
   - Type mismatch and null behavior defined and tested.
-- [ ] `E08` Implement evaluator semantics for `!in(value, list)`.
-- [ ] `E09` Implement evaluator semantics for list literals in function-based membership checks.
+- [x] `E08` Implement evaluator semantics for `!in(value, list)`.
+- [x] `E09` Implement evaluator semantics for list literals in function-based membership checks.
 - [ ] `E10` Implement parameter expression evaluation (`expr_parameter`) with explicit binding source.
   - Undefined parameter must fail closed with deterministic error.
 - [ ] `E11` Normalize null-comparison behavior under symbolic boolean operators.
@@ -183,6 +183,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - Do not implement until explicit product sign-off.
 
 ## Implementation Log
+- 2026-02-21: Completed `E07`, `E08`, and `E09` by adding dedicated evaluator handling for membership function calls (`in(value, list)`) with list-literal element evaluation and null-aware semantics: `in(null, list) -> null`, no-match with null element -> `null`, direct match -> `true`, null-free miss -> `false`. Enforced fail-closed type mismatch for incompatible non-null membership comparisons and added unit coverage in `src/executor/filter.zig` plus feature coverage in `test/features/expressions/in_test.zig` (including `!in(...)` behavior and assignment-path type mismatch failure).
 - 2026-02-21: Completed `E05` by introducing a dedicated `==` tokenizer token for expression equality, migrating expression parsing/evaluation from `=` to `==`, and keeping `=` only for assignment/config grammar. Added parser regressions that reject `=` in expression contexts (`where`, computed `select`, `sort(expr)`, assignment RHS expression) and migrated query/test fixtures using expression predicates to `==`.
 - 2026-02-21: Product decision captured: expression equality uses `==`; `=` is assignment/config-only syntax. Added migration tasks for tokenizer/parser/evaluator and feature coverage, including fail-closed rejection of `=` in expression contexts.
 - 2026-02-21: Completed `E06` by adding parser/expression precedence coverage for symbolic boolean logic. Added AST-shape assertions proving `!` binds tighter than comparison, `&&` binds tighter than `||`, and parentheses override default grouping. Added parser-level fail-closed regressions for legacy textual logical forms (`and`/`or`/`not`) in `where(...)`.

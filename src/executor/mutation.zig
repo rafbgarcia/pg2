@@ -2064,12 +2064,9 @@ fn columnTypeName(target: ColumnType) []const u8 {
 fn expressionLocationToken(tree: *const Ast, expr_node: NodeIndex) ?u16 {
     const node = tree.getNode(expr_node);
     return switch (node.tag) {
-        .expr_literal,
-        .expr_column_ref,
-        .expr_function_call,
-        .expr_aggregate,
-        .expr_parameter,
-        => node.data.token,
+        .expr_literal, .expr_column_ref, .expr_parameter => node.data.token,
+        .expr_function_call, .expr_aggregate => node.extra,
+        .expr_list => expressionLocationToken(tree, node.data.unary),
         .expr_binary, .expr_unary => node.extra,
         else => null,
     };
