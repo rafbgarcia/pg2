@@ -13,6 +13,8 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - Unary negation: `!`
   - Conjunction: `&&`
   - Disjunction: `||`
+- Expression equality operator is `==` (not `=`).
+- `=` is assignment/config syntax only (for example `insert(...)`, `update(...)`, and schema option payloads), not expression comparison.
 - Membership is stdlib function only: `in(value, list)`.
 - Negated membership is written as `!in(value, list)`.
 - Keep query pipeline `|>` only at query/operator level in v1.
@@ -22,6 +24,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - Legacy spellings (for example `a and b`, `status not in [...]`) must fail closed as invalid expression shape.
 
 ## Current Gaps Snapshot
+- Expression equality currently uses `=` in parser/evaluator/tests and must be migrated to `==`.
 - Evaluator does not explicitly handle membership function semantics and `expr_parameter`/`expr_list` node semantics in row predicate evaluation paths.
 - `lower`, `upper`, `trim` are placeholders.
 - `now()` is placeholder and must be wired to injected clock semantics.
@@ -62,6 +65,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 ## Phase 1: Language Surface and Parsing
 ### Gate
 - Tokenizer/parser accept `!`, `&&`, `||` and function-form membership `in(value, list)`.
+- Tokenizer/parser accept `==` for expression equality, and reject `=` in expression contexts.
 - Parser tests cover valid symbolic forms and fail-closed invalid legacy textual forms, without keyword-specific parsing branches.
 
 ### Tasks
@@ -75,6 +79,11 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - `in` is function-form only; infix and camelCase legacy forms fail closed.
 - [x] `E04` Parse membership only as stdlib call: `in(value, list)`.
   - Enforce argument count and argument shape at parse boundary where possible.
+- [ ] `E05` Switch expression equality syntax from `=` to `==`.
+  - Tokenizer: emit dedicated `==` token for expression equality.
+  - Parser: use `==` for comparison nodes and fail closed on `=` in expression positions.
+  - Keep `=` valid only for assignment/config grammar positions.
+  - Add parser regressions for accepted `==` and rejected `=` in expression contexts (`where`, `having`, computed `select`, `sort(expr)`, assignment RHS expressions).
 - [x] `E06` Precedence tests for symbolic boolean logic.
   - Ensure `!` binds tighter than comparison, `&&` tighter than `||`, with explicit parentheses cases.
 
@@ -92,6 +101,8 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - Undefined parameter must fail closed with deterministic error.
 - [ ] `E11` Normalize null-comparison behavior under symbolic boolean operators.
 - [ ] `E12` Add evaluator regressions for removed legacy logical/membership forms.
+- [ ] `E12a` Normalize evaluator equality semantics for `==` (and `!=`) after parser migration.
+  - Type/null behavior, deterministic errors, and fail-closed invalid predicate outputs.
 
 ## Phase 3: Built-in Functions and Deterministic Time
 ### Gate
@@ -135,6 +146,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - [ ] `test/features/expressions/lte_test.zig` (side note: less-than-or-equal `<=` comparison semantics and type/null behavior)
 - [ ] `test/features/expressions/gt_test.zig` (side note: greater-than `>` comparison semantics and type/null behavior)
 - [ ] `test/features/expressions/gte_test.zig` (side note: greater-than-or-equal `>=` comparison semantics and type/null behavior)
+- [ ] `test/features/expressions/equality_test.zig` (side note: equality `==` semantics including null comparison behavior)
 - [ ] `test/features/expressions/inequality_test.zig` (side note: inequality `!=` semantics including null comparison behavior)
 - [ ] `test/features/expressions/boolean_logic_test.zig` (side note: boolean operator semantics for `!`, `&&`, `||` including short-circuit and null interactions)
 - [ ] `test/features/expressions/in_test.zig` (includes `!in(value, list)` cases)
@@ -171,5 +183,6 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - Do not implement until explicit product sign-off.
 
 ## Implementation Log
+- 2026-02-21: Product decision captured: expression equality uses `==`; `=` is assignment/config-only syntax. Added migration tasks for tokenizer/parser/evaluator and feature coverage, including fail-closed rejection of `=` in expression contexts.
 - 2026-02-21: Completed `E06` by adding parser/expression precedence coverage for symbolic boolean logic. Added AST-shape assertions proving `!` binds tighter than comparison, `&&` binds tighter than `||`, and parentheses override default grouping. Added parser-level fail-closed regressions for legacy textual logical forms (`and`/`or`/`not`) in `where(...)`.
 - 2026-02-21: Completed `E04` by enforcing parse-time membership shape for `in(value, list)` only (exactly two args; second arg must be list literal), threading source text through parser/expression entry points so `in` remains a plain identifier token while membership-call validation stays explicit and fail-closed. Added parser/expression regression tests for valid form and invalid arity/shape.
