@@ -2,6 +2,8 @@
 const std = @import("std");
 const feature = @import("../test_env_test.zig");
 
+const returning_overflow_inserted_row_count: usize = 4097;
+
 test "feature delete removes row via session path" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
@@ -33,6 +35,41 @@ test "feature delete removes row via session path" {
     result = try executor.run("User {}");
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+}
+
+test "feature delete with no matching rows reports zero deletions via session path" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\  field(active, bool, notNull)
+        \\}
+    );
+
+    var result = try executor.run(
+        "User |> insert(id = 1, name = \"Alice\", active = true) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run("User |> where(id = 999) |> delete {}");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run("User |> where(id = 1) { id name active }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,Alice,true\n",
         result,
     );
 }
@@ -117,6 +154,12 @@ test "feature delete failure abort keeps previously deleted row visible via sess
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n2,B,true\n",
         result,
     );
+
+    result = try executor.run("User |> sort(id asc) { id name active }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=2 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,A,true\n2,B,true\n",
+        result,
+    );
 }
 
 test "feature delete returning delivery failure aborts mutation via session path" {
@@ -140,7 +183,7 @@ test "feature delete returning delivery failure aborts mutation via session path
 
     var insert_req_buf: [256]u8 = undefined;
     var row_index: usize = 0;
-    while (row_index <= 4096) : (row_index += 1) {
+    while (row_index < returning_overflow_inserted_row_count) : (row_index += 1) {
         const id = row_index + 1;
         const insert_req = try std.fmt.bufPrint(
             insert_req_buf[0..],
@@ -162,15 +205,33 @@ test "feature delete returning delivery failure aborts mutation via session path
         std.mem.indexOf(u8, overflow_result, "code=ReturningBufferExhausted") != null,
     );
 
-    var result = try executor.run("User |> where(id = 1) { id active }");
+    var expected_count_buf: [128]u8 = undefined;
+    const expected_count_header = try std.fmt.bufPrint(
+        expected_count_buf[0..],
+        "OK returned_rows={d} inserted_rows=0 updated_rows=0 deleted_rows=0\n",
+        .{returning_overflow_inserted_row_count},
+    );
+
+    var result = try executor.run("User |> where(active = true) { id }");
+    try std.testing.expect(std.mem.startsWith(u8, result, expected_count_header));
+    try std.testing.expect(std.mem.indexOf(u8, result, "1\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "4097\n") != null);
+
+    result = try executor.run("User |> where(active = false) { id }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run("User |> where(id = 1) { id active }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,true\n",
         result,
     );
 
-    result = try executor.run("User |> where(id = 4096) { id active }");
+    result = try executor.run("User |> where(id = 4097) { id active }");
     try std.testing.expectEqualStrings(
-        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n4096,true\n",
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n4097,true\n",
         result,
     );
 }

@@ -102,7 +102,7 @@ Subscription sockets also use different kernel buffer sizes than query sockets â
 
 When all pool connections are in use and a new query arrives:
 
-- **Reject** (default): return an error immediately. Client retries with backoff. Simple, predictable.
-- **Queue**: hold the request in a bounded wait queue. If a pool connection frees up before a timeout, execute the query. If timeout expires, reject. Adds latency but smooths short bursts.
+- **Queue** (default): hold the request in a bounded wait queue. If a pool connection frees up before timeout (default target: 30s), execute it; otherwise reject.
+- **Reject**: return an error immediately. Client retries with backoff.
 
-The choice is configurable. Reject is safer â€” queuing risks cascading latency under sustained load.
+The choice remains configurable per deployment.
