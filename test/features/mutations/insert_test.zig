@@ -108,55 +108,6 @@ test "feature insert returns selected fields via session path" {
     );
 }
 
-test "feature insert high-volume sequential requests remain queryable via session path" {
-    var env: feature.FeatureEnv = undefined;
-    try env.init();
-    defer env.deinit();
-
-    const executor = &env.executor;
-    try executor.applyDefinitions(
-        \\User {
-        \\  field(id, i64, notNull, primaryKey)
-        \\  field(name, string, notNull)
-        \\  field(active, bool, notNull)
-        \\}
-    );
-
-    var insert_req_buf: [256]u8 = undefined;
-    var row_index: usize = 0;
-    while (row_index < 512) : (row_index += 1) {
-        const id = row_index + 1;
-        const insert_req = try std.fmt.bufPrint(
-            insert_req_buf[0..],
-            "User |> insert(id = {d}, name = \"user-{d}\", active = true) {{}}",
-            .{ id, id },
-        );
-        const result = try executor.run(insert_req);
-        try std.testing.expectEqualStrings(
-            "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
-            result,
-        );
-    }
-
-    var result = try executor.run("User |> where(id == 1) { id name active }");
-    try std.testing.expectEqualStrings(
-        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,user-1,true\n",
-        result,
-    );
-
-    result = try executor.run("User |> where(id == 256) { id name active }");
-    try std.testing.expectEqualStrings(
-        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n256,user-256,true\n",
-        result,
-    );
-
-    result = try executor.run("User |> where(id == 512) { id name active }");
-    try std.testing.expectEqualStrings(
-        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n512,user-512,true\n",
-        result,
-    );
-}
-
 test "feature insert large-row payloads remain readable via session path" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
