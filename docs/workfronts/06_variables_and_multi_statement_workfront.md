@@ -22,10 +22,14 @@ User |> where(active = true) |> count() { count }
   - Sequential statement execution in one request.
   - Variable references in predicates and mutation expressions.
   - Deterministic rollback behavior when any statement fails.
+  - Shared request snapshot semantics and read-your-own-writes guarantees.
+  - Final-statement-only response contract for multi-statement requests.
+  - Deterministic statement-indexed errors.
 - Out of scope (separate workfront):
   - User-defined functions/pipes execution semantics.
   - Cross-request/session variables.
   - Optimizer-level statement reordering.
+  - New parallel executor for statement fan-out.
 
 ## Decision Gate (User-Facing Semantics)
 Decision confirmed (2026-02-21): Option A.
@@ -42,6 +46,11 @@ Option B: statement-level auto-commit inside a request.
 
 Follow-up: keep Option B as a future explicit opt-in mode only.
 
+Additional confirmed decisions (2026-02-21):
+- All statements in one request share one transaction snapshot baseline.
+- Multi-statement responses serialize only the final statement's row payload.
+- Errors include deterministic failing `statement_index`.
+
 ## Phase 1: Language and AST Contracts
 ### Scope
 - Define variable value kinds:
@@ -53,6 +62,7 @@ Follow-up: keep Option B as a future explicit opt-in mode only.
   - undefined variable
   - duplicate variable name in same request
   - invalid variable type in predicate context
+  - variable memory limit exceeded (fail-closed boundary code until spill integration)
 
 ### Gate
 - Parser/semantic tests prove deterministic diagnostics for all invalid forms.
@@ -63,10 +73,12 @@ Follow-up: keep Option B as a future explicit opt-in mode only.
 - Introduce request execution context with variable store and deterministic memory bounds.
 - Execute statements in source order; capture per-statement stats and final response policy.
 - Ensure `let` does not produce rows directly; it only mutates variable state.
+- Shared snapshot: every statement in the request sees the same baseline snapshot plus in-request writes.
 
 ### Gate
 - Multi-statement read-only request executes all statements in order.
 - `let` values can be consumed by later statements in the same request.
+- Read-your-own-writes is deterministic across statement boundaries.
 
 ## Phase 3: Mutation Semantics and Transaction Guarantees
 ### Scope
@@ -84,15 +96,25 @@ Follow-up: keep Option B as a future explicit opt-in mode only.
 ## Phase 4: Protocol and Result Shaping
 ### Scope
 - Decide and implement response format:
-  - final statement result only, or
-  - per-statement framed results
+  - final statement result only (confirmed default)
 - Add statement index + phase + error code to serialized errors.
 - Preserve backwards-compatible one-statement output shape where possible.
 
 ### Gate
 - Session tests prove stable wire output for success and failure across multi-statement requests.
 
-## Phase 5: Feature Test Matrix (One File Per Capability)
+## Phase 5: Memory and Spill Integration Boundary
+### Scope
+- Define deterministic in-memory limits for variable materialization.
+- Integrate with Workfront 03 degrade/spill mechanisms once available.
+- Until Workfront 03 integration lands, overflow conditions return explicit bounded-resource errors (fail closed, no silent truncation).
+
+### Gate
+- Deterministic tests verify:
+  - bounded in-memory behavior
+  - fail-closed behavior without spill
+  - spill handoff contract once Workfront 03 phases are available
+## Phase 6: Feature Test Matrix (One File Per Capability)
 Create dedicated files under `test/features/variables_and_multi_statement/`:
 1. `let_scalar_test.zig`
 2. `let_list_from_query_test.zig`
@@ -104,6 +126,8 @@ Create dedicated files under `test/features/variables_and_multi_statement/`:
 8. `invalid_variable_type_usage_test.zig`
 9. `statement_error_index_test.zig`
 10. `response_shape_multi_statement_test.zig`
+11. `shared_snapshot_read_your_writes_test.zig`
+12. `variable_memory_boundaries_test.zig`
 
 ### Gate
 - Feature suite passes under `zig build test`.
