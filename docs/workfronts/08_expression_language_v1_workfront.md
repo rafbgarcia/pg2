@@ -73,7 +73,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - Do not add keyword-specific fallback/rejection logic for textual forms.
 - [x] `E03` Remove parser support for infix membership operators.
   - `in` is function-form only; infix and camelCase legacy forms fail closed.
-- [ ] `E04` Parse membership only as stdlib call: `in(value, list)`.
+- [x] `E04` Parse membership only as stdlib call: `in(value, list)`.
   - Enforce argument count and argument shape at parse boundary where possible.
 - [ ] `E06` Precedence tests for symbolic boolean logic.
   - Ensure `!` binds tighter than comparison, `&&` tighter than `||`, with explicit parentheses cases.
@@ -120,46 +120,55 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 ## Phase 5: Feature Test Matrix (One Capability Per File)
 ### Gate
 - Every listed file exists, is imported in feature suite, and passes.
+- Recommended foldering for clarity at scale:
+  - Keep all expression behavior under `test/features/expressions/`.
+  - Split by concern: `functions/`, `semantics/`, `contexts/`, `diagnostics/`.
+  - For built-ins, use one file per function (avoids broad multi-function files and makes failures easier to localize).
 
 ### Tasks
-- [ ] `T01` `test/features/expressions/subtraction_test.zig`
-- [ ] `T02` `test/features/expressions/multiplication_test.zig`
-- [ ] `T03` `test/features/expressions/division_test.zig`
-- [ ] `T04` `test/features/expressions/unary_minus_test.zig`
-- [ ] `T05` `test/features/expressions/precedence_parentheses_test.zig`
-- [ ] `T06` `test/features/expressions/lt_test.zig`
-- [ ] `T06` `test/features/expressions/lte_test.zig`
-- [ ] `T06` `test/features/expressions/gt_test.zig`
-- [ ] `T06` `test/features/expressions/gte_test.zig`
-- [ ] `T06` `test/features/expressions/different_test.zig` (i.e. !=)
-- [ ] `T07` `test/features/expressions/boolean_logic_test.zig`
-- [ ] `T08` `test/features/expressions/in_test.zig` (includes `!in(value, list)` cases)
-- [ ] `T10` `test/features/expressions/symbolic_logic_tokens_test.zig` (covers `!`, `&&`, `||`)
-- [ ] `T12` `test/features/expressions/parameters_test.zig`
-- [ ] `T13` `test/features/expressions/functions_numeric_test.zig` (side note: numeric builtin behavior and type/arity validation; e.g. `abs`, `sqrt`, `round`)
-- [ ] `T14` `test/features/expressions/functions_string_test.zig` (side note: string builtin behavior and edge cases; e.g. `lower`, `upper`, `trim`, `length`)
-- [ ] `T15` `test/features/expressions/functions_time_test.zig` (side note: deterministic time function behavior via injected clock; `now()` and related comparisons)
-- [ ] `T16` `test/features/expressions/null_semantics_test.zig` (side note: null propagation and boolean/null truth-table behavior across arithmetic, comparisons, and predicates)
-- [ ] `T17` `test/features/expressions/cross_context_test.zig` (side note: same expression semantics in `where`, `update`, computed `select`, `sort(expr)`, and `having`)
-- [ ] `T18` `test/features/expressions/diagnostics_test.zig` (side note: deterministic fail-closed parser/evaluator errors with precise messages/locations for invalid shapes and type/null violations)
-- [ ] `T19` Import all new expression files in `test/features/features_specs_test.zig`.
+- [ ] `test/features/expressions/subtraction_test.zig` (side note: binary subtraction `a - b`; includes numeric type/null behavior)
+- [ ] `test/features/expressions/multiplication_test.zig` (side note: binary multiplication `a * b`; includes numeric type/null behavior)
+- [ ] `test/features/expressions/division_test.zig` (side note: binary division `a / b`; includes divide-by-zero and numeric type/null behavior)
+- [ ] `test/features/expressions/unary_minus_test.zig` (side note: unary negation `-a`/`-(expr)`; distinct from binary subtraction)
+- [ ] `test/features/expressions/precedence_parentheses_test.zig` (side note: operator precedence and explicit grouping across arithmetic/comparison/boolean operators)
+- [ ] `test/features/expressions/lt_test.zig` (side note: less-than `<` comparison semantics and type/null behavior)
+- [ ] `test/features/expressions/lte_test.zig` (side note: less-than-or-equal `<=` comparison semantics and type/null behavior)
+- [ ] `test/features/expressions/gt_test.zig` (side note: greater-than `>` comparison semantics and type/null behavior)
+- [ ] `test/features/expressions/gte_test.zig` (side note: greater-than-or-equal `>=` comparison semantics and type/null behavior)
+- [ ] `test/features/expressions/inequality_test.zig` (side note: inequality `!=` semantics including null comparison behavior)
+- [ ] `test/features/expressions/boolean_logic_test.zig` (side note: boolean operator semantics for `!`, `&&`, `||` including short-circuit and null interactions)
+- [ ] `test/features/expressions/in_test.zig` (includes `!in(value, list)` cases)
+- [ ] `test/features/expressions/logical_not_test.zig` (side note: unary logical negation `!` semantics and parse shape)
+- [ ] `test/features/expressions/logical_and_test.zig` (side note: conjunction `&&` semantics and parse shape)
+- [ ] `test/features/expressions/logical_or_test.zig` (side note: disjunction `||` semantics and parse shape)
+- [ ] `test/features/expressions/parameters_test.zig` (side note: parameter binding semantics, undefined-parameter failures, and deterministic diagnostics)
+- [ ] `test/features/expressions/functions/abs_test.zig`, `test/features/expressions/functions/sqrt_test.zig`, `test/features/expressions/functions/round_test.zig` (side note: numeric builtin behavior and type/arity validation; one file per function)
+- [ ] `test/features/expressions/functions/lower_test.zig`, `test/features/expressions/functions/upper_test.zig`, `test/features/expressions/functions/trim_test.zig`, `test/features/expressions/functions/length_test.zig`, `test/features/expressions/functions/coalesce_test.zig` (side note: string/null-handling builtins with edge cases; one file per function)
+- [ ] `test/features/expressions/functions/now_test.zig` (side note: deterministic time function behavior via injected clock; no system clock in core code)
+- [ ] `test/features/expressions/semantics/null_semantics_test.zig` (side note: null propagation and boolean/null truth-table behavior across arithmetic, comparisons, and predicates)
+- [ ] `test/features/expressions/contexts/cross_context_test.zig` (side note: same expression semantics in `where`, `update`, computed `select`, `sort(expr)`, and `having`)
+- [ ] `test/features/expressions/diagnostics/diagnostics_test.zig` (side note: deterministic fail-closed parser/evaluator errors with precise messages/locations for invalid shapes and type/null violations)
+- [ ] Import all new expression files in `test/features/features_specs_test.zig`. (side note: keep feature suite discovery complete and deterministic)
 
 ## Phase 6: Diagnostics and Hardening
 ### Gate
 - Diagnostics are explicit, deterministic, and context-aware.
 
 ### Tasks
-- [ ] `D01` Normalize parser error messages for invalid legacy logical/membership textual forms (shape errors, not keyword errors).
-- [ ] `D02` Normalize evaluator errors for null arithmetic, type mismatch, and invalid predicate result.
-- [ ] `D03` Ensure mutation-path diagnostics include precise assignment path for expression failures.
-- [ ] `D04` Add regression tests for fail-closed behavior on unsupported textual expression shapes.
+- [ ] Normalize parser error messages for invalid legacy logical/membership textual forms (shape errors, not keyword errors).
+- [ ] Normalize evaluator errors for null arithmetic, type mismatch, and invalid predicate result.
+- [ ] Ensure mutation-path diagnostics include precise assignment path for expression failures.
+- [ ] Add regression tests for fail-closed behavior on unsupported textual expression shapes.
 
 ## Phase 7: Pending Product Decision
 ### Gate
 - Product decision captured explicitly before implementation.
 
 ### Tasks
-- [ ] `P01` Evaluate expression-level pipeline syntax for function composition in expressions.
+- [ ] Evaluate expression-level pipeline syntax for function composition in expressions.
   - Candidate (pending): `status |> in([a, b, c])`.
   - Keep query-level pipeline `|>` behavior unchanged.
   - Do not implement until explicit product sign-off.
+
+## Implementation Log
+- 2026-02-21: Completed `E04` by enforcing parse-time membership shape for `in(value, list)` only (exactly two args; second arg must be list literal), threading source text through parser/expression entry points so `in` remains a plain identifier token while membership-call validation stays explicit and fail-closed. Added parser/expression regression tests for valid form and invalid arity/shape.
