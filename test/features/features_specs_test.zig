@@ -33,5 +33,6 @@ comptime {
     _ = @import("expressions/in_test.zig");
     _ = @import("expressions/sort_test.zig");
     _ = @import("expressions/subtraction_test.zig");
+    _ = @import("expressions/update_assignment_test.zig");
     _ = @import("expressions/where_test.zig");
 }
