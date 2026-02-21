@@ -421,10 +421,16 @@ fn loadScope(
 
 fn tokenToColumnType(tok_type: TokenType) ?@import("../storage/row.zig").ColumnType {
     return switch (tok_type) {
-        .kw_bigint => .bigint,
-        .kw_int => .int,
-        .kw_float => .float,
-        .kw_boolean => .boolean,
+        .kw_i8 => .i8,
+        .kw_i16 => .i16,
+        .kw_i64 => .i64,
+        .kw_i32 => .i32,
+        .kw_u8 => .u8,
+        .kw_u16 => .u16,
+        .kw_u32 => .u32,
+        .kw_u64 => .u64,
+        .kw_f64 => .f64,
+        .kw_bool => .bool,
         .kw_string => .string,
         .kw_timestamp => .timestamp,
         else => null,
@@ -461,29 +467,75 @@ fn parseColumnDefaultValue(
     }
 
     return switch (column_type) {
-        .bigint => switch (tok.token_type) {
-            .integer_literal => Value{
-                .bigint = std.fmt.parseInt(i64, text, 10) catch return error.InvalidSchema,
+        .i8 => switch (tok.token_type) {
+            .integer_literal => blk: {
+                const parsed = std.fmt.parseInt(i64, text, 10) catch return error.InvalidSchema;
+                const narrowed = std.math.cast(i8, parsed) orelse return error.InvalidSchema;
+                break :blk Value{ .i8 = narrowed };
             },
             else => error.InvalidSchema,
         },
-        .int => switch (tok.token_type) {
+        .i16 => switch (tok.token_type) {
+            .integer_literal => blk: {
+                const parsed = std.fmt.parseInt(i64, text, 10) catch return error.InvalidSchema;
+                const narrowed = std.math.cast(i16, parsed) orelse return error.InvalidSchema;
+                break :blk Value{ .i16 = narrowed };
+            },
+            else => error.InvalidSchema,
+        },
+        .i64 => switch (tok.token_type) {
+            .integer_literal => Value{
+                .i64 = std.fmt.parseInt(i64, text, 10) catch return error.InvalidSchema,
+            },
+            else => error.InvalidSchema,
+        },
+        .i32 => switch (tok.token_type) {
             .integer_literal => blk: {
                 const parsed = std.fmt.parseInt(i64, text, 10) catch return error.InvalidSchema;
                 const narrowed = std.math.cast(i32, parsed) orelse return error.InvalidSchema;
-                break :blk Value{ .int = narrowed };
+                break :blk Value{ .i32 = narrowed };
             },
             else => error.InvalidSchema,
         },
-        .float => switch (tok.token_type) {
+        .u8 => switch (tok.token_type) {
+            .integer_literal => blk: {
+                const parsed = std.fmt.parseInt(u64, text, 10) catch return error.InvalidSchema;
+                const narrowed = std.math.cast(u8, parsed) orelse return error.InvalidSchema;
+                break :blk Value{ .u8 = narrowed };
+            },
+            else => error.InvalidSchema,
+        },
+        .u16 => switch (tok.token_type) {
+            .integer_literal => blk: {
+                const parsed = std.fmt.parseInt(u64, text, 10) catch return error.InvalidSchema;
+                const narrowed = std.math.cast(u16, parsed) orelse return error.InvalidSchema;
+                break :blk Value{ .u16 = narrowed };
+            },
+            else => error.InvalidSchema,
+        },
+        .u32 => switch (tok.token_type) {
+            .integer_literal => blk: {
+                const parsed = std.fmt.parseInt(u64, text, 10) catch return error.InvalidSchema;
+                const narrowed = std.math.cast(u32, parsed) orelse return error.InvalidSchema;
+                break :blk Value{ .u32 = narrowed };
+            },
+            else => error.InvalidSchema,
+        },
+        .u64 => switch (tok.token_type) {
+            .integer_literal => Value{
+                .u64 = std.fmt.parseInt(u64, text, 10) catch return error.InvalidSchema,
+            },
+            else => error.InvalidSchema,
+        },
+        .f64 => switch (tok.token_type) {
             .integer_literal, .float_literal => Value{
-                .float = std.fmt.parseFloat(f64, text) catch return error.InvalidSchema,
+                .f64 = std.fmt.parseFloat(f64, text) catch return error.InvalidSchema,
             },
             else => error.InvalidSchema,
         },
-        .boolean => switch (tok.token_type) {
-            .true_literal => Value{ .boolean = true },
-            .false_literal => Value{ .boolean = false },
+        .bool => switch (tok.token_type) {
+            .true_literal => Value{ .bool = true },
+            .false_literal => Value{ .bool = false },
             else => error.InvalidSchema,
         },
         .string => switch (tok.token_type) {
@@ -512,7 +564,7 @@ const parser_mod = @import("../parser/parser.zig");
 test "load simple schema" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(email, string, notNull)
         \\  field(name, string, nullable)
         \\}
@@ -538,10 +590,10 @@ test "load simple schema" {
 test "load schema parses typed column defaults" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(plan, string, notNull, default, "free")
-        \\  field(login_count, int, notNull, default, 0)
-        \\  field(enabled, boolean, notNull, default, true)
+        \\  field(login_count, i32, notNull, default, 0)
+        \\  field(enabled, bool, notNull, default, true)
         \\}
     ;
     const tokens = tokenizer_mod.tokenize(source);
@@ -555,14 +607,14 @@ test "load schema parses typed column defaults" {
     const count_default = catalog.getColumnDefault(0, 2).?;
     const enabled_default = catalog.getColumnDefault(0, 3).?;
     try testing.expectEqualSlices(u8, "free", plan_default.string);
-    try testing.expectEqual(@as(i32, 0), count_default.int);
-    try testing.expect(enabled_default.boolean);
+    try testing.expectEqual(@as(i32, 0), count_default.i32);
+    try testing.expect(enabled_default.bool);
 }
 
 test "load schema rejects non-null column default null" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull, default, null)
         \\}
     ;
@@ -580,7 +632,7 @@ test "load schema rejects non-null column default null" {
 test "load schema rejects field without explicit nullability constraint" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string)
         \\}
     ;
@@ -598,7 +650,7 @@ test "load schema rejects field without explicit nullability constraint" {
 test "load schema rejects field with conflicting nullability constraints" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull, nullable)
         \\}
     ;
@@ -616,12 +668,12 @@ test "load schema rejects field with conflicting nullability constraints" {
 test "load schema rejects belongsTo without explicit RI config" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  hasMany Post
         \\}
         \\Post {
-        \\  field(id, bigint, notNull, primaryKey)
-        \\  field(user_id, bigint, notNull)
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(user_id, i64, notNull)
         \\  belongsTo User
         \\}
     ;
@@ -639,12 +691,12 @@ test "load schema rejects belongsTo without explicit RI config" {
 test "load schema with reference and explicit RI config" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  reference(posts, id, Post.user_id, withoutReferentialIntegrity)
         \\}
         \\Post {
-        \\  field(id, bigint, notNull, primaryKey)
-        \\  field(user_id, bigint, notNull)
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(user_id, i64, notNull)
         \\  reference(author, user_id, User.id, withReferentialIntegrity(onDeleteRestrict, onUpdateCascade))
         \\}
     ;
@@ -680,11 +732,11 @@ test "load schema with reference and explicit RI config" {
 test "load schema rejects unsupported referential set default actions" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\}
         \\Post {
-        \\  field(id, bigint, notNull, primaryKey)
-        \\  field(user_id, bigint, notNull)
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(user_id, i64, notNull)
         \\  reference(author, user_id, User.id, withReferentialIntegrity(onDeleteSetDefault, onUpdateRestrict))
         \\}
     ;
@@ -702,7 +754,7 @@ test "load schema rejects unsupported referential set default actions" {
 test "load schema with index" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(email, string, notNull)
         \\  index(idx_email, [email], unique)
         \\}
@@ -731,8 +783,8 @@ test "load schema with index" {
 test "load schema with scope" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
-        \\  field(active, boolean, nullable)
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(active, bool, nullable)
         \\  scope active |> where(active = true)
         \\}
     ;
@@ -751,7 +803,7 @@ test "load schema with scope" {
 test "missing association target fails" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  hasMany Comment
         \\}
     ;
@@ -766,7 +818,7 @@ test "missing association target fails" {
 test "row schema mirrors catalog columns" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, nullable)
         \\}
     ;

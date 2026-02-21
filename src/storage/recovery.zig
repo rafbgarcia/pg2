@@ -252,7 +252,7 @@ test "replayCommittedOverflowLifecycle reclaims chain and is idempotent" {
     @memset(long_text[0..], 'r');
     const schema_text =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull)
         \\}
     ;

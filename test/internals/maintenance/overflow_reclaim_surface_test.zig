@@ -16,7 +16,7 @@ test "internal overflow delete drains reclaim queue deterministically" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull)
         \\}
     );
@@ -53,7 +53,7 @@ test "internal inspect exposes overflow reclaim backlog and throughput counters"
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull)
         \\  field(bio, string, notNull)
         \\}

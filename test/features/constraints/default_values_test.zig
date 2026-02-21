@@ -10,9 +10,9 @@ test "feature insert applies schema defaults for omitted fields" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(tier, string, notNull, default, "free")
-        \\  field(marketing_opt_in, boolean, notNull, default, false)
+        \\  field(marketing_opt_in, bool, notNull, default, false)
         \\}
     );
 
@@ -37,7 +37,7 @@ test "feature insert keeps explicit null semantics even when default exists" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(display_name, string, notNull, default, "guest")
         \\}
     );

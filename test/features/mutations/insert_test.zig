@@ -14,9 +14,9 @@ fn appendWideFieldDefinition(writer: anytype, field_index: usize) !void {
     try writer.writeAll("  field(");
     try appendWideFieldName(writer, field_index);
     switch (field_index % 3) {
-        1 => try writer.writeAll(", bigint, notNull)\n"),
+        1 => try writer.writeAll(", i64, notNull)\n"),
         2 => try writer.writeAll(", string, notNull)\n"),
-        else => try writer.writeAll(", boolean, notNull)\n"),
+        else => try writer.writeAll(", bool, notNull)\n"),
     }
 }
 
@@ -41,7 +41,7 @@ fn buildWideInsertSchema(buf: []u8, field_count: usize) ![]const u8 {
     var stream = std.io.fixedBufferStream(buf);
     const writer = stream.writer();
     try writer.writeAll("WideUser {\n");
-    try writer.writeAll("  field(id, bigint, notNull, primaryKey)\n");
+    try writer.writeAll("  field(id, i64, notNull, primaryKey)\n");
     var field_index: usize = 1;
     while (field_index <= field_count) : (field_index += 1) {
         try appendWideFieldDefinition(writer, field_index);
@@ -70,9 +70,9 @@ test "feature insert returns explicit insert count via session path" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull)
-        \\  field(active, boolean, notNull)
+        \\  field(active, bool, notNull)
         \\}
     );
 
@@ -93,9 +93,9 @@ test "feature insert high-volume sequential requests remain queryable via sessio
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull)
-        \\  field(active, boolean, notNull)
+        \\  field(active, bool, notNull)
         \\}
     );
 
@@ -142,7 +142,7 @@ test "feature insert large-row payloads remain readable via session path" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\Document {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(title, string, notNull)
         \\  field(payload, string, notNull)
         \\}
@@ -265,9 +265,9 @@ test "feature insert duplicate key fails closed late in high-volume workload" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull)
-        \\  field(active, boolean, notNull)
+        \\  field(active, bool, notNull)
         \\}
     );
 

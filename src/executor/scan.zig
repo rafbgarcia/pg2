@@ -547,7 +547,7 @@ test "empty scan returns zero rows" {
 
     var catalog = Catalog{};
     const model_id = try catalog.addModel("User");
-    _ = try catalog.addColumn(model_id, "id", .bigint, false);
+    _ = try catalog.addColumn(model_id, "id", .i64, false);
     // total_pages = 0, so scan should return nothing.
 
     const tx = try tm.begin();
@@ -580,7 +580,7 @@ test "scan with rows inserted via HeapPage" {
 
     var catalog = Catalog{};
     const model_id = try catalog.addModel("User");
-    _ = try catalog.addColumn(model_id, "id", .bigint, false);
+    _ = try catalog.addColumn(model_id, "id", .i64, false);
     _ = try catalog.addColumn(model_id, "name", .string, false);
 
     // Set up heap page at page_id 10.
@@ -594,12 +594,12 @@ test "scan with rows inserted via HeapPage" {
     // Encode and insert two rows.
     const schema = &catalog.models[model_id].row_schema;
     var buf1: [256]u8 = undefined;
-    const vals1 = [_]Value{ .{ .bigint = 1 }, .{ .string = "Alice" } };
+    const vals1 = [_]Value{ .{ .i64 = 1 }, .{ .string = "Alice" } };
     const len1 = try row_mod.encodeRow(schema, &vals1, &buf1);
     _ = try HeapPage.insert(page, buf1[0..len1]);
 
     var buf2: [256]u8 = undefined;
-    const vals2 = [_]Value{ .{ .bigint = 2 }, .{ .string = "Bob" } };
+    const vals2 = [_]Value{ .{ .i64 = 2 }, .{ .string = "Bob" } };
     const len2 = try row_mod.encodeRow(schema, &vals2, &buf2);
     _ = try HeapPage.insert(page, buf2[0..len2]);
 
@@ -621,9 +621,9 @@ test "scan with rows inserted via HeapPage" {
     defer result.deinit();
 
     try testing.expectEqual(@as(u16, 2), result.row_count);
-    try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].bigint);
+    try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].i64);
     try testing.expectEqualSlices(u8, "Alice", result.rows[0].values[1].string);
-    try testing.expectEqual(@as(i64, 2), result.rows[1].values[0].bigint);
+    try testing.expectEqual(@as(i64, 2), result.rows[1].values[0].i64);
     try testing.expectEqualSlices(u8, "Bob", result.rows[1].values[1].string);
 }
 
@@ -639,7 +639,7 @@ test "tableScanInto respects caller row capacity" {
 
     var catalog = Catalog{};
     const model_id = try catalog.addModel("Cap");
-    _ = try catalog.addColumn(model_id, "id", .bigint, false);
+    _ = try catalog.addColumn(model_id, "id", .i64, false);
     catalog.models[model_id].heap_first_page_id = 40;
     catalog.models[model_id].total_pages = 1;
 
@@ -648,11 +648,11 @@ test "tableScanInto respects caller row capacity" {
     const schema = &catalog.models[model_id].row_schema;
 
     var buf: [256]u8 = undefined;
-    const vals1 = [_]Value{.{ .bigint = 11 }};
+    const vals1 = [_]Value{.{ .i64 = 11 }};
     const len1 = try row_mod.encodeRow(schema, &vals1, &buf);
     _ = try HeapPage.insert(page, buf[0..len1]);
 
-    const vals2 = [_]Value{.{ .bigint = 22 }};
+    const vals2 = [_]Value{.{ .i64 = 22 }};
     const len2 = try row_mod.encodeRow(schema, &vals2, &buf);
     _ = try HeapPage.insert(page, buf[0..len2]);
     pool.unpin(40, true);
@@ -677,7 +677,7 @@ test "tableScanInto respects caller row capacity" {
 
     try testing.expectEqual(@as(u16, 1), out.row_count);
     try testing.expectEqual(@as(u32, 1), out.pages_read);
-    try testing.expectEqual(@as(i64, 11), out_rows[0].values[0].bigint);
+    try testing.expectEqual(@as(i64, 11), out_rows[0].values[0].i64);
 }
 
 test "scan skips deleted slots" {
@@ -692,7 +692,7 @@ test "scan skips deleted slots" {
 
     var catalog = Catalog{};
     const model_id = try catalog.addModel("Item");
-    _ = try catalog.addColumn(model_id, "id", .bigint, false);
+    _ = try catalog.addColumn(model_id, "id", .i64, false);
     catalog.models[model_id].heap_first_page_id = 20;
     catalog.models[model_id].total_pages = 1;
 
@@ -701,11 +701,11 @@ test "scan skips deleted slots" {
 
     const schema = &catalog.models[model_id].row_schema;
     var buf: [256]u8 = undefined;
-    const vals1 = [_]Value{.{ .bigint = 1 }};
+    const vals1 = [_]Value{.{ .i64 = 1 }};
     const len1 = try row_mod.encodeRow(schema, &vals1, &buf);
     const slot0 = try HeapPage.insert(page, buf[0..len1]);
 
-    const vals2 = [_]Value{.{ .bigint = 2 }};
+    const vals2 = [_]Value{.{ .i64 = 2 }};
     const len2 = try row_mod.encodeRow(schema, &vals2, &buf);
     _ = try HeapPage.insert(page, buf[0..len2]);
 
@@ -729,7 +729,7 @@ test "scan skips deleted slots" {
     defer result.deinit();
 
     try testing.expectEqual(@as(u16, 1), result.row_count);
-    try testing.expectEqual(@as(i64, 2), result.rows[0].values[0].bigint);
+    try testing.expectEqual(@as(i64, 2), result.rows[0].values[0].i64);
 }
 
 test "scan pages_read tracks correctly" {
@@ -744,7 +744,7 @@ test "scan pages_read tracks correctly" {
 
     var catalog = Catalog{};
     const model_id = try catalog.addModel("Page");
-    _ = try catalog.addColumn(model_id, "id", .bigint, false);
+    _ = try catalog.addColumn(model_id, "id", .i64, false);
     catalog.models[model_id].heap_first_page_id = 30;
     catalog.models[model_id].total_pages = 3;
 

@@ -35,6 +35,7 @@ const BufferPool = buffer_pool_mod.BufferPool;
 const Wal = wal_mod.Wal;
 const Value = row_mod.Value;
 const RowSchema = row_mod.RowSchema;
+const ColumnType = row_mod.ColumnType;
 const OverflowPage = overflow_mod.OverflowPage;
 const OverflowPageIdAllocator = overflow_mod.PageIdAllocator;
 const BTree = btree_mod.BTree;
@@ -1525,7 +1526,8 @@ pub fn buildRowFromAssignments(
             schema,
         ) catch |e| return mapFilterError(e);
 
-        out_values[col_idx] = val;
+        const expected_type = schema.columns[col_idx].column_type;
+        out_values[col_idx] = try coerceValueForColumn(val, expected_type);
         out_assigned[col_idx] = true;
         current = node.next;
     }
@@ -1581,9 +1583,105 @@ fn applyAssignments(
             schema,
         ) catch |e| return mapFilterError(e);
 
-        values[col_idx] = val;
+        const expected_type = schema.columns[col_idx].column_type;
+        values[col_idx] = try coerceValueForColumn(val, expected_type);
         current = node.next;
     }
+}
+
+fn coerceValueForColumn(value: Value, target: ColumnType) MutationError!Value {
+    if (value == .null_value) return value;
+    if (value.columnType()) |actual| {
+        if (actual == target) return value;
+    }
+
+    return switch (target) {
+        .i8 => Value{ .i8 = try toI8(value) },
+        .i16 => Value{ .i16 = try toI16(value) },
+        .i32 => Value{ .i32 = try toI32(value) },
+        .i64 => Value{ .i64 = try toI64(value) },
+        .u8 => Value{ .u8 = try toU8(value) },
+        .u16 => Value{ .u16 = try toU16(value) },
+        .u32 => Value{ .u32 = try toU32(value) },
+        .u64 => Value{ .u64 = try toU64(value) },
+        .f64 => Value{ .f64 = try toF64(value) },
+        .bool => if (value == .bool) value else error.TypeMismatch,
+        .string => if (value == .string) value else error.TypeMismatch,
+        .timestamp => Value{ .timestamp = try toI64(value) },
+    };
+}
+
+fn toI8(value: Value) MutationError!i8 {
+    const v = try toI64(value);
+    return std.math.cast(i8, v) orelse error.TypeMismatch;
+}
+
+fn toI16(value: Value) MutationError!i16 {
+    const v = try toI64(value);
+    return std.math.cast(i16, v) orelse error.TypeMismatch;
+}
+
+fn toI32(value: Value) MutationError!i32 {
+    const v = try toI64(value);
+    return std.math.cast(i32, v) orelse error.TypeMismatch;
+}
+
+fn toI64(value: Value) MutationError!i64 {
+    return switch (value) {
+        .i8 => |v| v,
+        .i16 => |v| v,
+        .i32 => |v| v,
+        .i64 => |v| v,
+        .u8 => |v| v,
+        .u16 => |v| v,
+        .u32 => |v| v,
+        .u64 => |v| std.math.cast(i64, v) orelse return error.TypeMismatch,
+        else => error.TypeMismatch,
+    };
+}
+
+fn toU8(value: Value) MutationError!u8 {
+    const v = try toU64(value);
+    return std.math.cast(u8, v) orelse error.TypeMismatch;
+}
+
+fn toU16(value: Value) MutationError!u16 {
+    const v = try toU64(value);
+    return std.math.cast(u16, v) orelse error.TypeMismatch;
+}
+
+fn toU32(value: Value) MutationError!u32 {
+    const v = try toU64(value);
+    return std.math.cast(u32, v) orelse error.TypeMismatch;
+}
+
+fn toU64(value: Value) MutationError!u64 {
+    return switch (value) {
+        .i8 => |v| std.math.cast(u64, v) orelse return error.TypeMismatch,
+        .i16 => |v| std.math.cast(u64, v) orelse return error.TypeMismatch,
+        .i32 => |v| std.math.cast(u64, v) orelse return error.TypeMismatch,
+        .i64 => |v| std.math.cast(u64, v) orelse return error.TypeMismatch,
+        .u8 => |v| v,
+        .u16 => |v| v,
+        .u32 => |v| v,
+        .u64 => |v| v,
+        else => error.TypeMismatch,
+    };
+}
+
+fn toF64(value: Value) MutationError!f64 {
+    return switch (value) {
+        .i8 => |v| @floatFromInt(v),
+        .i16 => |v| @floatFromInt(v),
+        .i32 => |v| @floatFromInt(v),
+        .i64 => |v| @floatFromInt(v),
+        .u8 => |v| @floatFromInt(v),
+        .u16 => |v| @floatFromInt(v),
+        .u32 => |v| @floatFromInt(v),
+        .u64 => |v| @floatFromInt(v),
+        .f64 => |v| v,
+        else => error.TypeMismatch,
+    };
 }
 
 /// Find a heap page with enough free space, or allocate the next page.
@@ -1730,7 +1828,7 @@ const TestEnv = struct {
 
         self.catalog = Catalog{};
         self.model_id = try self.catalog.addModel("User");
-        _ = try self.catalog.addColumn(self.model_id, "id", .bigint, false);
+        _ = try self.catalog.addColumn(self.model_id, "id", .i64, false);
         _ = try self.catalog.addColumn(
             self.model_id,
             "name",
@@ -1804,7 +1902,7 @@ test "insert and scan back" {
     defer result.deinit();
 
     try testing.expectEqual(@as(u16, 1), result.row_count);
-    try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].bigint);
+    try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].i64);
     try testing.expectEqualSlices(
         u8,
         "Alice",
@@ -2796,7 +2894,7 @@ const ReferentialTestEnv = struct {
 
         self.catalog = Catalog{};
         self.user_model_id = try self.catalog.addModel("User");
-        _ = try self.catalog.addColumn(self.user_model_id, "id", .bigint, false);
+        _ = try self.catalog.addColumn(self.user_model_id, "id", .i64, false);
         self.catalog.setColumnPrimaryKey(self.user_model_id, 0);
         self.catalog.models[self.user_model_id].heap_first_page_id = 100;
         self.catalog.models[self.user_model_id].total_pages = 1;
@@ -2805,8 +2903,8 @@ const ReferentialTestEnv = struct {
         self.pool.unpin(100, true);
 
         self.post_model_id = try self.catalog.addModel("Post");
-        _ = try self.catalog.addColumn(self.post_model_id, "id", .bigint, false);
-        _ = try self.catalog.addColumn(self.post_model_id, "user_id", .bigint, true);
+        _ = try self.catalog.addColumn(self.post_model_id, "id", .i64, false);
+        _ = try self.catalog.addColumn(self.post_model_id, "user_id", .i64, true);
         self.catalog.setColumnPrimaryKey(self.post_model_id, 0);
         self.catalog.models[self.post_model_id].heap_first_page_id = 200;
         self.catalog.models[self.post_model_id].total_pages = 1;
@@ -3194,7 +3292,7 @@ test "update cascade rewrites child foreign keys" {
     );
     defer post_rows.deinit();
     try testing.expectEqual(@as(u16, 1), post_rows.row_count);
-    try testing.expectEqual(@as(i64, 2), post_rows.rows[0].values[1].bigint);
+    try testing.expectEqual(@as(i64, 2), post_rows.rows[0].values[1].i64);
 }
 
 test "update set null clears child foreign keys" {

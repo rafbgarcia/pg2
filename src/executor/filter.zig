@@ -164,7 +164,7 @@ pub fn evaluateExpressionWithResolver(
     return eval_stack[eval_count - 1];
 }
 
-/// Evaluate an expression and assert the result is boolean.
+/// Evaluate an expression and assert the result is bool.
 pub fn evaluatePredicate(
     tree: *const Ast,
     tokens: *const TokenizeResult,
@@ -203,8 +203,8 @@ pub fn evaluatePredicateWithResolver(
         resolver,
     );
     if (val == .null_value) return error.NullInPredicate;
-    if (val != .boolean) return error.TypeMismatch;
-    return val.boolean;
+    if (val != .bool) return error.TypeMismatch;
+    return val.bool;
 }
 
 /// Push work items for an AST node (post-order: push apply first, then children).
@@ -343,14 +343,18 @@ pub fn parseLiteralValue(
 
     return switch (tok.token_type) {
         .integer_literal => blk: {
-            const v = std.fmt.parseInt(i64, text, 10) catch
-                return error.InvalidLiteral;
-            break :blk Value{ .bigint = v };
+            if (std.fmt.parseInt(i64, text, 10)) |v| {
+                break :blk Value{ .i64 = v };
+            } else |_| {
+                const uv = std.fmt.parseInt(u64, text, 10) catch
+                    return error.InvalidLiteral;
+                break :blk Value{ .u64 = uv };
+            }
         },
         .float_literal => blk: {
             const v = std.fmt.parseFloat(f64, text) catch
                 return error.InvalidLiteral;
-            break :blk Value{ .float = v };
+            break :blk Value{ .f64 = v };
         },
         .string_literal => blk: {
             // Strip surrounding quotes.
@@ -359,8 +363,8 @@ pub fn parseLiteralValue(
             }
             break :blk Value{ .string = text };
         },
-        .true_literal => Value{ .boolean = true },
-        .false_literal => Value{ .boolean = false },
+        .true_literal => Value{ .bool = true },
+        .false_literal => Value{ .bool = false },
         .null_literal => Value{ .null_value = {} },
         else => error.InvalidLiteral,
     };
@@ -396,38 +400,61 @@ const ArithOp = enum { add, sub, mul, div };
 
 fn applyArithmetic(lhs: Value, rhs: Value, op: ArithOp) EvalError!Value {
     // Integer arithmetic.
-    if (lhs == .bigint and rhs == .bigint) {
-        const a = lhs.bigint;
-        const b = rhs.bigint;
-        return Value{ .bigint = switch (op) {
-            .add => std.math.add(i64, a, b) catch return error.NumericOverflow,
-            .sub => std.math.sub(i64, a, b) catch return error.NumericOverflow,
-            .mul => std.math.mul(i64, a, b) catch return error.NumericOverflow,
-            .div => blk: {
-                if (b == 0) return error.DivisionByZero;
-                if (a == std.math.minInt(i64) and b == -1) return error.NumericOverflow;
-                break :blk @divTrunc(a, b);
-            },
-        } };
+    if (lhs == .i8 and rhs == .i8) {
+        const a = lhs.i8;
+        const b = rhs.i8;
+        return Value{ .i8 = try applySignedArithmetic(i8, a, b, op) };
     }
-    if (lhs == .int and rhs == .int) {
-        const a = lhs.int;
-        const b = rhs.int;
-        return Value{ .int = switch (op) {
-            .add => std.math.add(i32, a, b) catch return error.NumericOverflow,
-            .sub => std.math.sub(i32, a, b) catch return error.NumericOverflow,
-            .mul => std.math.mul(i32, a, b) catch return error.NumericOverflow,
-            .div => blk: {
-                if (b == 0) return error.DivisionByZero;
-                if (a == std.math.minInt(i32) and b == -1) return error.NumericOverflow;
-                break :blk @divTrunc(a, b);
-            },
-        } };
+    if (lhs == .i16 and rhs == .i16) {
+        const a = lhs.i16;
+        const b = rhs.i16;
+        return Value{ .i16 = try applySignedArithmetic(i16, a, b, op) };
     }
+    if (lhs == .i32 and rhs == .i32) {
+        const a = lhs.i32;
+        const b = rhs.i32;
+        return Value{ .i32 = try applySignedArithmetic(i32, a, b, op) };
+    }
+    if (lhs == .i64 and rhs == .i64) {
+        const a = lhs.i64;
+        const b = rhs.i64;
+        return Value{ .i64 = try applySignedArithmetic(i64, a, b, op) };
+    }
+    if (lhs == .u8 and rhs == .u8) {
+        const a = lhs.u8;
+        const b = rhs.u8;
+        return Value{ .u8 = try applyUnsignedArithmetic(u8, a, b, op) };
+    }
+    if (lhs == .u16 and rhs == .u16) {
+        const a = lhs.u16;
+        const b = rhs.u16;
+        return Value{ .u16 = try applyUnsignedArithmetic(u16, a, b, op) };
+    }
+    if (lhs == .u32 and rhs == .u32) {
+        const a = lhs.u32;
+        const b = rhs.u32;
+        return Value{ .u32 = try applyUnsignedArithmetic(u32, a, b, op) };
+    }
+    if (lhs == .u64 and rhs == .u64) {
+        const a = lhs.u64;
+        const b = rhs.u64;
+        return Value{ .u64 = try applyUnsignedArithmetic(u64, a, b, op) };
+    }
+    if (isIntegerValue(lhs) and isIntegerValue(rhs)) {
+        if (isSignedIntegerValue(lhs) or isSignedIntegerValue(rhs)) {
+            const a = try toI64Integer(lhs);
+            const b = try toI64Integer(rhs);
+            return Value{ .i64 = try applySignedArithmetic(i64, a, b, op) };
+        }
+        const a = try toU64Integer(lhs);
+        const b = try toU64Integer(rhs);
+        return Value{ .u64 = try applyUnsignedArithmetic(u64, a, b, op) };
+    }
+
     // Float arithmetic (promote if mixed).
     const a = toFloat(lhs) orelse return error.TypeMismatch;
     const b = toFloat(rhs) orelse return error.TypeMismatch;
-    return Value{ .float = switch (op) {
+    return Value{ .f64 = switch (op) {
         .add => a + b,
         .sub => a - b,
         .mul => a * b,
@@ -438,13 +465,132 @@ fn applyArithmetic(lhs: Value, rhs: Value, op: ArithOp) EvalError!Value {
     } };
 }
 
+fn applySignedArithmetic(comptime T: type, a: T, b: T, op: ArithOp) EvalError!T {
+    return switch (op) {
+        .add => std.math.add(T, a, b) catch return error.NumericOverflow,
+        .sub => std.math.sub(T, a, b) catch return error.NumericOverflow,
+        .mul => std.math.mul(T, a, b) catch return error.NumericOverflow,
+        .div => blk: {
+            if (b == 0) return error.DivisionByZero;
+            if (a == std.math.minInt(T) and b == -1) return error.NumericOverflow;
+            break :blk @divTrunc(a, b);
+        },
+    };
+}
+
+fn applyUnsignedArithmetic(comptime T: type, a: T, b: T, op: ArithOp) EvalError!T {
+    return switch (op) {
+        .add => std.math.add(T, a, b) catch return error.NumericOverflow,
+        .sub => std.math.sub(T, a, b) catch return error.NumericOverflow,
+        .mul => std.math.mul(T, a, b) catch return error.NumericOverflow,
+        .div => blk: {
+            if (b == 0) return error.DivisionByZero;
+            break :blk @divTrunc(a, b);
+        },
+    };
+}
+
+fn isIntegerValue(v: Value) bool {
+    return switch (v) {
+        .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64 => true,
+        else => false,
+    };
+}
+
+fn isSignedIntegerValue(v: Value) bool {
+    return switch (v) {
+        .i8, .i16, .i32, .i64 => true,
+        else => false,
+    };
+}
+
+fn toI64Integer(v: Value) EvalError!i64 {
+    return switch (v) {
+        .i8 => |x| x,
+        .i16 => |x| x,
+        .i32 => |x| x,
+        .i64 => |x| x,
+        .u8 => |x| x,
+        .u16 => |x| x,
+        .u32 => |x| x,
+        .u64 => |x| std.math.cast(i64, x) orelse return error.NumericOverflow,
+        else => error.TypeMismatch,
+    };
+}
+
+fn toU64Integer(v: Value) EvalError!u64 {
+    return switch (v) {
+        .i8 => |x| std.math.cast(u64, x) orelse return error.NumericOverflow,
+        .i16 => |x| std.math.cast(u64, x) orelse return error.NumericOverflow,
+        .i32 => |x| std.math.cast(u64, x) orelse return error.NumericOverflow,
+        .i64 => |x| std.math.cast(u64, x) orelse return error.NumericOverflow,
+        .u8 => |x| x,
+        .u16 => |x| x,
+        .u32 => |x| x,
+        .u64 => |x| x,
+        else => error.TypeMismatch,
+    };
+}
+
 fn toFloat(v: Value) ?f64 {
     return switch (v) {
-        .float => |f| f,
-        .bigint => |i| @as(f64, @floatFromInt(i)),
-        .int => |i| @as(f64, @floatFromInt(i)),
+        .f64 => |f| f,
+        .i8 => |i| @as(f64, @floatFromInt(i)),
+        .i16 => |i| @as(f64, @floatFromInt(i)),
+        .i64 => |i| @as(f64, @floatFromInt(i)),
+        .i32 => |i| @as(f64, @floatFromInt(i)),
+        .u8 => |i| @as(f64, @floatFromInt(i)),
+        .u16 => |i| @as(f64, @floatFromInt(i)),
+        .u32 => |i| @as(f64, @floatFromInt(i)),
+        .u64 => |i| @as(f64, @floatFromInt(i)),
         else => null,
     };
+}
+
+fn toSigned(v: Value) ?i128 {
+    return switch (v) {
+        .i8 => |x| x,
+        .i16 => |x| x,
+        .i32 => |x| x,
+        .i64 => |x| x,
+        else => null,
+    };
+}
+
+fn toUnsigned(v: Value) ?u128 {
+    return switch (v) {
+        .u8 => |x| x,
+        .u16 => |x| x,
+        .u32 => |x| x,
+        .u64 => |x| x,
+        else => null,
+    };
+}
+
+fn numericOrder(lhs: Value, rhs: Value) ?std.math.Order {
+    if (lhs == .f64 or rhs == .f64) {
+        const lf = toFloat(lhs) orelse return null;
+        const rf = toFloat(rhs) orelse return null;
+        return std.math.order(lf, rf);
+    }
+
+    if (toSigned(lhs)) |ls| {
+        if (toSigned(rhs)) |rs| return std.math.order(ls, rs);
+        if (toUnsigned(rhs)) |ru| {
+            if (ls < 0) return .lt;
+            return std.math.order(@as(u128, @intCast(ls)), ru);
+        }
+        return null;
+    }
+    if (toUnsigned(lhs)) |lu| {
+        if (toUnsigned(rhs)) |ru| return std.math.order(lu, ru);
+        if (toSigned(rhs)) |rs| {
+            if (rs < 0) return .gt;
+            return std.math.order(lu, @as(u128, @intCast(rs)));
+        }
+        return null;
+    }
+    return null;
 }
 
 const CmpOp = enum { eq, neq, lt, lte, gt, gte };
@@ -452,14 +598,14 @@ const CmpOp = enum { eq, neq, lt, lte, gt, gte };
 fn applyComparison(lhs: Value, rhs: Value, op: CmpOp) EvalError!Value {
     // Handle null = null and null != null specifically.
     if (lhs == .null_value and rhs == .null_value) {
-        return Value{ .boolean = op == .eq };
+        return Value{ .bool = op == .eq };
     }
     if (lhs == .null_value or rhs == .null_value) {
-        return Value{ .boolean = op == .neq };
+        return Value{ .bool = op == .neq };
     }
 
-    const ord = row_mod.compareValues(lhs, rhs);
-    return Value{ .boolean = switch (op) {
+    const ord = numericOrder(lhs, rhs) orelse row_mod.compareValues(lhs, rhs);
+    return Value{ .bool = switch (op) {
         .eq => ord == .eq,
         .neq => ord != .eq,
         .lt => ord == .lt,
@@ -478,18 +624,18 @@ fn applyLogical(lhs: Value, rhs: Value, op: LogicalOp) EvalError!Value {
 
     return switch (op) {
         .@"and" => blk: {
-            if (a != null and !a.?) break :blk Value{ .boolean = false };
-            if (b != null and !b.?) break :blk Value{ .boolean = false };
+            if (a != null and !a.?) break :blk Value{ .bool = false };
+            if (b != null and !b.?) break :blk Value{ .bool = false };
             if (a != null and b != null) break :blk Value{
-                .boolean = a.? and b.?,
+                .bool = a.? and b.?,
             };
             break :blk Value{ .null_value = {} };
         },
         .@"or" => blk: {
-            if (a != null and a.?) break :blk Value{ .boolean = true };
-            if (b != null and b.?) break :blk Value{ .boolean = true };
+            if (a != null and a.?) break :blk Value{ .bool = true };
+            if (b != null and b.?) break :blk Value{ .bool = true };
             if (a != null and b != null) break :blk Value{
-                .boolean = a.? or b.?,
+                .bool = a.? or b.?,
             };
             break :blk Value{ .null_value = {} };
         },
@@ -498,7 +644,7 @@ fn applyLogical(lhs: Value, rhs: Value, op: LogicalOp) EvalError!Value {
 
 fn toBool(v: Value) ?bool {
     return switch (v) {
-        .boolean => |b| b,
+        .bool => |b| b,
         .null_value => null,
         else => null,
     };
@@ -510,19 +656,27 @@ pub fn applyUnaryOp(operand: Value, op: TokenType) EvalError!Value {
 
     return switch (op) {
         .kw_not => blk: {
-            if (operand != .boolean) return error.TypeMismatch;
-            break :blk Value{ .boolean = !operand.boolean };
+            if (operand != .bool) return error.TypeMismatch;
+            break :blk Value{ .bool = !operand.bool };
         },
         .minus => blk: {
-            if (operand == .bigint) {
-                if (operand.bigint == std.math.minInt(i64)) return error.NumericOverflow;
-                break :blk Value{ .bigint = -operand.bigint };
+            if (operand == .i8) {
+                if (operand.i8 == std.math.minInt(i8)) return error.NumericOverflow;
+                break :blk Value{ .i8 = -operand.i8 };
             }
-            if (operand == .int) {
-                if (operand.int == std.math.minInt(i32)) return error.NumericOverflow;
-                break :blk Value{ .int = -operand.int };
+            if (operand == .i16) {
+                if (operand.i16 == std.math.minInt(i16)) return error.NumericOverflow;
+                break :blk Value{ .i16 = -operand.i16 };
             }
-            if (operand == .float) break :blk Value{ .float = -operand.float };
+            if (operand == .i64) {
+                if (operand.i64 == std.math.minInt(i64)) return error.NumericOverflow;
+                break :blk Value{ .i64 = -operand.i64 };
+            }
+            if (operand == .i32) {
+                if (operand.i32 == std.math.minInt(i32)) return error.NumericOverflow;
+                break :blk Value{ .i32 = -operand.i32 };
+            }
+            if (operand == .f64) break :blk Value{ .f64 = -operand.f64 };
             return error.TypeMismatch;
         },
         else => error.TypeMismatch,
@@ -539,19 +693,28 @@ pub fn applyBuiltinFunction(
             if (args.len < 1) return error.TypeMismatch;
             const v = args[0];
             if (v == .null_value) break :blk Value{ .null_value = {} };
-            if (v == .bigint) {
-                if (v.bigint == std.math.minInt(i64)) return error.NumericOverflow;
+            if (v == .i8) {
+                if (v.i8 == std.math.minInt(i8)) return error.NumericOverflow;
+                break :blk Value{ .i8 = if (v.i8 < 0) -v.i8 else v.i8 };
+            }
+            if (v == .i16) {
+                if (v.i16 == std.math.minInt(i16)) return error.NumericOverflow;
+                break :blk Value{ .i16 = if (v.i16 < 0) -v.i16 else v.i16 };
+            }
+            if (v == .i64) {
+                if (v.i64 == std.math.minInt(i64)) return error.NumericOverflow;
                 break :blk Value{
-                    .bigint = if (v.bigint < 0) -v.bigint else v.bigint,
+                    .i64 = if (v.i64 < 0) -v.i64 else v.i64,
                 };
             }
-            if (v == .int) {
-                if (v.int == std.math.minInt(i32)) return error.NumericOverflow;
+            if (v == .i32) {
+                if (v.i32 == std.math.minInt(i32)) return error.NumericOverflow;
                 break :blk Value{
-                    .int = if (v.int < 0) -v.int else v.int,
+                    .i32 = if (v.i32 < 0) -v.i32 else v.i32,
                 };
             }
-            if (v == .float) break :blk Value{ .float = @abs(v.float) };
+            if (v == .u8 or v == .u16 or v == .u32 or v == .u64) break :blk v;
+            if (v == .f64) break :blk Value{ .f64 = @abs(v.f64) };
             return error.TypeMismatch;
         },
         .fn_sqrt => blk: {
@@ -559,21 +722,21 @@ pub fn applyBuiltinFunction(
             const v = args[0];
             if (v == .null_value) break :blk Value{ .null_value = {} };
             const f = toFloat(v) orelse return error.TypeMismatch;
-            break :blk Value{ .float = @sqrt(f) };
+            break :blk Value{ .f64 = @sqrt(f) };
         },
         .fn_round => blk: {
             if (args.len < 1) return error.TypeMismatch;
             const v = args[0];
             if (v == .null_value) break :blk Value{ .null_value = {} };
             const f = toFloat(v) orelse return error.TypeMismatch;
-            break :blk Value{ .float = @round(f) };
+            break :blk Value{ .f64 = @round(f) };
         },
         .fn_length => blk: {
             if (args.len < 1) return error.TypeMismatch;
             const v = args[0];
             if (v == .null_value) break :blk Value{ .null_value = {} };
             if (v != .string) return error.TypeMismatch;
-            break :blk Value{ .bigint = @intCast(v.string.len) };
+            break :blk Value{ .i64 = @intCast(v.string.len) };
         },
         .fn_coalesce => blk: {
             for (args) |arg| {
@@ -617,10 +780,10 @@ test "literal integer evaluation" {
         &.{},
         &schema,
     );
-    try testing.expectEqual(@as(i64, 42), result.bigint);
+    try testing.expectEqual(@as(i64, 42), result.i64);
 }
 
-test "literal float evaluation" {
+test "literal f64 evaluation" {
     var tree = Ast{};
     const tokens = tokenizer_mod.tokenize("3.14");
     const node = try makeAstLiteral(&tree, 0);
@@ -634,7 +797,7 @@ test "literal float evaluation" {
         &.{},
         &schema,
     );
-    try testing.expectEqual(@as(f64, 3.14), result.float);
+    try testing.expectEqual(@as(f64, 3.14), result.f64);
 }
 
 test "literal string evaluation" {
@@ -655,7 +818,7 @@ test "literal string evaluation" {
     try testing.expectEqualSlices(u8, "hello", result.string);
 }
 
-test "literal boolean evaluation" {
+test "literal bool evaluation" {
     var tree = Ast{};
     const tokens = tokenizer_mod.tokenize("true");
     const node = try makeAstLiteral(&tree, 0);
@@ -669,7 +832,7 @@ test "literal boolean evaluation" {
         &.{},
         &schema,
     );
-    try testing.expect(result.boolean);
+    try testing.expect(result.bool);
 }
 
 test "literal null evaluation" {
@@ -712,7 +875,7 @@ test "binary addition" {
         &.{},
         &schema,
     );
-    try testing.expectEqual(@as(i64, 30), result.bigint);
+    try testing.expectEqual(@as(i64, 30), result.i64);
 }
 
 test "binary comparison" {
@@ -737,7 +900,7 @@ test "binary comparison" {
         &.{},
         &schema,
     );
-    try testing.expect(result.boolean);
+    try testing.expect(result.bool);
 }
 
 test "logical and" {
@@ -762,7 +925,7 @@ test "logical and" {
         &.{},
         &schema,
     );
-    try testing.expect(!result.boolean);
+    try testing.expect(!result.bool);
 }
 
 test "logical or" {
@@ -787,7 +950,7 @@ test "logical or" {
         &.{},
         &schema,
     );
-    try testing.expect(result.boolean);
+    try testing.expect(result.bool);
 }
 
 test "column reference evaluation" {
@@ -797,8 +960,8 @@ test "column reference evaluation" {
     const node = try tree.addNode(.expr_column_ref, .{ .token = 0 });
 
     var schema = RowSchema{};
-    _ = try schema.addColumn("age", .bigint, false);
-    const row_values = [_]Value{.{ .bigint = 25 }};
+    _ = try schema.addColumn("age", .i64, false);
+    const row_values = [_]Value{.{ .i64 = 25 }};
 
     const result = try evaluateExpression(
         &tree,
@@ -808,41 +971,41 @@ test "column reference evaluation" {
         &row_values,
         &schema,
     );
-    try testing.expectEqual(@as(i64, 25), result.bigint);
+    try testing.expectEqual(@as(i64, 25), result.i64);
 }
 
 test "function call — abs" {
     const result = try applyBuiltinFunction(.fn_abs, &[_]Value{
-        .{ .bigint = -5 },
+        .{ .i64 = -5 },
     });
-    try testing.expectEqual(@as(i64, 5), result.bigint);
+    try testing.expectEqual(@as(i64, 5), result.i64);
 }
 
 test "function call — sqrt" {
     const result = try applyBuiltinFunction(.fn_sqrt, &[_]Value{
-        .{ .float = 9.0 },
+        .{ .f64 = 9.0 },
     });
-    try testing.expectEqual(@as(f64, 3.0), result.float);
+    try testing.expectEqual(@as(f64, 3.0), result.f64);
 }
 
 test "function call — length" {
     const result = try applyBuiltinFunction(.fn_length, &[_]Value{
         .{ .string = "hello" },
     });
-    try testing.expectEqual(@as(i64, 5), result.bigint);
+    try testing.expectEqual(@as(i64, 5), result.i64);
 }
 
 test "function call — coalesce" {
     const result = try applyBuiltinFunction(.fn_coalesce, &[_]Value{
         .{ .null_value = {} },
-        .{ .bigint = 42 },
+        .{ .i64 = 42 },
     });
-    try testing.expectEqual(@as(i64, 42), result.bigint);
+    try testing.expectEqual(@as(i64, 42), result.i64);
 }
 
 test "null propagation in arithmetic" {
     const result = try applyBinaryOp(
-        .{ .bigint = 5 },
+        .{ .i64 = 5 },
         .{ .null_value = {} },
         .plus,
     );
@@ -851,34 +1014,83 @@ test "null propagation in arithmetic" {
 
 test "division by zero" {
     const result = applyBinaryOp(
-        .{ .bigint = 5 },
-        .{ .bigint = 0 },
+        .{ .i64 = 5 },
+        .{ .i64 = 0 },
         .slash,
     );
     try testing.expectError(error.DivisionByZero, result);
 }
 
-test "bigint arithmetic overflow returns error" {
+test "i64 arithmetic overflow returns error" {
     const result = applyBinaryOp(
-        .{ .bigint = std.math.maxInt(i64) },
-        .{ .bigint = 1 },
+        .{ .i64 = std.math.maxInt(i64) },
+        .{ .i64 = 1 },
         .plus,
     );
     try testing.expectError(error.NumericOverflow, result);
 }
 
-test "int arithmetic overflow returns error" {
+test "i32 arithmetic overflow returns error" {
     const result = applyBinaryOp(
-        .{ .int = std.math.maxInt(i32) },
-        .{ .int = 2 },
+        .{ .i32 = std.math.maxInt(i32) },
+        .{ .i32 = 2 },
         .star,
+    );
+    try testing.expectError(error.NumericOverflow, result);
+}
+
+test "i8 arithmetic stays i8" {
+    const result = try applyBinaryOp(
+        .{ .i8 = 12 },
+        .{ .i8 = 7 },
+        .minus,
+    );
+    try testing.expect(result == .i8);
+    try testing.expectEqual(@as(i8, 5), result.i8);
+}
+
+test "u16 arithmetic stays u16" {
+    const result = try applyBinaryOp(
+        .{ .u16 = 25 },
+        .{ .u16 = 5 },
+        .plus,
+    );
+    try testing.expect(result == .u16);
+    try testing.expectEqual(@as(u16, 30), result.u16);
+}
+
+test "mixed integer arithmetic returns i64 not f64" {
+    const result = try applyBinaryOp(
+        .{ .u16 = 41 },
+        .{ .i64 = 1 },
+        .plus,
+    );
+    try testing.expect(result == .i64);
+    try testing.expectEqual(@as(i64, 42), result.i64);
+}
+
+test "mixed unsigned arithmetic returns u64" {
+    const result = try applyBinaryOp(
+        .{ .u8 = 2 },
+        .{ .u16 = 5 },
+        .star,
+    );
+    try testing.expect(result == .u64);
+    try testing.expectEqual(@as(u64, 10), result.u64);
+}
+
+test "mixed signed and large u64 returns overflow" {
+    const result = applyBinaryOp(
+        .{ .u64 = std.math.maxInt(u64) },
+        .{ .i64 = 1 },
+        .plus,
     );
     try testing.expectError(error.NumericOverflow, result);
 }
 
 test "unary minus overflow returns error" {
     const result = applyUnaryOp(
-        .{ .bigint = std.math.minInt(i64) },
+        .{ .i64 = std.math.minInt(i64) },
         .minus,
     );
     try testing.expectError(error.NumericOverflow, result);
@@ -886,7 +1098,7 @@ test "unary minus overflow returns error" {
 
 test "abs overflow returns error" {
     const result = applyBuiltinFunction(.fn_abs, &[_]Value{
-        .{ .bigint = std.math.minInt(i64) },
+        .{ .i64 = std.math.minInt(i64) },
     });
     try testing.expectError(error.NumericOverflow, result);
 }
@@ -928,35 +1140,35 @@ test "predicate wrapper — null returns error" {
 }
 
 test "unary not" {
-    const result = try applyUnaryOp(.{ .boolean = true }, .kw_not);
-    try testing.expect(!result.boolean);
+    const result = try applyUnaryOp(.{ .bool = true }, .kw_not);
+    try testing.expect(!result.bool);
 }
 
 test "comparison less than" {
     const result = try applyBinaryOp(
-        .{ .bigint = 3 },
-        .{ .bigint = 5 },
+        .{ .i64 = 3 },
+        .{ .i64 = 5 },
         .less_than,
     );
-    try testing.expect(result.boolean);
+    try testing.expect(result.bool);
 }
 
 test "comparison greater equal" {
     const result = try applyBinaryOp(
-        .{ .bigint = 5 },
-        .{ .bigint = 5 },
+        .{ .i64 = 5 },
+        .{ .i64 = 5 },
         .greater_equal,
     );
-    try testing.expect(result.boolean);
+    try testing.expect(result.bool);
 }
 
-test "float arithmetic" {
+test "f64 arithmetic" {
     const result = try applyBinaryOp(
-        .{ .float = 2.5 },
-        .{ .float = 1.5 },
+        .{ .f64 = 2.5 },
+        .{ .f64 = 1.5 },
         .star,
     );
-    try testing.expectEqual(@as(f64, 3.75), result.float);
+    try testing.expectEqual(@as(f64, 3.75), result.f64);
 }
 
 test "string comparison" {
@@ -965,5 +1177,5 @@ test "string comparison" {
         .{ .string = "abc" },
         .equal,
     );
-    try testing.expect(result.boolean);
+    try testing.expect(result.bool);
 }

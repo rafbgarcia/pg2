@@ -1,8 +1,8 @@
-//! Feature coverage for bigint field behavior through server session path.
+//! Feature coverage for i64 field behavior through server session path.
 const std = @import("std");
 const feature = @import("../test_env_test.zig");
 
-test "feature bigint fields preserve large integer values end-to-end" {
+test "feature i64 fields preserve large integer values end-to-end" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
@@ -10,8 +10,8 @@ test "feature bigint fields preserve large integer values end-to-end" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\LedgerEntry {
-        \\  field(id, bigint, notNull, primaryKey)
-        \\  field(balance_cents, bigint, notNull)
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(balance_cents, i64, notNull)
         \\}
     );
 

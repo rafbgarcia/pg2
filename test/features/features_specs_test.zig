@@ -12,11 +12,21 @@ comptime {
     _ = @import("schema_definition/reference_test.zig");
     _ = @import("semantic_validations/type_mismatch_test.zig");
     _ = @import("semantic_validations/unknown_field_test.zig");
-    _ = @import("field_types/bigint_test.zig");
-    _ = @import("field_types/boolean_test.zig");
+    _ = @import("field_types/bool_test.zig");
+    _ = @import("field_types/i8_test.zig");
+    _ = @import("field_types/i16_test.zig");
+    _ = @import("field_types/i32_test.zig");
+    _ = @import("field_types/i64_test.zig");
+    _ = @import("field_types/u8_test.zig");
+    _ = @import("field_types/u16_test.zig");
+    _ = @import("field_types/u32_test.zig");
+    _ = @import("field_types/u64_test.zig");
+    _ = @import("field_types/f64_test.zig");
     _ = @import("field_types/string_test.zig");
+    _ = @import("field_types/timestamp_test.zig");
     _ = @import("mutations/delete_test.zig");
     _ = @import("mutations/insert_test.zig");
     _ = @import("queries/select_test.zig");
     _ = @import("mutations/update_test.zig");
+    _ = @import("mutations/update_arithmetic_test.zig");
 }

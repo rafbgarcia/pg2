@@ -1,8 +1,8 @@
-//! Feature coverage for boolean field behavior through server session path.
+//! Feature coverage for bool field behavior through server session path.
 const std = @import("std");
 const feature = @import("../test_env_test.zig");
 
-test "feature boolean fields support operational toggle workflows" {
+test "feature bool fields support true/false lifecycle" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
@@ -10,14 +10,13 @@ test "feature boolean fields support operational toggle workflows" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\FeatureFlag {
-        \\  field(id, bigint, notNull, primaryKey)
-        \\  field(name, string, notNull)
-        \\  field(enabled, boolean, notNull)
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(enabled, bool, notNull)
         \\}
     );
 
     var result = try executor.run(
-        "FeatureFlag |> insert(id = 1, name = \"checkout\", enabled = true) {}",
+        "FeatureFlag |> insert(id = 1, enabled = true) {}",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
@@ -32,9 +31,9 @@ test "feature boolean fields support operational toggle workflows" {
         result,
     );
 
-    result = try executor.run("FeatureFlag |> where(id = 1) { id name enabled }");
+    result = try executor.run("FeatureFlag |> where(id = 1) { id enabled }");
     try std.testing.expectEqualStrings(
-        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,checkout,false\n",
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,false\n",
         result,
     );
 }

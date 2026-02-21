@@ -10,11 +10,11 @@ test "feature insert fails closed on foreign-key violation" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\}
         \\Post {
-        \\  field(id, bigint, notNull, primaryKey)
-        \\  field(user_id, bigint, notNull)
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(user_id, i64, notNull)
         \\  reference(author, user_id, User.id, withReferentialIntegrity(onDeleteRestrict, onUpdateCascade))
         \\}
     );

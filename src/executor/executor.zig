@@ -778,17 +778,7 @@ fn applyLimit(
         &RowSchema{},
     ) catch return;
 
-    const limit: u16 = switch (val) {
-        .bigint => |v| if (v >= 0)
-            @intCast(@min(v, scan_mod.max_result_rows))
-        else
-            0,
-        .int => |v| if (v >= 0)
-            @intCast(@min(v, scan_mod.max_result_rows))
-        else
-            0,
-        else => return,
-    };
+    const limit = numericToRowCount(val) orelse return;
 
     if (result.row_count > limit) {
         result.row_count = limit;
@@ -816,17 +806,7 @@ fn applyOffset(
         &RowSchema{},
     ) catch return;
 
-    const offset: u16 = switch (val) {
-        .bigint => |v| if (v >= 0)
-            @intCast(@min(v, scan_mod.max_result_rows))
-        else
-            0,
-        .int => |v| if (v >= 0)
-            @intCast(@min(v, scan_mod.max_result_rows))
-        else
-            0,
-        else => return,
-    };
+    const offset = numericToRowCount(val) orelse return;
 
     if (offset >= result.row_count) {
         result.row_count = 0;
@@ -1285,21 +1265,58 @@ fn updateAggregateState(
     switch (kind) {
         .sum => {
             switch (value) {
-                .bigint => |v| {
-                    if (state.value_type == null) state.value_type = .bigint;
-                    if (state.value_type.? != .bigint) return error.TypeMismatch;
+                .i8 => |v| {
+                    if (state.value_type == null) state.value_type = .i8;
+                    if (state.value_type.? != .i8) return error.TypeMismatch;
                     state.sum_bigint = std.math.add(i64, state.sum_bigint, v) catch
                         return error.NumericOverflow;
                 },
-                .int => |v| {
-                    if (state.value_type == null) state.value_type = .int;
-                    if (state.value_type.? != .int) return error.TypeMismatch;
+                .i16 => |v| {
+                    if (state.value_type == null) state.value_type = .i16;
+                    if (state.value_type.? != .i16) return error.TypeMismatch;
                     state.sum_bigint = std.math.add(i64, state.sum_bigint, v) catch
                         return error.NumericOverflow;
                 },
-                .float => |v| {
-                    if (state.value_type == null) state.value_type = .float;
-                    if (state.value_type.? != .float) return error.TypeMismatch;
+                .i64 => |v| {
+                    if (state.value_type == null) state.value_type = .i64;
+                    if (state.value_type.? != .i64) return error.TypeMismatch;
+                    state.sum_bigint = std.math.add(i64, state.sum_bigint, v) catch
+                        return error.NumericOverflow;
+                },
+                .i32 => |v| {
+                    if (state.value_type == null) state.value_type = .i32;
+                    if (state.value_type.? != .i32) return error.TypeMismatch;
+                    state.sum_bigint = std.math.add(i64, state.sum_bigint, v) catch
+                        return error.NumericOverflow;
+                },
+                .u8 => |v| {
+                    if (state.value_type == null) state.value_type = .u8;
+                    if (state.value_type.? != .u8) return error.TypeMismatch;
+                    state.sum_bigint = std.math.add(i64, state.sum_bigint, v) catch
+                        return error.NumericOverflow;
+                },
+                .u16 => |v| {
+                    if (state.value_type == null) state.value_type = .u16;
+                    if (state.value_type.? != .u16) return error.TypeMismatch;
+                    state.sum_bigint = std.math.add(i64, state.sum_bigint, v) catch
+                        return error.NumericOverflow;
+                },
+                .u32 => |v| {
+                    if (state.value_type == null) state.value_type = .u32;
+                    if (state.value_type.? != .u32) return error.TypeMismatch;
+                    state.sum_bigint = std.math.add(i64, state.sum_bigint, v) catch
+                        return error.NumericOverflow;
+                },
+                .u64 => |v| {
+                    if (state.value_type == null) state.value_type = .u64;
+                    if (state.value_type.? != .u64) return error.TypeMismatch;
+                    const narrowed = std.math.cast(i64, v) orelse return error.NumericOverflow;
+                    state.sum_bigint = std.math.add(i64, state.sum_bigint, narrowed) catch
+                        return error.NumericOverflow;
+                },
+                .f64 => |v| {
+                    if (state.value_type == null) state.value_type = .f64;
+                    if (state.value_type.? != .f64) return error.TypeMismatch;
                     state.sum_float += v;
                 },
                 else => return error.TypeMismatch,
@@ -1308,9 +1325,15 @@ fn updateAggregateState(
         },
         .avg => {
             const numeric = switch (value) {
-                .bigint => |v| @as(f64, @floatFromInt(v)),
-                .int => |v| @as(f64, @floatFromInt(v)),
-                .float => |v| v,
+                .i8 => |v| @as(f64, @floatFromInt(v)),
+                .i16 => |v| @as(f64, @floatFromInt(v)),
+                .i64 => |v| @as(f64, @floatFromInt(v)),
+                .i32 => |v| @as(f64, @floatFromInt(v)),
+                .u8 => |v| @as(f64, @floatFromInt(v)),
+                .u16 => |v| @as(f64, @floatFromInt(v)),
+                .u32 => |v| @as(f64, @floatFromInt(v)),
+                .u64 => |v| @as(f64, @floatFromInt(v)),
+                .f64 => |v| v,
                 else => return error.TypeMismatch,
             };
             if (state.value_type == null) {
@@ -1653,7 +1676,7 @@ fn resolveGroupedAggregate(
     if (token_type == .agg_count) {
         if (node.data.unary != null_node) return error.UnknownFunction;
         const count = agg_ctx.group_runtime.group_counts[agg_ctx.row_index];
-        return .{ .bigint = @intCast(count) };
+        return .{ .i64 = @intCast(count) };
     }
 
     if (node_index >= agg_ctx.group_runtime.aggregate_slot_by_node.len) {
@@ -1667,17 +1690,31 @@ fn resolveGroupedAggregate(
     return switch (descriptor.kind) {
         .count_star => return error.UnknownFunction,
         .sum => if (state.value_type) |ty| switch (ty) {
-            .bigint, .int => .{ .bigint = state.sum_bigint },
-            .float => .{ .float = state.sum_float },
+            .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64 => .{ .i64 = state.sum_bigint },
+            .f64 => .{ .f64 = state.sum_float },
             else => return error.TypeMismatch,
         } else .{ .null_value = {} },
         .avg => blk: {
             if (state.value_count == 0) break :blk .{ .null_value = {} };
             const divisor = @as(f64, @floatFromInt(state.value_count));
-            break :blk .{ .float = state.sum_float / divisor };
+            break :blk .{ .f64 = state.sum_float / divisor };
         },
         .min => if (state.has_min) state.min_value else .{ .null_value = {} },
         .max => if (state.has_max) state.max_value else .{ .null_value = {} },
+    };
+}
+
+fn numericToRowCount(value: Value) ?u16 {
+    return switch (value) {
+        .i8 => |v| if (v >= 0) @intCast(@min(v, scan_mod.max_result_rows)) else 0,
+        .i16 => |v| if (v >= 0) @intCast(@min(v, scan_mod.max_result_rows)) else 0,
+        .i32 => |v| if (v >= 0) @intCast(@min(v, scan_mod.max_result_rows)) else 0,
+        .i64 => |v| if (v >= 0) @intCast(@min(v, scan_mod.max_result_rows)) else 0,
+        .u8 => |v| @intCast(@min(v, scan_mod.max_result_rows)),
+        .u16 => |v| @intCast(@min(v, scan_mod.max_result_rows)),
+        .u32 => |v| @intCast(@min(v, scan_mod.max_result_rows)),
+        .u64 => |v| @intCast(@min(v, scan_mod.max_result_rows)),
+        else => null,
     };
 }
 
@@ -2127,7 +2164,7 @@ const ExecTestEnv = struct {
         _ = try self.catalog.addColumn(
             self.model_id,
             "id",
-            .bigint,
+            .i64,
             false,
         );
         _ = try self.catalog.addColumn(
@@ -2139,7 +2176,7 @@ const ExecTestEnv = struct {
         _ = try self.catalog.addColumn(
             self.model_id,
             "active",
-            .boolean,
+            .bool,
             true,
         );
         self.catalog.models[self.model_id].heap_first_page_id = 100;
@@ -2193,7 +2230,7 @@ const ExecTestEnv = struct {
 fn makeJoinLeftRow(id: i64, name: []const u8) ResultRow {
     var row = ResultRow.init();
     row.column_count = 2;
-    row.values[0] = .{ .bigint = id };
+    row.values[0] = .{ .i64 = id };
     row.values[1] = .{ .string = name };
     return row;
 }
@@ -2201,8 +2238,8 @@ fn makeJoinLeftRow(id: i64, name: []const u8) ResultRow {
 fn makeJoinRightRow(id: i64, active: bool) ResultRow {
     var row = ResultRow.init();
     row.column_count = 2;
-    row.values[0] = .{ .bigint = id };
-    row.values[1] = .{ .boolean = active };
+    row.values[0] = .{ .i64 = id };
+    row.values[1] = .{ .bool = active };
     return row;
 }
 
@@ -2259,7 +2296,7 @@ test "execute scan query returns rows" {
     try testing.expectEqual(@as(u16, 1), result.row_count);
     try testing.expectEqual(
         @as(i64, 1),
-        result.rows[0].values[0].bigint,
+        result.rows[0].values[0].i64,
     );
 }
 
@@ -2302,7 +2339,7 @@ test "execute where filter" {
     try testing.expectEqual(@as(u16, 1), result.row_count);
     try testing.expectEqual(
         @as(i64, 1),
-        result.rows[0].values[0].bigint,
+        result.rows[0].values[0].i64,
     );
 }
 
@@ -2376,7 +2413,7 @@ test "execute offset" {
     try testing.expectEqual(@as(u16, 1), result.row_count);
     try testing.expectEqual(
         @as(i64, 2),
-        result.rows[0].values[0].bigint,
+        result.rows[0].values[0].i64,
     );
 }
 
@@ -2486,8 +2523,8 @@ test "execute nested relation join through selection set" {
     defer env.deinit();
 
     const post_model = try env.catalog.addModel("Post");
-    _ = try env.catalog.addColumn(post_model, "id", .bigint, false);
-    _ = try env.catalog.addColumn(post_model, "user_id", .bigint, false);
+    _ = try env.catalog.addColumn(post_model, "id", .i64, false);
+    _ = try env.catalog.addColumn(post_model, "user_id", .i64, false);
     env.catalog.models[post_model].heap_first_page_id = 120;
     env.catalog.models[post_model].total_pages = 1;
     _ = try env.catalog.addAssociation(
@@ -2533,12 +2570,12 @@ test "execute nested relation join through selection set" {
     try testing.expect(!result.has_error);
     try testing.expectEqual(@as(u16, 3), result.row_count);
     try testing.expectEqual(@as(u16, 2), result.rows[0].column_count);
-    try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].bigint);
-    try testing.expectEqual(@as(i64, 10), result.rows[0].values[1].bigint);
-    try testing.expectEqual(@as(i64, 1), result.rows[1].values[0].bigint);
-    try testing.expectEqual(@as(i64, 20), result.rows[1].values[1].bigint);
-    try testing.expectEqual(@as(i64, 2), result.rows[2].values[0].bigint);
-    try testing.expectEqual(@as(i64, 15), result.rows[2].values[1].bigint);
+    try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].i64);
+    try testing.expectEqual(@as(i64, 10), result.rows[0].values[1].i64);
+    try testing.expectEqual(@as(i64, 1), result.rows[1].values[0].i64);
+    try testing.expectEqual(@as(i64, 20), result.rows[1].values[1].i64);
+    try testing.expectEqual(@as(i64, 2), result.rows[2].values[0].i64);
+    try testing.expectEqual(@as(i64, 15), result.rows[2].values[1].i64);
     try testing.expectEqual(
         JoinStrategy.nested_loop,
         result.stats.plan.join_strategy,
@@ -2560,14 +2597,14 @@ test "execute multiple nested relations through selection set" {
     defer env.deinit();
 
     const post_model = try env.catalog.addModel("Post");
-    _ = try env.catalog.addColumn(post_model, "id", .bigint, false);
-    _ = try env.catalog.addColumn(post_model, "user_id", .bigint, false);
+    _ = try env.catalog.addColumn(post_model, "id", .i64, false);
+    _ = try env.catalog.addColumn(post_model, "user_id", .i64, false);
     env.catalog.models[post_model].heap_first_page_id = 120;
     env.catalog.models[post_model].total_pages = 1;
 
     const comment_model = try env.catalog.addModel("Comment");
-    _ = try env.catalog.addColumn(comment_model, "id", .bigint, false);
-    _ = try env.catalog.addColumn(comment_model, "user_id", .bigint, false);
+    _ = try env.catalog.addColumn(comment_model, "id", .i64, false);
+    _ = try env.catalog.addColumn(comment_model, "user_id", .i64, false);
     env.catalog.models[comment_model].heap_first_page_id = 121;
     env.catalog.models[comment_model].total_pages = 1;
 
@@ -2627,15 +2664,15 @@ test "execute multiple nested relations through selection set" {
     try testing.expect(!result.has_error);
     try testing.expectEqual(@as(u16, 5), result.row_count);
     try testing.expectEqual(@as(u16, 3), result.rows[0].column_count);
-    try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].bigint);
-    try testing.expectEqual(@as(i64, 10), result.rows[0].values[1].bigint);
-    try testing.expectEqual(@as(i64, 100), result.rows[0].values[2].bigint);
-    try testing.expectEqual(@as(i64, 1), result.rows[3].values[0].bigint);
-    try testing.expectEqual(@as(i64, 20), result.rows[3].values[1].bigint);
-    try testing.expectEqual(@as(i64, 200), result.rows[3].values[2].bigint);
-    try testing.expectEqual(@as(i64, 2), result.rows[4].values[0].bigint);
-    try testing.expectEqual(@as(i64, 15), result.rows[4].values[1].bigint);
-    try testing.expectEqual(@as(i64, 150), result.rows[4].values[2].bigint);
+    try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].i64);
+    try testing.expectEqual(@as(i64, 10), result.rows[0].values[1].i64);
+    try testing.expectEqual(@as(i64, 100), result.rows[0].values[2].i64);
+    try testing.expectEqual(@as(i64, 1), result.rows[3].values[0].i64);
+    try testing.expectEqual(@as(i64, 20), result.rows[3].values[1].i64);
+    try testing.expectEqual(@as(i64, 200), result.rows[3].values[2].i64);
+    try testing.expectEqual(@as(i64, 2), result.rows[4].values[0].i64);
+    try testing.expectEqual(@as(i64, 15), result.rows[4].values[1].i64);
+    try testing.expectEqual(@as(i64, 150), result.rows[4].values[2].i64);
 }
 
 test "execute nested relation fails closed when association is missing" {
@@ -2668,8 +2705,8 @@ test "execute nested relation uses explicit association keys" {
     defer env.deinit();
 
     const post_model = try env.catalog.addModel("Post");
-    _ = try env.catalog.addColumn(post_model, "id", .bigint, false);
-    _ = try env.catalog.addColumn(post_model, "owner_user", .bigint, false);
+    _ = try env.catalog.addColumn(post_model, "id", .i64, false);
+    _ = try env.catalog.addColumn(post_model, "owner_user", .i64, false);
     env.catalog.models[post_model].heap_first_page_id = 122;
     env.catalog.models[post_model].total_pages = 1;
 
@@ -2720,10 +2757,10 @@ test "execute nested relation uses explicit association keys" {
     try testing.expect(!result.has_error);
     try testing.expectEqual(@as(u16, 2), result.row_count);
     try testing.expectEqual(@as(u16, 2), result.rows[0].column_count);
-    try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].bigint);
-    try testing.expectEqual(@as(i64, 20), result.rows[0].values[1].bigint);
-    try testing.expectEqual(@as(i64, 2), result.rows[1].values[0].bigint);
-    try testing.expectEqual(@as(i64, 15), result.rows[1].values[1].bigint);
+    try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].i64);
+    try testing.expectEqual(@as(i64, 20), result.rows[0].values[1].i64);
+    try testing.expectEqual(@as(i64, 2), result.rows[1].values[0].i64);
+    try testing.expectEqual(@as(i64, 15), result.rows[1].values[1].i64);
 }
 
 test "execute delete via pipeline" {
@@ -2785,9 +2822,9 @@ test "execute sort orders rows by key and direction" {
     );
     defer asc_result.deinit();
     try testing.expect(!asc_result.has_error);
-    try testing.expectEqual(@as(i64, 2), asc_result.rows[0].values[0].bigint);
-    try testing.expectEqual(@as(i64, 1), asc_result.rows[1].values[0].bigint);
-    try testing.expectEqual(@as(i64, 3), asc_result.rows[2].values[0].bigint);
+    try testing.expectEqual(@as(i64, 2), asc_result.rows[0].values[0].i64);
+    try testing.expectEqual(@as(i64, 1), asc_result.rows[1].values[0].i64);
+    try testing.expectEqual(@as(i64, 3), asc_result.rows[2].values[0].i64);
 
     const desc_src = "User |> sort(name desc)";
     const desc_tok = tokenizer_mod.tokenize(desc_src);
@@ -2797,9 +2834,9 @@ test "execute sort orders rows by key and direction" {
     );
     defer desc_result.deinit();
     try testing.expect(!desc_result.has_error);
-    try testing.expectEqual(@as(i64, 3), desc_result.rows[0].values[0].bigint);
-    try testing.expectEqual(@as(i64, 1), desc_result.rows[1].values[0].bigint);
-    try testing.expectEqual(@as(i64, 2), desc_result.rows[2].values[0].bigint);
+    try testing.expectEqual(@as(i64, 3), desc_result.rows[0].values[0].i64);
+    try testing.expectEqual(@as(i64, 1), desc_result.rows[1].values[0].i64);
+    try testing.expectEqual(@as(i64, 2), desc_result.rows[2].values[0].i64);
 }
 
 test "execute sort supports expression keys" {
@@ -2830,9 +2867,9 @@ test "execute sort supports expression keys" {
     defer result.deinit();
 
     try testing.expect(!result.has_error);
-    try testing.expectEqual(@as(i64, 3), result.rows[0].values[0].bigint);
-    try testing.expectEqual(@as(i64, 1), result.rows[1].values[0].bigint);
-    try testing.expectEqual(@as(i64, 2), result.rows[2].values[0].bigint);
+    try testing.expectEqual(@as(i64, 3), result.rows[0].values[0].i64);
+    try testing.expectEqual(@as(i64, 1), result.rows[1].values[0].i64);
+    try testing.expectEqual(@as(i64, 2), result.rows[2].values[0].i64);
 }
 
 test "execute sort enforces key capacity contract" {
@@ -2884,8 +2921,8 @@ test "execute group collapses rows by key" {
 
     try testing.expect(!result.has_error);
     try testing.expectEqual(@as(u16, 2), result.row_count);
-    try testing.expectEqual(false, result.rows[0].values[2].boolean);
-    try testing.expectEqual(true, result.rows[1].values[2].boolean);
+    try testing.expectEqual(false, result.rows[0].values[2].bool);
+    try testing.expectEqual(true, result.rows[1].values[2].bool);
 }
 
 test "execute group enforces key capacity contract" {
@@ -2937,8 +2974,8 @@ test "execute group supports sort by count star" {
 
     try testing.expect(!result.has_error);
     try testing.expectEqual(@as(u16, 2), result.row_count);
-    try testing.expectEqual(true, result.rows[0].values[2].boolean);
-    try testing.expectEqual(false, result.rows[1].values[2].boolean);
+    try testing.expectEqual(true, result.rows[0].values[2].bool);
+    try testing.expectEqual(false, result.rows[1].values[2].bool);
 }
 
 test "execute group supports where on count star" {
@@ -2970,7 +3007,7 @@ test "execute group supports where on count star" {
 
     try testing.expect(!result.has_error);
     try testing.expectEqual(@as(u16, 1), result.row_count);
-    try testing.expectEqual(true, result.rows[0].values[2].boolean);
+    try testing.expectEqual(true, result.rows[0].values[2].bool);
 }
 
 test "execute group supports sum avg min max aggregates" {
@@ -3003,8 +3040,8 @@ test "execute group supports sum avg min max aggregates" {
 
     try testing.expect(!result.has_error);
     try testing.expectEqual(@as(u16, 2), result.row_count);
-    try testing.expectEqual(true, result.rows[0].values[2].boolean);
-    try testing.expectEqual(false, result.rows[1].values[2].boolean);
+    try testing.expectEqual(true, result.rows[0].values[2].bool);
+    try testing.expectEqual(false, result.rows[1].values[2].bool);
 }
 
 test "execute group sum enforces numeric input types" {
@@ -3086,21 +3123,21 @@ test "bounded inner join preserves deterministic left-major ordering" {
     try testing.expect(ok);
     try testing.expect(!result.has_error);
     try testing.expectEqual(@as(u16, 5), result.row_count);
-    try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].bigint);
+    try testing.expectEqual(@as(i64, 1), result.rows[0].values[0].i64);
     try testing.expectEqualSlices(u8, "A", result.rows[0].values[1].string);
-    try testing.expectEqual(true, result.rows[0].values[3].boolean);
-    try testing.expectEqual(@as(i64, 1), result.rows[1].values[0].bigint);
+    try testing.expectEqual(true, result.rows[0].values[3].bool);
+    try testing.expectEqual(@as(i64, 1), result.rows[1].values[0].i64);
     try testing.expectEqualSlices(u8, "A", result.rows[1].values[1].string);
-    try testing.expectEqual(false, result.rows[1].values[3].boolean);
-    try testing.expectEqual(@as(i64, 2), result.rows[2].values[0].bigint);
+    try testing.expectEqual(false, result.rows[1].values[3].bool);
+    try testing.expectEqual(@as(i64, 2), result.rows[2].values[0].i64);
     try testing.expectEqualSlices(u8, "B", result.rows[2].values[1].string);
-    try testing.expectEqual(true, result.rows[2].values[3].boolean);
-    try testing.expectEqual(@as(i64, 1), result.rows[3].values[0].bigint);
+    try testing.expectEqual(true, result.rows[2].values[3].bool);
+    try testing.expectEqual(@as(i64, 1), result.rows[3].values[0].i64);
     try testing.expectEqualSlices(u8, "C", result.rows[3].values[1].string);
-    try testing.expectEqual(true, result.rows[3].values[3].boolean);
-    try testing.expectEqual(@as(i64, 1), result.rows[4].values[0].bigint);
+    try testing.expectEqual(true, result.rows[3].values[3].bool);
+    try testing.expectEqual(@as(i64, 1), result.rows[4].values[0].i64);
     try testing.expectEqualSlices(u8, "C", result.rows[4].values[1].string);
-    try testing.expectEqual(false, result.rows[4].values[3].boolean);
+    try testing.expectEqual(false, result.rows[4].values[3].bool);
 }
 
 test "bounded inner join enforces build row capacity contract" {

@@ -94,10 +94,16 @@ pub const ScopeInfo = struct {
 pub const ColumnDefaultKind = enum(u8) {
     none,
     null_value,
-    bigint,
-    int,
-    float,
-    boolean,
+    i8,
+    i16,
+    i64,
+    i32,
+    u8,
+    u16,
+    u32,
+    u64,
+    f64,
+    bool,
     string,
     timestamp,
 };
@@ -110,10 +116,16 @@ pub const ColumnInfo = struct {
     is_primary_key: bool = false,
     has_default: bool = false,
     default_kind: ColumnDefaultKind = .none,
-    default_bigint: i64 = 0,
-    default_int: i32 = 0,
-    default_float: f64 = 0,
-    default_boolean: bool = false,
+    default_i8: i8 = 0,
+    default_i16: i16 = 0,
+    default_i32: i32 = 0,
+    default_i64: i64 = 0,
+    default_u8: u8 = 0,
+    default_u16: u16 = 0,
+    default_u32: u32 = 0,
+    default_u64: u64 = 0,
+    default_f64: f64 = 0,
+    default_bool: bool = false,
     default_string_offset: u32 = 0,
     default_string_len: u16 = 0,
     default_timestamp: i64 = 0,
@@ -676,20 +688,32 @@ pub const Catalog = struct {
         col.has_default = true;
         col.default_kind = switch (value) {
             .null_value => .null_value,
-            .bigint => .bigint,
-            .int => .int,
-            .float => .float,
-            .boolean => .boolean,
+            .i8 => .i8,
+            .i16 => .i16,
+            .i64 => .i64,
+            .i32 => .i32,
+            .u8 => .u8,
+            .u16 => .u16,
+            .u32 => .u32,
+            .u64 => .u64,
+            .f64 => .f64,
+            .bool => .bool,
             .string => .string,
             .timestamp => .timestamp,
         };
 
         switch (value) {
             .null_value => {},
-            .bigint => |v| col.default_bigint = v,
-            .int => |v| col.default_int = v,
-            .float => |v| col.default_float = v,
-            .boolean => |v| col.default_boolean = v,
+            .i8 => |v| col.default_i8 = v,
+            .i16 => |v| col.default_i16 = v,
+            .i64 => |v| col.default_i64 = v,
+            .i32 => |v| col.default_i32 = v,
+            .u8 => |v| col.default_u8 = v,
+            .u16 => |v| col.default_u16 = v,
+            .u32 => |v| col.default_u32 = v,
+            .u64 => |v| col.default_u64 = v,
+            .f64 => |v| col.default_f64 = v,
+            .bool => |v| col.default_bool = v,
             .string => |v| {
                 const stored = try self.storeName(v);
                 col.default_string_offset = stored.offset;
@@ -714,10 +738,16 @@ pub const Catalog = struct {
         return switch (col.default_kind) {
             .none => null,
             .null_value => Value{ .null_value = {} },
-            .bigint => Value{ .bigint = col.default_bigint },
-            .int => Value{ .int = col.default_int },
-            .float => Value{ .float = col.default_float },
-            .boolean => Value{ .boolean = col.default_boolean },
+            .i8 => Value{ .i8 = col.default_i8 },
+            .i16 => Value{ .i16 = col.default_i16 },
+            .i64 => Value{ .i64 = col.default_i64 },
+            .i32 => Value{ .i32 = col.default_i32 },
+            .u8 => Value{ .u8 = col.default_u8 },
+            .u16 => Value{ .u16 = col.default_u16 },
+            .u32 => Value{ .u32 = col.default_u32 },
+            .u64 => Value{ .u64 = col.default_u64 },
+            .f64 => Value{ .f64 = col.default_f64 },
+            .bool => Value{ .bool = col.default_bool },
             .string => Value{ .string = self.getName(col.default_string_offset, col.default_string_len) },
             .timestamp => Value{ .timestamp = col.default_timestamp },
         };
@@ -835,7 +865,7 @@ test "duplicate model name rejected" {
 test "add and find columns" {
     var cat = Catalog{};
     const uid = try cat.addModel("User");
-    const id_col = try cat.addColumn(uid, "id", .bigint, false);
+    const id_col = try cat.addColumn(uid, "id", .i64, false);
     const email_col = try cat.addColumn(uid, "email", .string, false);
     const name_col = try cat.addColumn(uid, "name", .string, true);
 
@@ -854,7 +884,7 @@ test "add and find columns" {
 test "add and find index" {
     var cat = Catalog{};
     const uid = try cat.addModel("User");
-    const id_col = try cat.addColumn(uid, "id", .bigint, false);
+    const id_col = try cat.addColumn(uid, "id", .i64, false);
     const email_col = try cat.addColumn(uid, "email", .string, false);
 
     const col_ids = [_]ColumnId{ id_col, email_col };
@@ -869,9 +899,9 @@ test "add and find index" {
 test "add and find association" {
     var cat = Catalog{};
     const uid = try cat.addModel("User");
-    _ = try cat.addColumn(uid, "id", .bigint, false);
+    _ = try cat.addColumn(uid, "id", .i64, false);
     const post_id = try cat.addModel("Post");
-    _ = try cat.addColumn(post_id, "user_id", .bigint, false);
+    _ = try cat.addColumn(post_id, "user_id", .i64, false);
 
     const assoc = try cat.addAssociation(uid, "posts", .has_many, "Post");
     try testing.expectEqual(@as(AssociationId, 0), assoc);
@@ -901,7 +931,7 @@ test "seal prevents additions" {
 test "stats update functions" {
     var cat = Catalog{};
     const uid = try cat.addModel("User");
-    _ = try cat.addColumn(uid, "id", .bigint, false);
+    _ = try cat.addColumn(uid, "id", .i64, false);
     const col_ids = [_]ColumnId{0};
     _ = try cat.addIndex(uid, "pk", &col_ids, true);
 
@@ -953,7 +983,7 @@ test "model name retrieval" {
 test "primary key flag" {
     var cat = Catalog{};
     const uid = try cat.addModel("User");
-    const id_col = try cat.addColumn(uid, "id", .bigint, false);
+    const id_col = try cat.addColumn(uid, "id", .i64, false);
     cat.setColumnPrimaryKey(uid, id_col);
     try testing.expect(cat.models[uid].columns[0].is_primary_key);
 }
@@ -961,21 +991,21 @@ test "primary key flag" {
 test "column defaults round-trip for typed values" {
     var cat = Catalog{};
     const uid = try cat.addModel("User");
-    const age_col = try cat.addColumn(uid, "age", .int, false);
+    const age_col = try cat.addColumn(uid, "age", .i32, false);
     const name_col = try cat.addColumn(uid, "name", .string, false);
-    const active_col = try cat.addColumn(uid, "active", .boolean, false);
+    const active_col = try cat.addColumn(uid, "active", .bool, false);
 
-    try cat.setColumnDefault(uid, age_col, .{ .int = 18 });
+    try cat.setColumnDefault(uid, age_col, .{ .i32 = 18 });
     try cat.setColumnDefault(uid, name_col, .{ .string = "pending" });
-    try cat.setColumnDefault(uid, active_col, .{ .boolean = true });
+    try cat.setColumnDefault(uid, active_col, .{ .bool = true });
 
     const age_default = cat.getColumnDefault(uid, age_col).?;
     const name_default = cat.getColumnDefault(uid, name_col).?;
     const active_default = cat.getColumnDefault(uid, active_col).?;
 
-    try testing.expectEqual(@as(i32, 18), age_default.int);
+    try testing.expectEqual(@as(i32, 18), age_default.i32);
     try testing.expectEqualSlices(u8, "pending", name_default.string);
-    try testing.expectEqual(true, active_default.boolean);
+    try testing.expectEqual(true, active_default.bool);
 }
 
 test "resolve missing association target fails" {
@@ -988,12 +1018,12 @@ test "resolve missing association target fails" {
 test "resolve associations infers default key columns" {
     var cat = Catalog{};
     const user_id = try cat.addModel("User");
-    const user_pk = try cat.addColumn(user_id, "id", .bigint, false);
+    const user_pk = try cat.addColumn(user_id, "id", .i64, false);
     cat.setColumnPrimaryKey(user_id, user_pk);
 
     const post_id = try cat.addModel("Post");
-    _ = try cat.addColumn(post_id, "id", .bigint, false);
-    const post_fk = try cat.addColumn(post_id, "user_id", .bigint, false);
+    _ = try cat.addColumn(post_id, "id", .i64, false);
+    const post_fk = try cat.addColumn(post_id, "user_id", .i64, false);
 
     _ = try cat.addAssociation(user_id, "posts", .has_many, "Post");
     try cat.resolveAssociations();
@@ -1006,11 +1036,11 @@ test "resolve associations infers default key columns" {
 test "resolve associations keeps explicit key metadata" {
     var cat = Catalog{};
     const user_id = try cat.addModel("User");
-    _ = try cat.addColumn(user_id, "id", .bigint, false);
+    _ = try cat.addColumn(user_id, "id", .i64, false);
 
     const post_id = try cat.addModel("Post");
-    _ = try cat.addColumn(post_id, "id", .bigint, false);
-    const owner_fk = try cat.addColumn(post_id, "owner_id", .bigint, false);
+    _ = try cat.addColumn(post_id, "id", .i64, false);
+    const owner_fk = try cat.addColumn(post_id, "owner_id", .i64, false);
 
     const assoc_id = try cat.addAssociation(user_id, "posts", .has_many, "Post");
     try cat.setAssociationKeys(user_id, assoc_id, "id", "owner_id");
@@ -1024,7 +1054,7 @@ test "resolve associations keeps explicit key metadata" {
 test "resolve associations fails when inferred key columns are missing" {
     var cat = Catalog{};
     const user_id = try cat.addModel("User");
-    _ = try cat.addColumn(user_id, "pk", .bigint, false);
+    _ = try cat.addColumn(user_id, "pk", .i64, false);
 
     _ = try cat.addModel("Post");
     _ = try cat.addAssociation(user_id, "posts", .has_many, "Post");
@@ -1034,12 +1064,12 @@ test "resolve associations fails when inferred key columns are missing" {
 test "resolve associations rejects unsupported referential set_default actions" {
     var cat = Catalog{};
     const user_id = try cat.addModel("User");
-    const user_pk = try cat.addColumn(user_id, "id", .bigint, false);
+    const user_pk = try cat.addColumn(user_id, "id", .i64, false);
     cat.setColumnPrimaryKey(user_id, user_pk);
 
     const post_id = try cat.addModel("Post");
-    _ = try cat.addColumn(post_id, "id", .bigint, false);
-    _ = try cat.addColumn(post_id, "user_id", .bigint, true);
+    _ = try cat.addColumn(post_id, "id", .i64, false);
+    _ = try cat.addColumn(post_id, "user_id", .i64, true);
 
     const assoc_id = try cat.addAssociation(post_id, "author", .belongs_to, "User");
     try cat.setAssociationKeys(post_id, assoc_id, "user_id", "id");
@@ -1057,12 +1087,12 @@ test "resolve associations rejects unsupported referential set_default actions" 
 test "resolve associations rejects set_null for non-null local foreign key columns" {
     var cat = Catalog{};
     const user_id = try cat.addModel("User");
-    const user_pk = try cat.addColumn(user_id, "id", .bigint, false);
+    const user_pk = try cat.addColumn(user_id, "id", .i64, false);
     cat.setColumnPrimaryKey(user_id, user_pk);
 
     const post_id = try cat.addModel("Post");
-    _ = try cat.addColumn(post_id, "id", .bigint, false);
-    _ = try cat.addColumn(post_id, "user_id", .bigint, false);
+    _ = try cat.addColumn(post_id, "id", .i64, false);
+    _ = try cat.addColumn(post_id, "user_id", .i64, false);
 
     const assoc_id = try cat.addAssociation(post_id, "author", .belongs_to, "User");
     try cat.setAssociationKeys(post_id, assoc_id, "user_id", "id");
@@ -1080,11 +1110,11 @@ test "resolve associations rejects set_null for non-null local foreign key colum
 test "resolve associations rejects referential key type mismatch" {
     var cat = Catalog{};
     const user_id = try cat.addModel("User");
-    const user_pk = try cat.addColumn(user_id, "id", .bigint, false);
+    const user_pk = try cat.addColumn(user_id, "id", .i64, false);
     cat.setColumnPrimaryKey(user_id, user_pk);
 
     const post_id = try cat.addModel("Post");
-    _ = try cat.addColumn(post_id, "id", .bigint, false);
+    _ = try cat.addColumn(post_id, "id", .i64, false);
     _ = try cat.addColumn(post_id, "user_id", .string, true);
 
     const assoc_id = try cat.addAssociation(post_id, "author", .belongs_to, "User");
@@ -1103,11 +1133,11 @@ test "resolve associations rejects referential key type mismatch" {
 test "resolve associations rejects belongs_to without explicit RI mode" {
     var cat = Catalog{};
     const user_id = try cat.addModel("User");
-    _ = try cat.addColumn(user_id, "id", .bigint, false);
+    _ = try cat.addColumn(user_id, "id", .i64, false);
 
     const post_id = try cat.addModel("Post");
-    _ = try cat.addColumn(post_id, "id", .bigint, false);
-    _ = try cat.addColumn(post_id, "user_id", .bigint, true);
+    _ = try cat.addColumn(post_id, "id", .i64, false);
+    _ = try cat.addColumn(post_id, "user_id", .i64, true);
 
     const assoc_id = try cat.addAssociation(post_id, "author", .belongs_to, "User");
     try cat.setAssociationKeys(post_id, assoc_id, "user_id", "id");

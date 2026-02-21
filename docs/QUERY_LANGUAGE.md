@@ -331,6 +331,25 @@ Expressions support:
 - Arithmetic: `+`, `-`, `*`, `/`
 - Built-ins: `lower`, `upper`, `trim`, `length`, `abs`, `sqrt`, `round`, `coalesce`, `now`
 
+Numeric expression semantics (current behavior):
+
+- Integer arithmetic remains in the integer domain when both operands are integers.
+- Same-type integer arithmetic preserves exact integer type.
+- Mixed integer arithmetic promotes deterministically (`i64` when either side is signed, otherwise `u64`).
+- Float participation is explicit (`f64` only when at least one operand is `f64`).
+- Overflow and unsafe integer promotion fail closed with `NumericOverflow`.
+
+Behavior matrix:
+
+| lhs type class | rhs type class | result domain | result type |
+| --- | --- | --- | --- |
+| signed int `T` | signed int `T` | integer | `T` |
+| unsigned int `T` | unsigned int `T` | integer | `T` |
+| signed int | unsigned int | integer | `i64` (or `NumericOverflow` if coercion is unsafe) |
+| unsigned int | unsigned int (mixed widths) | integer | `u64` |
+| any integer | `f64` | float | `f64` |
+| `f64` | any integer | float | `f64` |
+
 Examples:
 
 ```pg2

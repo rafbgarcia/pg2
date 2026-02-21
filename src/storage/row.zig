@@ -23,20 +23,32 @@ const std = @import("std");
 
 /// Column data types supported by pg2.
 pub const ColumnType = enum(u8) {
-    bigint = 1, // i64, 8 bytes
-    int = 2, // i32, 4 bytes
-    float = 3, // f64, 8 bytes
-    boolean = 4, // bool, 1 byte
-    string = 5, // variable length, u16-length-prefixed
-    timestamp = 6, // i64, 8 bytes (microseconds since epoch)
+    i8 = 1, // i8, 1 byte
+    i16 = 2, // i16, 2 bytes
+    i32 = 3, // i32, 4 bytes
+    i64 = 4, // i64, 8 bytes
+    u8 = 5, // u8, 1 byte
+    u16 = 6, // u16, 2 bytes
+    u32 = 7, // u32, 4 bytes
+    u64 = 8, // u64, 8 bytes
+    f64 = 9, // f64, 8 bytes
+    bool = 10, // bool, 1 byte
+    string = 11, // variable length, u16-length-prefixed
+    timestamp = 12, // i64, 8 bytes (microseconds since epoch)
 };
 
 /// A typed value. One variant per column type plus a null sentinel.
 pub const Value = union(enum) {
-    bigint: i64,
-    int: i32,
-    float: f64,
-    boolean: bool,
+    i8: i8,
+    i16: i16,
+    i64: i64,
+    i32: i32,
+    u8: u8,
+    u16: u16,
+    u32: u32,
+    u64: u64,
+    f64: f64,
+    bool: bool,
     string: []const u8,
     timestamp: i64,
     null_value: void,
@@ -44,10 +56,16 @@ pub const Value = union(enum) {
     /// Returns the column type, or null for null_value.
     pub fn columnType(self: Value) ?ColumnType {
         return switch (self) {
-            .bigint => .bigint,
-            .int => .int,
-            .float => .float,
-            .boolean => .boolean,
+            .i8 => .i8,
+            .i16 => .i16,
+            .u8 => .u8,
+            .u16 => .u16,
+            .u32 => .u32,
+            .u64 => .u64,
+            .i64 => .i64,
+            .i32 => .i32,
+            .f64 => .f64,
+            .bool => .bool,
             .string => .string,
             .timestamp => .timestamp,
             .null_value => null,
@@ -65,20 +83,44 @@ pub fn compareValues(a: Value, b: Value) std.math.Order {
     if (b_null) return .lt;
 
     return switch (a) {
-        .bigint => |av| switch (b) {
-            .bigint => |bv| std.math.order(av, bv),
+        .i8 => |av| switch (b) {
+            .i8 => |bv| std.math.order(av, bv),
             else => .lt,
         },
-        .int => |av| switch (b) {
-            .int => |bv| std.math.order(av, bv),
+        .i16 => |av| switch (b) {
+            .i16 => |bv| std.math.order(av, bv),
             else => .lt,
         },
-        .float => |av| switch (b) {
-            .float => |bv| std.math.order(av, bv),
+        .i64 => |av| switch (b) {
+            .i64 => |bv| std.math.order(av, bv),
             else => .lt,
         },
-        .boolean => |av| switch (b) {
-            .boolean => |bv| blk: {
+        .i32 => |av| switch (b) {
+            .i32 => |bv| std.math.order(av, bv),
+            else => .lt,
+        },
+        .u8 => |av| switch (b) {
+            .u8 => |bv| std.math.order(av, bv),
+            else => .lt,
+        },
+        .u16 => |av| switch (b) {
+            .u16 => |bv| std.math.order(av, bv),
+            else => .lt,
+        },
+        .u32 => |av| switch (b) {
+            .u32 => |bv| std.math.order(av, bv),
+            else => .lt,
+        },
+        .u64 => |av| switch (b) {
+            .u64 => |bv| std.math.order(av, bv),
+            else => .lt,
+        },
+        .f64 => |av| switch (b) {
+            .f64 => |bv| std.math.order(av, bv),
+            else => .lt,
+        },
+        .bool => |av| switch (b) {
+            .bool => |bv| blk: {
                 const ai: u1 = @intFromBool(av);
                 const bi: u1 = @intFromBool(bv);
                 break :blk std.math.order(ai, bi);
@@ -174,10 +216,16 @@ pub const RowSchema = struct {
 /// Returns the fixed byte size for a column type. Strings are variable (0).
 pub fn fixedSize(col_type: ColumnType) u16 {
     return switch (col_type) {
-        .bigint => 8,
-        .int => 4,
-        .float => 8,
-        .boolean => 1,
+        .i8 => 1,
+        .i16 => 2,
+        .u8 => 1,
+        .u16 => 2,
+        .u32 => 4,
+        .u64 => 8,
+        .i64 => 8,
+        .i32 => 4,
+        .f64 => 8,
+        .bool => 1,
         .string => 0,
         .timestamp => 8,
     };
@@ -317,30 +365,66 @@ fn encodeRowInternal(
         }
 
         switch (col.column_type) {
-            .bigint => {
-                const v = values[i].bigint;
+            .i8 => {
+                buf[fixed_offset] = @bitCast(values[i].i8);
+                fixed_offset += 1;
+            },
+            .i16 => {
+                const v = values[i].i16;
+                @memcpy(buf[fixed_offset..][0..2], std.mem.asBytes(
+                    &std.mem.nativeToLittle(i16, v),
+                ));
+                fixed_offset += 2;
+            },
+            .i64 => {
+                const v = values[i].i64;
                 @memcpy(buf[fixed_offset..][0..8], std.mem.asBytes(
                     &std.mem.nativeToLittle(i64, v),
                 ));
                 fixed_offset += 8;
             },
-            .int => {
-                const v = values[i].int;
+            .i32 => {
+                const v = values[i].i32;
                 @memcpy(buf[fixed_offset..][0..4], std.mem.asBytes(
                     &std.mem.nativeToLittle(i32, v),
                 ));
                 fixed_offset += 4;
             },
-            .float => {
-                const v = values[i].float;
+            .u8 => {
+                buf[fixed_offset] = values[i].u8;
+                fixed_offset += 1;
+            },
+            .u16 => {
+                const v = values[i].u16;
+                @memcpy(buf[fixed_offset..][0..2], std.mem.asBytes(
+                    &std.mem.nativeToLittle(u16, v),
+                ));
+                fixed_offset += 2;
+            },
+            .u32 => {
+                const v = values[i].u32;
+                @memcpy(buf[fixed_offset..][0..4], std.mem.asBytes(
+                    &std.mem.nativeToLittle(u32, v),
+                ));
+                fixed_offset += 4;
+            },
+            .u64 => {
+                const v = values[i].u64;
+                @memcpy(buf[fixed_offset..][0..8], std.mem.asBytes(
+                    &std.mem.nativeToLittle(u64, v),
+                ));
+                fixed_offset += 8;
+            },
+            .f64 => {
+                const v = values[i].f64;
                 const bits = @as(u64, @bitCast(v));
                 @memcpy(buf[fixed_offset..][0..8], std.mem.asBytes(
                     &std.mem.nativeToLittle(u64, bits),
                 ));
                 fixed_offset += 8;
             },
-            .boolean => {
-                buf[fixed_offset] = if (values[i].boolean) 1 else 0;
+            .bool => {
+                buf[fixed_offset] = if (values[i].bool) 1 else 0;
                 fixed_offset += 1;
             },
             .string => {
@@ -412,42 +496,94 @@ pub fn decodeColumnStorageChecked(
 
     const col = schema.columns[col_index];
     return switch (col.column_type) {
-        .bigint => blk: {
+        .i8 => blk: {
+            try requireRange(row_data, offset, 1);
+            break :blk .{ .value = .{ .i8 = @bitCast(row_data[offset]) } };
+        },
+        .i16 => blk: {
+            try requireRange(row_data, offset, 2);
+            break :blk .{
+                .value = .{
+                    .i16 = std.mem.littleToNative(
+                        i16,
+                        std.mem.bytesAsValue(i16, row_data[offset..][0..2]).*,
+                    ),
+                },
+            };
+        },
+        .i64 => blk: {
             try requireRange(row_data, offset, 8);
             break :blk .{
                 .value = .{
-                    .bigint = std.mem.littleToNative(
+                    .i64 = std.mem.littleToNative(
                         i64,
                         std.mem.bytesAsValue(i64, row_data[offset..][0..8]).*,
                     ),
                 },
             };
         },
-        .int => blk: {
+        .i32 => blk: {
             try requireRange(row_data, offset, 4);
             break :blk .{
                 .value = .{
-                    .int = std.mem.littleToNative(
+                    .i32 = std.mem.littleToNative(
                         i32,
                         std.mem.bytesAsValue(i32, row_data[offset..][0..4]).*,
                     ),
                 },
             };
         },
-        .float => blk: {
+        .u8 => blk: {
+            try requireRange(row_data, offset, 1);
+            break :blk .{ .value = .{ .u8 = row_data[offset] } };
+        },
+        .u16 => blk: {
+            try requireRange(row_data, offset, 2);
+            break :blk .{
+                .value = .{
+                    .u16 = std.mem.littleToNative(
+                        u16,
+                        std.mem.bytesAsValue(u16, row_data[offset..][0..2]).*,
+                    ),
+                },
+            };
+        },
+        .u32 => blk: {
+            try requireRange(row_data, offset, 4);
+            break :blk .{
+                .value = .{
+                    .u32 = std.mem.littleToNative(
+                        u32,
+                        std.mem.bytesAsValue(u32, row_data[offset..][0..4]).*,
+                    ),
+                },
+            };
+        },
+        .u64 => blk: {
             try requireRange(row_data, offset, 8);
             break :blk .{
                 .value = .{
-                    .float = @bitCast(std.mem.littleToNative(
+                    .u64 = std.mem.littleToNative(
+                        u64,
+                        std.mem.bytesAsValue(u64, row_data[offset..][0..8]).*,
+                    ),
+                },
+            };
+        },
+        .f64 => blk: {
+            try requireRange(row_data, offset, 8);
+            break :blk .{
+                .value = .{
+                    .f64 = @bitCast(std.mem.littleToNative(
                         u64,
                         std.mem.bytesAsValue(u64, row_data[offset..][0..8]).*,
                     )),
                 },
             };
         },
-        .boolean => blk: {
+        .bool => blk: {
             try requireRange(row_data, offset, 1);
-            break :blk .{ .value = .{ .boolean = row_data[offset] != 0 } };
+            break :blk .{ .value = .{ .bool = row_data[offset] != 0 } };
         },
         .string => blk: {
             if (row_version == row_format_version_legacy) {
@@ -581,28 +717,28 @@ fn stringSlotSizeForVersion(version: u8) usize {
 
 const testing = std.testing;
 
-test "roundtrip bigint column" {
+test "roundtrip i64 column" {
     var schema = RowSchema{};
-    _ = try schema.addColumn("id", .bigint, false);
+    _ = try schema.addColumn("id", .i64, false);
 
-    const values = [_]Value{.{ .bigint = 42 }};
+    const values = [_]Value{.{ .i64 = 42 }};
     var buf: [256]u8 = undefined;
     const written = try encodeRow(&schema, &values, &buf);
 
     const decoded = decodeColumn(&schema, buf[0..written], 0);
-    try testing.expectEqual(@as(i64, 42), decoded.bigint);
+    try testing.expectEqual(@as(i64, 42), decoded.i64);
 }
 
 test "row encode/decode matches golden vector" {
     var schema = RowSchema{};
-    _ = try schema.addColumn("id", .bigint, false);
+    _ = try schema.addColumn("id", .i64, false);
     _ = try schema.addColumn("name", .string, false);
-    _ = try schema.addColumn("active", .boolean, false);
+    _ = try schema.addColumn("active", .bool, false);
 
     const values = [_]Value{
-        .{ .bigint = 42 },
+        .{ .i64 = 42 },
         .{ .string = "Bob" },
-        .{ .boolean = true },
+        .{ .bool = true },
     };
     const expected = [_]u8{
         0x32, 0x52, 0x02, 0x00, 0x2A, 0x00, 0x00, 0x00,
@@ -618,47 +754,47 @@ test "row encode/decode matches golden vector" {
 
     var decoded: [3]Value = undefined;
     try decodeRowChecked(&schema, &expected, &decoded);
-    try testing.expectEqual(@as(i64, 42), decoded[0].bigint);
+    try testing.expectEqual(@as(i64, 42), decoded[0].i64);
     try testing.expectEqualSlices(u8, "Bob", decoded[1].string);
-    try testing.expect(decoded[2].boolean);
+    try testing.expect(decoded[2].bool);
 }
 
-test "roundtrip int column" {
+test "roundtrip i32 column" {
     var schema = RowSchema{};
-    _ = try schema.addColumn("count", .int, false);
+    _ = try schema.addColumn("count", .i32, false);
 
-    const values = [_]Value{.{ .int = -100 }};
+    const values = [_]Value{.{ .i32 = -100 }};
     var buf: [256]u8 = undefined;
     const written = try encodeRow(&schema, &values, &buf);
 
     const decoded = decodeColumn(&schema, buf[0..written], 0);
-    try testing.expectEqual(@as(i32, -100), decoded.int);
+    try testing.expectEqual(@as(i32, -100), decoded.i32);
 }
 
-test "roundtrip float column" {
+test "roundtrip f64 column" {
     var schema = RowSchema{};
-    _ = try schema.addColumn("score", .float, false);
+    _ = try schema.addColumn("score", .f64, false);
 
-    const values = [_]Value{.{ .float = 3.14 }};
+    const values = [_]Value{.{ .f64 = 3.14 }};
     var buf: [256]u8 = undefined;
     const written = try encodeRow(&schema, &values, &buf);
 
     const decoded = decodeColumn(&schema, buf[0..written], 0);
-    try testing.expectEqual(@as(f64, 3.14), decoded.float);
+    try testing.expectEqual(@as(f64, 3.14), decoded.f64);
 }
 
-test "roundtrip boolean column" {
+test "roundtrip bool column" {
     var schema = RowSchema{};
-    _ = try schema.addColumn("active", .boolean, false);
+    _ = try schema.addColumn("active", .bool, false);
 
-    const values_true = [_]Value{.{ .boolean = true }};
+    const values_true = [_]Value{.{ .bool = true }};
     var buf: [256]u8 = undefined;
     const w1 = try encodeRow(&schema, &values_true, &buf);
-    try testing.expect(decodeColumn(&schema, buf[0..w1], 0).boolean);
+    try testing.expect(decodeColumn(&schema, buf[0..w1], 0).bool);
 
-    const values_false = [_]Value{.{ .boolean = false }};
+    const values_false = [_]Value{.{ .bool = false }};
     const w2 = try encodeRow(&schema, &values_false, &buf);
-    try testing.expect(!decodeColumn(&schema, buf[0..w2], 0).boolean);
+    try testing.expect(!decodeColumn(&schema, buf[0..w2], 0).bool);
 }
 
 test "roundtrip string column" {
@@ -687,29 +823,29 @@ test "roundtrip timestamp column" {
 
 test "null handling" {
     var schema = RowSchema{};
-    _ = try schema.addColumn("id", .bigint, false);
+    _ = try schema.addColumn("id", .i64, false);
     _ = try schema.addColumn("name", .string, true);
-    _ = try schema.addColumn("score", .float, true);
+    _ = try schema.addColumn("score", .f64, true);
 
     const values = [_]Value{
-        .{ .bigint = 1 },
+        .{ .i64 = 1 },
         .{ .null_value = {} },
-        .{ .float = 9.5 },
+        .{ .f64 = 9.5 },
     };
     var buf: [256]u8 = undefined;
     const written = try encodeRow(&schema, &values, &buf);
 
     const v0 = decodeColumn(&schema, buf[0..written], 0);
-    try testing.expectEqual(@as(i64, 1), v0.bigint);
+    try testing.expectEqual(@as(i64, 1), v0.i64);
     const v1 = decodeColumn(&schema, buf[0..written], 1);
     try testing.expect(v1 == .null_value);
     const v2 = decodeColumn(&schema, buf[0..written], 2);
-    try testing.expectEqual(@as(f64, 9.5), v2.float);
+    try testing.expectEqual(@as(f64, 9.5), v2.f64);
 }
 
 test "null not allowed returns error" {
     var schema = RowSchema{};
-    _ = try schema.addColumn("id", .bigint, false);
+    _ = try schema.addColumn("id", .i64, false);
 
     const values = [_]Value{.{ .null_value = {} }};
     var buf: [256]u8 = undefined;
@@ -718,51 +854,51 @@ test "null not allowed returns error" {
 
 test "type mismatch returns error" {
     var schema = RowSchema{};
-    _ = try schema.addColumn("id", .bigint, false);
+    _ = try schema.addColumn("id", .i64, false);
 
-    const values = [_]Value{.{ .int = 5 }};
+    const values = [_]Value{.{ .i32 = 5 }};
     var buf: [256]u8 = undefined;
     try testing.expectError(error.TypeMismatch, encodeRow(&schema, &values, &buf));
 }
 
 test "mixed schema roundtrip" {
     var schema = RowSchema{};
-    _ = try schema.addColumn("id", .bigint, false);
+    _ = try schema.addColumn("id", .i64, false);
     _ = try schema.addColumn("name", .string, false);
-    _ = try schema.addColumn("active", .boolean, false);
+    _ = try schema.addColumn("active", .bool, false);
     _ = try schema.addColumn("email", .string, true);
-    _ = try schema.addColumn("score", .float, true);
+    _ = try schema.addColumn("score", .f64, true);
 
     const values = [_]Value{
-        .{ .bigint = 42 },
+        .{ .i64 = 42 },
         .{ .string = "Alice" },
-        .{ .boolean = true },
+        .{ .bool = true },
         .{ .string = "alice@example.com" },
-        .{ .float = 99.5 },
+        .{ .f64 = 99.5 },
     };
     var buf: [512]u8 = undefined;
     const written = try encodeRow(&schema, &values, &buf);
 
-    try testing.expectEqual(@as(i64, 42), decodeColumn(&schema, buf[0..written], 0).bigint);
+    try testing.expectEqual(@as(i64, 42), decodeColumn(&schema, buf[0..written], 0).i64);
     try testing.expectEqualSlices(u8, "Alice", decodeColumn(&schema, buf[0..written], 1).string);
-    try testing.expect(decodeColumn(&schema, buf[0..written], 2).boolean);
+    try testing.expect(decodeColumn(&schema, buf[0..written], 2).bool);
     try testing.expectEqualSlices(u8, "alice@example.com", decodeColumn(&schema, buf[0..written], 3).string);
-    try testing.expectEqual(@as(f64, 99.5), decodeColumn(&schema, buf[0..written], 4).float);
+    try testing.expectEqual(@as(f64, 99.5), decodeColumn(&schema, buf[0..written], 4).f64);
 }
 
 test "compareValues ordering" {
     // Same type comparisons.
     try testing.expectEqual(std.math.Order.lt, compareValues(
-        .{ .bigint = 1 },
-        .{ .bigint = 2 },
+        .{ .i64 = 1 },
+        .{ .i64 = 2 },
     ));
     try testing.expectEqual(std.math.Order.eq, compareValues(
-        .{ .bigint = 5 },
-        .{ .bigint = 5 },
+        .{ .i64 = 5 },
+        .{ .i64 = 5 },
     ));
     try testing.expectEqual(std.math.Order.gt, compareValues(
-        .{ .bigint = 10 },
-        .{ .bigint = 3 },
+        .{ .i64 = 10 },
+        .{ .i64 = 3 },
     ));
 
     // String comparison.
@@ -774,10 +910,10 @@ test "compareValues ordering" {
     // Null sorts last.
     try testing.expectEqual(std.math.Order.gt, compareValues(
         .{ .null_value = {} },
-        .{ .bigint = 1 },
+        .{ .i64 = 1 },
     ));
     try testing.expectEqual(std.math.Order.lt, compareValues(
-        .{ .bigint = 1 },
+        .{ .i64 = 1 },
         .{ .null_value = {} },
     ));
     try testing.expectEqual(std.math.Order.eq, compareValues(
@@ -788,22 +924,22 @@ test "compareValues ordering" {
 
 test "decodeRow decodes all columns" {
     var schema = RowSchema{};
-    _ = try schema.addColumn("a", .int, false);
-    _ = try schema.addColumn("b", .boolean, false);
+    _ = try schema.addColumn("a", .i32, false);
+    _ = try schema.addColumn("b", .bool, false);
 
-    const values = [_]Value{ .{ .int = 7 }, .{ .boolean = true } };
+    const values = [_]Value{ .{ .i32 = 7 }, .{ .bool = true } };
     var buf: [256]u8 = undefined;
     const written = try encodeRow(&schema, &values, &buf);
 
     var out: [2]Value = undefined;
     decodeRow(&schema, buf[0..written], &out);
-    try testing.expectEqual(@as(i32, 7), out[0].int);
-    try testing.expect(out[1].boolean);
+    try testing.expectEqual(@as(i32, 7), out[0].i32);
+    try testing.expect(out[1].bool);
 }
 
 test "findColumn looks up by name" {
     var schema = RowSchema{};
-    _ = try schema.addColumn("id", .bigint, false);
+    _ = try schema.addColumn("id", .i64, false);
     _ = try schema.addColumn("name", .string, false);
 
     try testing.expectEqual(@as(?u16, 0), schema.findColumn("id"));
@@ -826,17 +962,17 @@ test "empty string roundtrip" {
 test "addColumn returns NameBufferFull when name buffer is exhausted" {
     var schema = RowSchema{};
     var long_name = [_]u8{'x'} ** 4096;
-    _ = try schema.addColumn(long_name[0..], .int, false);
+    _ = try schema.addColumn(long_name[0..], .i32, false);
 
-    const result = schema.addColumn("y", .int, false);
+    const result = schema.addColumn("y", .i32, false);
     try testing.expectError(error.NameBufferFull, result);
 }
 
 test "decode rejects unsupported row format version" {
     var schema = RowSchema{};
-    _ = try schema.addColumn("id", .bigint, false);
+    _ = try schema.addColumn("id", .i64, false);
 
-    const values = [_]Value{.{ .bigint = 42 }};
+    const values = [_]Value{.{ .i64 = 42 }};
     var buf: [256]u8 = undefined;
     const written = try encodeRow(&schema, &values, &buf);
     buf[2] = row_format_version + 1;
@@ -847,9 +983,9 @@ test "decode rejects unsupported row format version" {
 
 test "decode rejects invalid row format magic" {
     var schema = RowSchema{};
-    _ = try schema.addColumn("id", .bigint, false);
+    _ = try schema.addColumn("id", .i64, false);
 
-    const values = [_]Value{.{ .bigint = 42 }};
+    const values = [_]Value{.{ .i64 = 42 }};
     var buf: [256]u8 = undefined;
     const written = try encodeRow(&schema, &values, &buf);
     @memset(buf[0..2], 0);
@@ -860,11 +996,11 @@ test "decode rejects invalid row format magic" {
 
 test "encode/decode string overflow pointer slot" {
     var schema = RowSchema{};
-    _ = try schema.addColumn("id", .bigint, false);
+    _ = try schema.addColumn("id", .i64, false);
     _ = try schema.addColumn("name", .string, false);
 
     const values = [_]Value{
-        .{ .bigint = 1 },
+        .{ .i64 = 1 },
         .{ .string = "large payload stored in overflow pages" },
     };
     const overflow_ids = [_]u64{ 0, 10_000_123 };

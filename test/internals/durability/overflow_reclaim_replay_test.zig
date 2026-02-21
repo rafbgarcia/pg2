@@ -20,7 +20,7 @@ test "internal overflow reclaim WAL replay restores page state after crash and i
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull)
         \\}
     );

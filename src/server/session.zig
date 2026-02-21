@@ -692,10 +692,16 @@ fn isNestedNullRow(
 
 fn protocolTypeName(column_type: ColumnType) []const u8 {
     return switch (column_type) {
-        .bigint => "i64",
-        .int => "i32",
-        .float => "f64",
-        .boolean => "bool",
+        .i8 => "i8",
+        .i16 => "i16",
+        .u8 => "u8",
+        .u16 => "u16",
+        .u32 => "u32",
+        .u64 => "u64",
+        .i64 => "i64",
+        .i32 => "i32",
+        .f64 => "f64",
+        .bool => "bool",
         .string => "str",
         .timestamp => "ts",
     };
@@ -874,13 +880,25 @@ fn serializeValue(
     value: Value,
 ) error{ResponseTooLarge}!void {
     switch (value) {
-        .bigint => |v| writer.print("{d}", .{v}) catch
+        .i8 => |v| writer.print("{d}", .{v}) catch
             return error.ResponseTooLarge,
-        .int => |v| writer.print("{d}", .{v}) catch
+        .i16 => |v| writer.print("{d}", .{v}) catch
             return error.ResponseTooLarge,
-        .float => |v| writer.print("{d}", .{v}) catch
+        .i64 => |v| writer.print("{d}", .{v}) catch
             return error.ResponseTooLarge,
-        .boolean => |v| writer.writeAll(if (v) "true" else "false") catch
+        .i32 => |v| writer.print("{d}", .{v}) catch
+            return error.ResponseTooLarge,
+        .u8 => |v| writer.print("{d}", .{v}) catch
+            return error.ResponseTooLarge,
+        .u16 => |v| writer.print("{d}", .{v}) catch
+            return error.ResponseTooLarge,
+        .u32 => |v| writer.print("{d}", .{v}) catch
+            return error.ResponseTooLarge,
+        .u64 => |v| writer.print("{d}", .{v}) catch
+            return error.ResponseTooLarge,
+        .f64 => |v| writer.print("{d}", .{v}) catch
+            return error.ResponseTooLarge,
+        .bool => |v| writer.writeAll(if (v) "true" else "false") catch
             return error.ResponseTooLarge,
         .string => |v| writer.writeAll(v) catch
             return error.ResponseTooLarge,
@@ -893,9 +911,9 @@ fn serializeValue(
 
 fn initUserModel(catalog: *Catalog, runtime: *BootstrappedRuntime) !void {
     const model_id = try catalog.addModel("User");
-    _ = try catalog.addColumn(model_id, "id", .bigint, false);
+    _ = try catalog.addColumn(model_id, "id", .i64, false);
     _ = try catalog.addColumn(model_id, "name", .string, true);
-    _ = try catalog.addColumn(model_id, "active", .boolean, true);
+    _ = try catalog.addColumn(model_id, "active", .bool, true);
 
     catalog.models[model_id].heap_first_page_id = 100;
     catalog.models[model_id].total_pages = 1;

@@ -10,8 +10,8 @@ test "feature insert fails closed on type mismatch" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
-        \\  field(active, boolean, notNull)
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(active, bool, notNull)
         \\}
     );
 

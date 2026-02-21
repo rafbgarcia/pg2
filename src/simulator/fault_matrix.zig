@@ -116,7 +116,7 @@ fn runPageBitflipChecksum(seed: u64) !ScenarioOutcome {
     defer pool.deinit();
 
     const page_id = 10 + rand.uintLessThan(u64, 16);
-    const fill = rand.int(u8);
+    const fill = rand.i32(u8);
     const bitflip_offset = rand.uintLessThan(usize, 64);
     const mask: u8 = @as(u8, 1) << @as(u3, @intCast(rand.uintLessThan(u8, 7)));
 

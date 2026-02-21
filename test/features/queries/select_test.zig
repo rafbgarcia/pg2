@@ -10,9 +10,9 @@ test "feature query returns deterministic rows via session path" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull)
-        \\  field(active, boolean, notNull)
+        \\  field(active, bool, notNull)
         \\}
     );
 
@@ -57,9 +57,9 @@ test "feature query projection returns only requested columns via session path" 
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull)
-        \\  field(active, boolean, notNull)
+        \\  field(active, bool, notNull)
         \\}
     );
 
@@ -87,13 +87,13 @@ test "feature query nested projection returns tree-shaped roots with nested list
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull)
         \\  reference(posts, id, Post.user_id, withoutReferentialIntegrity)
         \\}
         \\Post {
-        \\  field(id, bigint, notNull, primaryKey)
-        \\  field(user_id, bigint, notNull)
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(user_id, i64, notNull)
         \\  field(title, string, notNull)
         \\}
     );

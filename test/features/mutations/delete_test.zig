@@ -10,9 +10,9 @@ test "feature delete removes row via session path" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull)
-        \\  field(active, boolean, notNull)
+        \\  field(active, bool, notNull)
         \\}
     );
 

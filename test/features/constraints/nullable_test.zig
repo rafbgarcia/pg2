@@ -10,7 +10,7 @@ test "feature insert allows omitted nullable field and persists null" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(bio, string, nullable)
         \\}
     );
@@ -36,7 +36,7 @@ test "feature insert allows explicit null assignment to nullable field" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(display_name, string, nullable)
         \\}
     );
@@ -62,7 +62,7 @@ test "feature insert applies default for omitted nullable field" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(nickname, string, nullable, default, "anon")
         \\}
     );
@@ -88,7 +88,7 @@ test "feature insert explicit null bypasses default on nullable field" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(nickname, string, nullable, default, "anon")
         \\}
     );
@@ -114,7 +114,7 @@ test "feature insert explicit value overrides default on nullable field" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(nickname, string, nullable, default, "anon")
         \\}
     );

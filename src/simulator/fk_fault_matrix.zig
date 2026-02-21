@@ -47,14 +47,14 @@ fn setupReferenceCatalog(
     catalog.* = Catalog{};
 
     const user_model = try catalog.addModel("User");
-    _ = try catalog.addColumn(user_model, "id", .bigint, false);
+    _ = try catalog.addColumn(user_model, "id", .i64, false);
     catalog.setColumnPrimaryKey(user_model, 0);
     catalog.models[user_model].heap_first_page_id = user_page_id;
     catalog.models[user_model].total_pages = 1;
 
     const post_model = try catalog.addModel("Post");
-    _ = try catalog.addColumn(post_model, "id", .bigint, false);
-    _ = try catalog.addColumn(post_model, "user_id", .bigint, post_user_nullable);
+    _ = try catalog.addColumn(post_model, "id", .i64, false);
+    _ = try catalog.addColumn(post_model, "user_id", .i64, post_user_nullable);
     catalog.setColumnPrimaryKey(post_model, 0);
     catalog.models[post_model].heap_first_page_id = post_page_id;
     catalog.models[post_model].total_pages = 1;
@@ -584,7 +584,7 @@ fn runFkUpdateSetNullCrashRestart(seed: u64) !ScenarioOutcome {
         );
         defer user_scan.deinit();
         try std.testing.expectEqual(@as(u16, 1), user_scan.row_count);
-        user_id_after = user_scan.rows[0].values[0].bigint;
+        user_id_after = user_scan.rows[0].values[0].i64;
     }
 
     try std.testing.expectEqual(@as(u8, 1), post_user_id_is_null);

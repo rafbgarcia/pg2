@@ -12,7 +12,7 @@ test "feature string fields preserve user-facing text values" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\CustomerProfile {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(display_name, string, notNull)
         \\}
     );
@@ -42,7 +42,7 @@ test "feature string fields support overflow-backed large values end-to-end" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull)
         \\}
     );

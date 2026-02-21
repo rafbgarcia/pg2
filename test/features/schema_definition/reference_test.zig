@@ -13,13 +13,13 @@ test "feature schema reference registers association without implicit index" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull)
         \\  reference(posts, id, Post.user_id, withoutReferentialIntegrity)
         \\}
         \\Post {
-        \\  field(id, bigint, notNull, primaryKey)
-        \\  field(user_id, bigint, notNull)
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(user_id, i64, notNull)
         \\  field(title, string, notNull)
         \\}
     );

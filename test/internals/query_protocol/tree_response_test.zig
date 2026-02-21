@@ -10,14 +10,14 @@ test "internal query protocol emits shape once and grouped root rows" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull)
-        \\  field(active, boolean, notNull)
+        \\  field(active, bool, notNull)
         \\  reference(posts, id, Post.user_id, withoutReferentialIntegrity)
         \\}
         \\Post {
-        \\  field(id, bigint, notNull, primaryKey)
-        \\  field(user_id, bigint, notNull)
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(user_id, i64, notNull)
         \\  field(title, string, notNull)
         \\}
     );
@@ -68,13 +68,13 @@ test "internal query protocol keeps quoted string framing for punctuation" {
     const executor = &env.executor;
     try executor.applyDefinitions(
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(name, string, notNull)
         \\  reference(posts, id, Post.user_id, withoutReferentialIntegrity)
         \\}
         \\Post {
-        \\  field(id, bigint, notNull, primaryKey)
-        \\  field(user_id, bigint, notNull)
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(user_id, i64, notNull)
         \\  field(title, string, notNull)
         \\}
     );

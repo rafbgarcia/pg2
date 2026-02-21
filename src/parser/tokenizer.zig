@@ -72,10 +72,16 @@ pub const TokenType = enum(u8) {
     kw_in,
 
     // Keywords — types
-    kw_bigint,
-    kw_int,
-    kw_float,
-    kw_boolean,
+    kw_i8,
+    kw_i16,
+    kw_i32,
+    kw_i64,
+    kw_u8,
+    kw_u16,
+    kw_u32,
+    kw_u64,
+    kw_f64,
+    kw_bool,
     kw_string,
     kw_timestamp,
 
@@ -390,10 +396,16 @@ fn classifyWord(text: []const u8, starts_upper: bool) TokenType {
         .{ .word = "true", .tok = .true_literal },
         .{ .word = "false", .tok = .false_literal },
         .{ .word = "null", .tok = .null_literal },
-        .{ .word = "bigint", .tok = .kw_bigint },
-        .{ .word = "int", .tok = .kw_int },
-        .{ .word = "float", .tok = .kw_float },
-        .{ .word = "boolean", .tok = .kw_boolean },
+        .{ .word = "i8", .tok = .kw_i8 },
+        .{ .word = "i16", .tok = .kw_i16 },
+        .{ .word = "i32", .tok = .kw_i32 },
+        .{ .word = "i64", .tok = .kw_i64 },
+        .{ .word = "u8", .tok = .kw_u8 },
+        .{ .word = "u16", .tok = .kw_u16 },
+        .{ .word = "u32", .tok = .kw_u32 },
+        .{ .word = "u64", .tok = .kw_u64 },
+        .{ .word = "f64", .tok = .kw_f64 },
+        .{ .word = "bool", .tok = .kw_bool },
         .{ .word = "string", .tok = .kw_string },
         .{ .word = "timestamp", .tok = .kw_timestamp },
         // Aggregates
@@ -447,7 +459,7 @@ test "integer literal" {
     try testing.expectEqualSlices(u8, "42", result.getText(0, "42"));
 }
 
-test "float literal" {
+test "f64 literal" {
     const source = "3.14";
     const result = tokenize(source);
     try testing.expectEqual(TokenType.float_literal, result.tokens[0].token_type);
@@ -539,7 +551,7 @@ test "multiline tokenization" {
     try testing.expectEqual(@as(u16, 2), result.tokens[1].line);
 }
 
-test "boolean and null literals" {
+test "bool and null literals" {
     const source = "true false null";
     const result = tokenize(source);
     try testing.expectEqual(TokenType.true_literal, result.tokens[0].token_type);
@@ -595,7 +607,7 @@ test "full pipeline tokenizes correctly" {
 test "schema definition tokenizes" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(email, string, notNull)
         \\  hasMany posts
         \\}
@@ -624,14 +636,20 @@ test "logical operators" {
 }
 
 test "type keywords" {
-    const source = "bigint int float boolean string timestamp";
+    const source = "i8 i16 i32 i64 u8 u16 u32 u64 f64 bool string timestamp";
     const result = tokenize(source);
-    try testing.expectEqual(TokenType.kw_bigint, result.tokens[0].token_type);
-    try testing.expectEqual(TokenType.kw_int, result.tokens[1].token_type);
-    try testing.expectEqual(TokenType.kw_float, result.tokens[2].token_type);
-    try testing.expectEqual(TokenType.kw_boolean, result.tokens[3].token_type);
-    try testing.expectEqual(TokenType.kw_string, result.tokens[4].token_type);
-    try testing.expectEqual(TokenType.kw_timestamp, result.tokens[5].token_type);
+    try testing.expectEqual(TokenType.kw_i8, result.tokens[0].token_type);
+    try testing.expectEqual(TokenType.kw_i16, result.tokens[1].token_type);
+    try testing.expectEqual(TokenType.kw_i32, result.tokens[2].token_type);
+    try testing.expectEqual(TokenType.kw_i64, result.tokens[3].token_type);
+    try testing.expectEqual(TokenType.kw_u8, result.tokens[4].token_type);
+    try testing.expectEqual(TokenType.kw_u16, result.tokens[5].token_type);
+    try testing.expectEqual(TokenType.kw_u32, result.tokens[6].token_type);
+    try testing.expectEqual(TokenType.kw_u64, result.tokens[7].token_type);
+    try testing.expectEqual(TokenType.kw_f64, result.tokens[8].token_type);
+    try testing.expectEqual(TokenType.kw_bool, result.tokens[9].token_type);
+    try testing.expectEqual(TokenType.kw_string, result.tokens[10].token_type);
+    try testing.expectEqual(TokenType.kw_timestamp, result.tokens[11].token_type);
 }
 
 test "reference and RI keywords" {

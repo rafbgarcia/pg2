@@ -38,7 +38,7 @@ test "parse pipeline query" {
 test "parse schema definition" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(email, string, notNull)
         \\  field(name, string, nullable)
         \\  hasMany posts
@@ -150,8 +150,8 @@ test "parse update mutation" {
 test "parse scope in schema" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
-        \\  field(active, boolean, nullable)
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(active, bool, nullable)
         \\  scope active |> where(active = true)
         \\}
     ;
@@ -163,12 +163,12 @@ test "parse scope in schema" {
 test "parse reference syntax in schema" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  reference(posts, id, Post.user_id, withoutReferentialIntegrity)
         \\}
         \\Post {
-        \\  field(id, bigint, notNull, primaryKey)
-        \\  field(user_id, bigint, notNull)
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(user_id, i64, notNull)
         \\  reference(author, user_id, User.id, withReferentialIntegrity(onDeleteRestrict, onUpdateCascade))
         \\}
     ;
@@ -180,7 +180,7 @@ test "parse reference syntax in schema" {
 test "parse parenthesized index syntax in schema" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  field(email, string, notNull)
         \\  index(idx_email, [email], unique)
         \\}
@@ -193,7 +193,7 @@ test "parse parenthesized index syntax in schema" {
 test "parse schema index rejects empty field array" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  index(idx_empty, [], unique)
         \\}
     ;
@@ -205,7 +205,7 @@ test "parse schema index rejects empty field array" {
 test "parse schema index rejects missing field array brackets" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  index(idx_email, email, unique)
         \\}
     ;
@@ -217,7 +217,7 @@ test "parse schema index rejects missing field array brackets" {
 test "parse schema field rejects non-parenthesized syntax" {
     const source =
         \\User {
-        \\  field id bigint notNull primaryKey
+        \\  field id i64 notNull primaryKey
         \\}
     ;
     const tokens = tokenizer_mod.tokenize(source);
@@ -228,7 +228,7 @@ test "parse schema field rejects non-parenthesized syntax" {
 test "parse schema index rejects non-parenthesized syntax" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  index email
         \\}
     ;
@@ -240,7 +240,7 @@ test "parse schema index rejects non-parenthesized syntax" {
 test "parse schema index rejects trailing comma in field array" {
     const source =
         \\User {
-        \\  field(id, bigint, notNull, primaryKey)
+        \\  field(id, i64, notNull, primaryKey)
         \\  index(idx_email, [email,], unique)
         \\}
     ;
