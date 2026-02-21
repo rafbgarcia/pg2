@@ -122,7 +122,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - Same expression semantics apply consistently in all supported execution contexts.
 
 ### Tasks
-- [ ] `E18` `where` expression parity suite.
+- [x] `E18` `where` expression parity suite.
 - [ ] `E19` `update` assignment expression parity suite.
 - [ ] `E20` computed `select` expression parity suite.
 - [x] `E21` `sort(expr)` expression parity suite.
@@ -193,6 +193,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - Do not implement until explicit product sign-off.
 
 ## Implementation Log
+- 2026-02-21: Completed `E18` by adding `test/features/expressions/where_test.zig` with dedicated parity coverage for `where(...)` across arithmetic/comparison predicates, boolean precedence/parentheses behavior, membership composition (`in`/`!in`), direct and negated boolean-column predicates, and fail-closed handling for non-boolean predicate outputs. Imported the suite in `test/features/features_specs_test.zig` and validated with `zig build test`.
 - 2026-02-21: Reorganized expression feature folder intent: operator/context behavior remains at `test/features/expressions/*.zig` (including `sort_test.zig`), while standard-library builtin coverage is tracked under `test/features/expressions/stdlib/` (renamed from `functions/` in workfront references).
 - 2026-02-21: Completed `E21` by extending sort-key parsing to accept general expression keys (not only aggregate/builtin-led forms), while preserving bare-column sort syntax. Added parser coverage for arithmetic sort expressions and validated runtime parity through feature tests using `sort(base + extra ...)`, `sort(base - extra ...)`, and `sort(in(status, [...]) ...)` in `test/features/expressions/`. Kept computed-select assertions out of this change because computed projection shaping remains gated under `E20`.
 - 2026-02-21: Completed `T01` by adding `test/features/expressions/subtraction_test.zig` with dedicated feature coverage for representative numeric subtraction (`i64`, `u64`, `f64`) plus fail-closed mutation diagnostics for type mismatch, constrained integer underflow (`IntegerOutOfRange` with assignment path), and null arithmetic operands. Imported the new file in `test/features/features_specs_test.zig` and validated via `zig build test`.
