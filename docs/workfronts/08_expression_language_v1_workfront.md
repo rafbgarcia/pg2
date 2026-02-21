@@ -75,7 +75,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - `in` is function-form only; infix and camelCase legacy forms fail closed.
 - [x] `E04` Parse membership only as stdlib call: `in(value, list)`.
   - Enforce argument count and argument shape at parse boundary where possible.
-- [ ] `E06` Precedence tests for symbolic boolean logic.
+- [x] `E06` Precedence tests for symbolic boolean logic.
   - Ensure `!` binds tighter than comparison, `&&` tighter than `||`, with explicit parentheses cases.
 
 ## Phase 2: Evaluator Semantics
@@ -171,4 +171,5 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - Do not implement until explicit product sign-off.
 
 ## Implementation Log
+- 2026-02-21: Completed `E06` by adding parser/expression precedence coverage for symbolic boolean logic. Added AST-shape assertions proving `!` binds tighter than comparison, `&&` binds tighter than `||`, and parentheses override default grouping. Added parser-level fail-closed regressions for legacy textual logical forms (`and`/`or`/`not`) in `where(...)`.
 - 2026-02-21: Completed `E04` by enforcing parse-time membership shape for `in(value, list)` only (exactly two args; second arg must be list literal), threading source text through parser/expression entry points so `in` remains a plain identifier token while membership-call validation stays explicit and fail-closed. Added parser/expression regression tests for valid form and invalid arity/shape.

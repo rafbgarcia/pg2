@@ -582,6 +582,17 @@ fn isLiteral(tok_type: TokenType) bool {
 
 const testing = std.testing;
 
+fn expectBinaryOperator(
+    ast: *const Ast,
+    tokens: *const TokenizeResult,
+    node_index: NodeIndex,
+    expected: TokenType,
+) !void {
+    const node = ast.getNode(node_index);
+    try testing.expectEqual(NodeTag.expr_binary, node.tag);
+    try testing.expectEqual(expected, tokens.tokens[node.extra].token_type);
+}
+
 test "simple literal expression" {
     var ast = Ast{};
     const tokens = tokenizer_mod.tokenize("42");
@@ -673,9 +684,50 @@ test "logical &&/||" {
     // && binds tighter than ||, so: (a=1 && b=2) || c=3
     const tokens = tokenizer_mod.tokenize("a = 1 && b = 2 || c = 3");
     const result = try parseExpression(&ast, &tokens, "", 0);
-    const node = ast.getNode(result.node);
-    try testing.expectEqual(NodeTag.expr_binary, node.tag);
-    // Top should be '||'
+    const root = ast.getNode(result.node);
+    try testing.expectEqual(NodeTag.expr_binary, root.tag);
+    try testing.expectEqual(TokenType.or_or, tokens.tokens[root.extra].token_type);
+
+    const lhs = ast.getNode(root.data.binary.lhs);
+    try testing.expectEqual(NodeTag.expr_binary, lhs.tag);
+    try testing.expectEqual(TokenType.and_and, tokens.tokens[lhs.extra].token_type);
+
+    try expectBinaryOperator(&ast, &tokens, lhs.data.binary.lhs, .equal);
+    try expectBinaryOperator(&ast, &tokens, lhs.data.binary.rhs, .equal);
+    try expectBinaryOperator(&ast, &tokens, root.data.binary.rhs, .equal);
+}
+
+test "precedence: unary bang binds tighter than comparison" {
+    var ast = Ast{};
+    const tokens = tokenizer_mod.tokenize("!active = enabled");
+    const result = try parseExpression(&ast, &tokens, "", 0);
+    const root = ast.getNode(result.node);
+    try testing.expectEqual(NodeTag.expr_binary, root.tag);
+    try testing.expectEqual(TokenType.equal, tokens.tokens[root.extra].token_type);
+
+    const lhs = ast.getNode(root.data.binary.lhs);
+    try testing.expectEqual(NodeTag.expr_unary, lhs.tag);
+    try testing.expectEqual(TokenType.bang, tokens.tokens[lhs.extra].token_type);
+
+    const unary_operand = ast.getNode(lhs.data.unary);
+    try testing.expectEqual(NodeTag.expr_column_ref, unary_operand.tag);
+}
+
+test "parentheses override && and || precedence" {
+    var ast = Ast{};
+    const tokens = tokenizer_mod.tokenize("(a = 1 || b = 2) && c = 3");
+    const result = try parseExpression(&ast, &tokens, "", 0);
+    const root = ast.getNode(result.node);
+    try testing.expectEqual(NodeTag.expr_binary, root.tag);
+    try testing.expectEqual(TokenType.and_and, tokens.tokens[root.extra].token_type);
+
+    const lhs = ast.getNode(root.data.binary.lhs);
+    try testing.expectEqual(NodeTag.expr_binary, lhs.tag);
+    try testing.expectEqual(TokenType.or_or, tokens.tokens[lhs.extra].token_type);
+
+    try expectBinaryOperator(&ast, &tokens, lhs.data.binary.lhs, .equal);
+    try expectBinaryOperator(&ast, &tokens, lhs.data.binary.rhs, .equal);
+    try expectBinaryOperator(&ast, &tokens, root.data.binary.rhs, .equal);
 }
 
 test "function call" {

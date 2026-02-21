@@ -9,6 +9,13 @@ const null_node = ast_mod.null_node;
 const parse = parser_mod.parse;
 const testing = std.testing;
 
+fn whereExprRoot(ast: *const ast_mod.Ast) ast_mod.NodeIndex {
+    const root = ast.getNode(ast.root);
+    const pipeline = ast.getNode(root.data.unary);
+    const where_op = ast.getNode(pipeline.data.binary.rhs);
+    return where_op.data.unary;
+}
+
 test "parse simple query" {
     const source = "User { id email name }";
     const tokens = tokenizer_mod.tokenize(source);
@@ -136,6 +143,42 @@ test "parse where membership call rejects non-list second argument" {
     const tokens = tokenizer_mod.tokenize(source);
     const result = parse(&tokens, source);
     try testing.expect(result.has_error);
+}
+
+test "parse where symbolic boolean precedence with explicit parentheses" {
+    const source = "User |> where((a = 1 || b = 2) && !archived) { id }";
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(!result.has_error);
+
+    const expr_root = result.ast.getNode(whereExprRoot(&result.ast));
+    try testing.expectEqual(NodeTag.expr_binary, expr_root.tag);
+    try testing.expectEqual(tokenizer_mod.TokenType.and_and, tokens.tokens[expr_root.extra].token_type);
+
+    const lhs = result.ast.getNode(expr_root.data.binary.lhs);
+    try testing.expectEqual(NodeTag.expr_binary, lhs.tag);
+    try testing.expectEqual(tokenizer_mod.TokenType.or_or, tokens.tokens[lhs.extra].token_type);
+
+    const rhs = result.ast.getNode(expr_root.data.binary.rhs);
+    try testing.expectEqual(NodeTag.expr_unary, rhs.tag);
+    try testing.expectEqual(tokenizer_mod.TokenType.bang, tokens.tokens[rhs.extra].token_type);
+}
+
+test "parse where rejects legacy textual logical forms" {
+    const and_source = "User |> where(active and verified) { id }";
+    const and_tokens = tokenizer_mod.tokenize(and_source);
+    const and_result = parse(&and_tokens, and_source);
+    try testing.expect(and_result.has_error);
+
+    const or_source = "User |> where(active or verified) { id }";
+    const or_tokens = tokenizer_mod.tokenize(or_source);
+    const or_result = parse(&or_tokens, or_source);
+    try testing.expect(or_result.has_error);
+
+    const not_source = "User |> where(not active) { id }";
+    const not_tokens = tokenizer_mod.tokenize(not_source);
+    const not_result = parse(&not_tokens, not_source);
+    try testing.expect(not_result.has_error);
 }
 
 test "parse error on invalid syntax" {
