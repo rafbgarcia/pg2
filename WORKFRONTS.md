@@ -11,6 +11,7 @@ Each workfront has phased gates so fresh Codex sessions can resume safely.
 5. `docs/workfronts/05_test_matrix_workfront.md`
 6. `docs/workfronts/06_variables_and_multi_statement_workfront.md`
 7. `docs/workfronts/07_adaptive_planning_workfront.md`
+8. `docs/workfronts/08_expression_language_v1_workfront.md`
 
 ## Recommended Execution Order
 1. Server concurrency foundation.
@@ -20,6 +21,7 @@ Each workfront has phased gates so fresh Codex sessions can resume safely.
 5. Adaptive planning policy and inspect explainability.
 6. Advisor/observability module.
 7. Cross-profile and stress test matrix.
+8. Expression language v1 readiness.
 
 ## Cross-Workfront Rules
 1. Core code continues to use `Storage`/`Network` abstractions.
