@@ -442,8 +442,15 @@ pub fn applyBinaryOp(lhs: Value, rhs: Value, op: TokenType) EvalError!Value {
     if (lhs == .null_value or rhs == .null_value) {
         return switch (op) {
             .plus, .minus, .star, .slash => error.NullArithmeticOperand,
-            .and_and, .or_or => error.TypeMismatch,
-            else => Value{ .null_value = {} },
+            .equal_equal => applyComparison(lhs, rhs, .eq),
+            .not_equal => applyComparison(lhs, rhs, .neq),
+            .less_than => applyComparison(lhs, rhs, .lt),
+            .less_equal => applyComparison(lhs, rhs, .lte),
+            .greater_than => applyComparison(lhs, rhs, .gt),
+            .greater_equal => applyComparison(lhs, rhs, .gte),
+            .and_and => applyLogical(lhs, rhs, .@"and"),
+            .or_or => applyLogical(lhs, rhs, .@"or"),
+            else => error.TypeMismatch,
         };
     }
 
@@ -664,15 +671,24 @@ fn numericOrder(lhs: Value, rhs: Value) ?std.math.Order {
 const CmpOp = enum { eq, neq, lt, lte, gt, gte };
 
 fn applyComparison(lhs: Value, rhs: Value, op: CmpOp) EvalError!Value {
-    // Handle null = null and null != null specifically.
-    if (lhs == .null_value and rhs == .null_value) {
-        return Value{ .bool = op == .eq };
-    }
     if (lhs == .null_value or rhs == .null_value) {
-        return Value{ .bool = op == .neq };
+        return switch (op) {
+            .eq => Value{ .bool = lhs == .null_value and rhs == .null_value },
+            .neq => Value{
+                .bool = (lhs == .null_value) != (rhs == .null_value),
+            },
+            else => Value{ .null_value = {} },
+        };
     }
 
-    const ord = numericOrder(lhs, rhs) orelse row_mod.compareValues(lhs, rhs);
+    const ord = if (isNumericValue(lhs) and isNumericValue(rhs))
+        (numericOrder(lhs, rhs) orelse return error.TypeMismatch)
+    else blk: {
+        const lhs_type = lhs.columnType() orelse return error.TypeMismatch;
+        const rhs_type = rhs.columnType() orelse return error.TypeMismatch;
+        if (lhs_type != rhs_type) return error.TypeMismatch;
+        break :blk row_mod.compareValues(lhs, rhs);
+    };
     return Value{ .bool = switch (op) {
         .eq => ord == .eq,
         .neq => ord != .eq,
@@ -1444,6 +1460,71 @@ test "comparison greater equal" {
         .greater_equal,
     );
     try testing.expect(result.bool);
+}
+
+test "logical or supports null and true" {
+    const result = try applyBinaryOp(
+        .{ .null_value = {} },
+        .{ .bool = true },
+        .or_or,
+    );
+    try testing.expect(result == .bool);
+    try testing.expect(result.bool);
+}
+
+test "logical and supports null and false" {
+    const result = try applyBinaryOp(
+        .{ .null_value = {} },
+        .{ .bool = false },
+        .and_and,
+    );
+    try testing.expect(result == .bool);
+    try testing.expect(!result.bool);
+}
+
+test "logical or with null operands yields null" {
+    const result = try applyBinaryOp(
+        .{ .null_value = {} },
+        .{ .null_value = {} },
+        .or_or,
+    );
+    try testing.expect(result == .null_value);
+}
+
+test "equality with null operands returns bool for == and !=" {
+    const both_null_eq = try applyBinaryOp(
+        .{ .null_value = {} },
+        .{ .null_value = {} },
+        .equal_equal,
+    );
+    try testing.expect(both_null_eq == .bool);
+    try testing.expect(both_null_eq.bool);
+
+    const mixed_neq = try applyBinaryOp(
+        .{ .i64 = 42 },
+        .{ .null_value = {} },
+        .not_equal,
+    );
+    try testing.expect(mixed_neq == .bool);
+    try testing.expect(mixed_neq.bool);
+}
+
+test "ordering comparison with null yields null" {
+    const result = try applyBinaryOp(
+        .{ .i64 = 42 },
+        .{ .null_value = {} },
+        .less_than,
+    );
+    try testing.expect(result == .null_value);
+}
+
+test "equality rejects incompatible non-numeric types" {
+    const result = applyBinaryOp(
+        .{ .string = "1" },
+        .{ .i64 = 1 },
+        .equal_equal,
+    );
+    try testing.expectError(error.TypeMismatch, result);
 }
 
 test "f64 arithmetic" {

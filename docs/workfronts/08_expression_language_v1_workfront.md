@@ -99,9 +99,9 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - [x] `E09` Implement evaluator semantics for list literals in function-based membership checks.
 - [ ] `E10` Implement parameter expression evaluation (`expr_parameter`) with explicit binding source.
   - Undefined parameter must fail closed with deterministic error.
-- [ ] `E11` Normalize null-comparison behavior under symbolic boolean operators.
+- [x] `E11` Normalize null-comparison behavior under symbolic boolean operators.
 - [ ] `E12` Add evaluator regressions for removed legacy logical/membership forms.
-- [ ] `E12a` Normalize evaluator equality semantics for `==` (and `!=`) after parser migration.
+- [x] `E12a` Normalize evaluator equality semantics for `==` (and `!=`) after parser migration.
   - Type/null behavior, deterministic errors, and fail-closed invalid predicate outputs.
 
 ## Phase 3: Built-in Functions and Deterministic Time
@@ -193,6 +193,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - Do not implement until explicit product sign-off.
 
 ## Implementation Log
+- 2026-02-21: Completed `E11` and `E12a` by normalizing evaluator null/comparison semantics in `src/executor/filter.zig`: symbolic boolean operators now evaluate with null-aware three-valued logic instead of fail-closed type mismatch on null operands; equality operators now apply explicit null semantics (`null == null` true, mixed null `!=` true) and fail closed on incompatible non-numeric cross-type comparisons. Added evaluator regressions for null-aware boolean behavior, null equality/ordering outcomes, and equality type-mismatch failures. Revalidated `test/features/expressions/where_test.zig` against the original parity expectations that depend on these semantics.
 - 2026-02-21: Completed `E18` by adding `test/features/expressions/where_test.zig` with dedicated parity coverage for `where(...)` across arithmetic/comparison predicates, boolean precedence/parentheses behavior, membership composition (`in`/`!in`), direct and negated boolean-column predicates, and fail-closed handling for non-boolean predicate outputs. Imported the suite in `test/features/features_specs_test.zig` and validated with `zig build test`.
 - 2026-02-21: Reorganized expression feature folder intent: operator/context behavior remains at `test/features/expressions/*.zig` (including `sort_test.zig`), while standard-library builtin coverage is tracked under `test/features/expressions/stdlib/` (renamed from `functions/` in workfront references).
 - 2026-02-21: Completed `E21` by extending sort-key parsing to accept general expression keys (not only aggregate/builtin-led forms), while preserving bare-column sort syntax. Added parser coverage for arithmetic sort expressions and validated runtime parity through feature tests using `sort(base + extra ...)`, `sort(base - extra ...)`, and `sort(in(status, [...]) ...)` in `test/features/expressions/`. Kept computed-select assertions out of this change because computed projection shaping remains gated under `E20`.
