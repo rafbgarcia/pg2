@@ -137,7 +137,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - For built-ins, use one file per function (avoids broad multi-function files and makes failures easier to localize).
 
 ### Tasks
-- [ ] `T01` `test/features/expressions/subtraction_test.zig` (side note: binary subtraction `a - b`; includes numeric type/null behavior)
+- [x] `T01` `test/features/expressions/subtraction_test.zig` (side note: binary subtraction `a - b`; includes numeric type/null behavior)
 - [ ] `T02` `test/features/expressions/multiplication_test.zig` (side note: binary multiplication `a * b`; includes numeric type/null behavior)
 - [ ] `T03` `test/features/expressions/division_test.zig` (side note: binary division `a / b`; includes divide-by-zero and numeric type/null behavior)
 - [ ] `T04` `test/features/expressions/unary_minus_test.zig` (side note: unary negation `-a`/`-(expr)`; distinct from binary subtraction)
@@ -193,6 +193,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - Do not implement until explicit product sign-off.
 
 ## Implementation Log
+- 2026-02-21: Completed `T01` by adding `test/features/expressions/subtraction_test.zig` with dedicated feature coverage for representative numeric subtraction (`i64`, `u64`, `f64`) plus fail-closed mutation diagnostics for type mismatch, constrained integer underflow (`IntegerOutOfRange` with assignment path), and null arithmetic operands. Imported the new file in `test/features/features_specs_test.zig` and validated via `zig build test`.
 - 2026-02-21: Added explicit follow-up planning for membership diagnostics (`D05`) and runtime list value-model decisioning (`R01`-`R03`) so future variable/subquery-backed membership support is gated by an explicit product/runtime model decision.
 - 2026-02-21: Completed `E07`, `E08`, and `E09` by adding dedicated evaluator handling for membership function calls (`in(value, list)`) with list-literal element evaluation and null-aware semantics: `in(null, list) -> null`, no-match with null element -> `null`, direct match -> `true`, null-free miss -> `false`. Enforced fail-closed type mismatch for incompatible non-null membership comparisons and added unit coverage in `src/executor/filter.zig` plus feature coverage in `test/features/expressions/in_test.zig` (including `!in(...)` behavior and assignment-path type mismatch failure).
 - 2026-02-21: Completed `E05` by introducing a dedicated `==` tokenizer token for expression equality, migrating expression parsing/evaluation from `=` to `==`, and keeping `=` only for assignment/config grammar. Added parser regressions that reject `=` in expression contexts (`where`, computed `select`, `sort(expr)`, assignment RHS expression) and migrated query/test fixtures using expression predicates to `==`.

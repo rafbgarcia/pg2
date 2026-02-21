@@ -31,4 +31,5 @@ comptime {
     _ = @import("mutations/update_test.zig");
     _ = @import("expressions/addition_test.zig");
     _ = @import("expressions/in_test.zig");
+    _ = @import("expressions/subtraction_test.zig");
 }
