@@ -65,12 +65,6 @@ pub const TokenType = enum(u8) {
     kw_pipe,
     kw_end,
 
-    // Keywords — logical
-    kw_and,
-    kw_or,
-    kw_not,
-    kw_in,
-
     // Keywords — types
     kw_i8,
     kw_i16,
@@ -116,6 +110,9 @@ pub const TokenType = enum(u8) {
     star, // *
     slash, // /
     dot, // .
+    bang, // !
+    and_and, // &&
+    or_or, // ||
 
     // Punctuation
     left_paren, // (
@@ -266,6 +263,16 @@ pub fn tokenize(source: []const u8) TokenizeResult {
                 pos += 2;
                 continue;
             }
+            if (std.mem.eql(u8, two, "&&")) {
+                addToken(&result, .and_and, start, 2, line);
+                pos += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, two, "||")) {
+                addToken(&result, .or_or, start, 2, line);
+                pos += 2;
+                continue;
+            }
             if (std.mem.eql(u8, two, "<=")) {
                 addToken(&result, .less_equal, start, 2, line);
                 pos += 2;
@@ -288,6 +295,7 @@ pub fn tokenize(source: []const u8) TokenizeResult {
             '*' => .star,
             '/' => .slash,
             '.' => .dot,
+            '!' => .bang,
             '(' => .left_paren,
             ')' => .right_paren,
             '{' => .left_brace,
@@ -352,8 +360,7 @@ fn isIdentChar(c: u8) bool {
 /// where the grammar explicitly expects a name.
 ///
 /// This is intentionally limited to pipeline/sort operator keywords that would
-/// otherwise collide with field/scope/index names. Logical/type/schema keywords
-/// remain reserved to keep expression parsing deterministic and fail-closed.
+/// otherwise collide with field/scope/index names.
 pub fn isContextualIdentifier(tok_type: TokenType) bool {
     return switch (tok_type) {
         .identifier,
@@ -415,10 +422,6 @@ fn classifyWord(text: []const u8, starts_upper: bool) TokenType {
         .{ .word = "fn", .tok = .kw_fn },
         .{ .word = "pipe", .tok = .kw_pipe },
         .{ .word = "end", .tok = .kw_end },
-        .{ .word = "and", .tok = .kw_and },
-        .{ .word = "or", .tok = .kw_or },
-        .{ .word = "not", .tok = .kw_not },
-        .{ .word = "in", .tok = .kw_in },
         .{ .word = "true", .tok = .true_literal },
         .{ .word = "false", .tok = .false_literal },
         .{ .word = "null", .tok = .null_literal },
@@ -533,7 +536,7 @@ test "parameter token" {
 }
 
 test "operators" {
-    const source = "|> = != <= >= < > + - * /";
+    const source = "|> = != <= >= < > + - * / ! && ||";
     const result = tokenize(source);
     try testing.expectEqual(TokenType.pipe_arrow, result.tokens[0].token_type);
     try testing.expectEqual(TokenType.equal, result.tokens[1].token_type);
@@ -546,6 +549,9 @@ test "operators" {
     try testing.expectEqual(TokenType.minus, result.tokens[8].token_type);
     try testing.expectEqual(TokenType.star, result.tokens[9].token_type);
     try testing.expectEqual(TokenType.slash, result.tokens[10].token_type);
+    try testing.expectEqual(TokenType.bang, result.tokens[11].token_type);
+    try testing.expectEqual(TokenType.and_and, result.tokens[12].token_type);
+    try testing.expectEqual(TokenType.or_or, result.tokens[13].token_type);
 }
 
 test "punctuation" {
@@ -652,13 +658,13 @@ test "nullable keyword tokenizes in schema field constraints" {
     try testing.expectEqual(TokenType.kw_nullable, result.tokens[6].token_type);
 }
 
-test "logical operators" {
+test "legacy logical words are plain identifiers" {
     const source = "and or not in";
     const result = tokenize(source);
-    try testing.expectEqual(TokenType.kw_and, result.tokens[0].token_type);
-    try testing.expectEqual(TokenType.kw_or, result.tokens[1].token_type);
-    try testing.expectEqual(TokenType.kw_not, result.tokens[2].token_type);
-    try testing.expectEqual(TokenType.kw_in, result.tokens[3].token_type);
+    try testing.expectEqual(TokenType.identifier, result.tokens[0].token_type);
+    try testing.expectEqual(TokenType.identifier, result.tokens[1].token_type);
+    try testing.expectEqual(TokenType.identifier, result.tokens[2].token_type);
+    try testing.expectEqual(TokenType.identifier, result.tokens[3].token_type);
 }
 
 test "type keywords" {
@@ -693,6 +699,6 @@ test "contextual identifier helper allows operator keywords only" {
     try testing.expect(isContextualIdentifier(.identifier));
     try testing.expect(isContextualIdentifier(.kw_offset));
     try testing.expect(isContextualIdentifier(.kw_desc));
-    try testing.expect(!isContextualIdentifier(.kw_not));
+    try testing.expect(!isContextualIdentifier(.and_and));
     try testing.expect(!isContextualIdentifier(.kw_i64));
 }

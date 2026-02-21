@@ -36,19 +36,18 @@ pub const ExprError = error{
 /// Operator precedence (lower number = higher precedence, binds tighter).
 fn precedence(tok_type: TokenType) u8 {
     return switch (tok_type) {
-        .kw_not => 1,
+        .bang => 1,
         .star, .slash => 2,
         .plus, .minus => 3,
         .equal, .not_equal, .less_than, .greater_than, .less_equal, .greater_equal => 4,
-        .kw_in => 5,
-        .kw_and => 6,
-        .kw_or => 7,
+        .and_and => 5,
+        .or_or => 6,
         else => 255,
     };
 }
 
 fn isRightAssociative(tok_type: TokenType) bool {
-    return tok_type == .kw_not;
+    return tok_type == .bang;
 }
 
 fn isOperator(tok_type: TokenType) bool {
@@ -63,10 +62,8 @@ fn isOperator(tok_type: TokenType) bool {
         .greater_than,
         .less_equal,
         .greater_equal,
-        .kw_and,
-        .kw_or,
-        .kw_not,
-        .kw_in,
+        .and_and,
+        .or_or,
         => true,
         else => false,
     };
@@ -88,7 +85,7 @@ fn isEndOfExpression(tok_type: TokenType) bool {
 }
 
 fn isUnaryPrefix(tok_type: TokenType) bool {
-    return tok_type == .kw_not or tok_type == .minus;
+    return tok_type == .bang or tok_type == .minus;
 }
 
 /// An entry on the operator stack during shunting-yard.
@@ -96,7 +93,6 @@ const OpEntry = struct {
     tok_type: TokenType,
     tok_index: u16,
     is_unary: bool,
-    is_not_in: bool,
 };
 
 const ParseExpressionResult = struct {
@@ -148,7 +144,6 @@ pub fn parseExpression(
                     .tok_type = tok.token_type,
                     .tok_index = pos,
                     .is_unary = true,
-                    .is_not_in = false,
                 };
                 op_count += 1;
                 pos += 1;
@@ -196,7 +191,7 @@ pub fn parseExpression(
                 continue;
             }
 
-            if (isFunctionToken(tok.token_type) and
+            if (isFunctionStart(tokens, pos) and
                 pos + 1 < tokens.count and
                 tokens.tokens[pos + 1].token_type == .left_paren)
             {
@@ -234,7 +229,6 @@ pub fn parseExpression(
                     .tok_type = .left_paren,
                     .tok_index = pos,
                     .is_unary = false,
-                    .is_not_in = false,
                 };
                 op_count += 1;
                 pos += 1;
@@ -319,24 +313,6 @@ pub fn parseExpression(
 
         if (isEndOfExpression(tok.token_type) and !expect_operand) break;
 
-        if (tok.token_type == .kw_not and
-            pos + 1 < tokens.count and
-            tokens.tokens[pos + 1].token_type == .kw_in)
-        {
-            try flushOperators(&op_stack, &op_count, &output_stack, &output_count, ast, precedence(.kw_in));
-            if (op_count >= max_operator_stack) return error.StackOverflow;
-            op_stack[op_count] = .{
-                .tok_type = .kw_in,
-                .tok_index = pos,
-                .is_unary = false,
-                .is_not_in = true,
-            };
-            op_count += 1;
-            pos += 2;
-            expect_operand = true;
-            continue;
-        }
-
         if (tok.token_type == .right_paren) {
             while (op_count > 0 and op_stack[op_count - 1].tok_type != .left_paren) {
                 try popOperator(&op_stack, &op_count, &output_stack, &output_count, ast);
@@ -358,7 +334,6 @@ pub fn parseExpression(
                 .tok_type = tok.token_type,
                 .tok_index = pos,
                 .is_unary = false,
-                .is_not_in = false,
             };
             op_count += 1;
             pos += 1;
@@ -518,18 +493,6 @@ fn popOperator(
         if (output_count.* >= max_output_stack) return error.StackOverflow;
         output_stack[output_count.*] = node;
         output_count.* += 1;
-    } else if (op.tok_type == .kw_in) {
-        if (output_count.* < 2) return error.StackUnderflow;
-        output_count.* -= 1;
-        const rhs = output_stack[output_count.*];
-        output_count.* -= 1;
-        const lhs = output_stack[output_count.*];
-        const tag: NodeTag = if (op.is_not_in) .expr_not_in else .expr_in;
-        const node = ast.addNode(tag, .{ .binary = .{ .lhs = lhs, .rhs = rhs } }) catch
-            return error.AstFull;
-        if (output_count.* >= max_output_stack) return error.StackOverflow;
-        output_stack[output_count.*] = node;
-        output_count.* += 1;
     } else {
         // Binary operator.
         if (output_count.* < 2) return error.StackUnderflow;
@@ -563,6 +526,12 @@ fn isFunctionToken(tok_type: TokenType) bool {
         => true,
         else => false,
     };
+}
+
+fn isFunctionStart(tokens: *const TokenizeResult, pos: u16) bool {
+    if (pos >= tokens.count) return false;
+    const tok_type = tokens.tokens[pos].token_type;
+    return tok_type == .identifier or isFunctionToken(tok_type);
 }
 
 fn isAggregateToken(tok_type: TokenType) bool {
@@ -635,9 +604,9 @@ test "parentheses override precedence" {
     try testing.expectEqual(NodeTag.expr_binary, lhs.tag);
 }
 
-test "unary not" {
+test "unary bang" {
     var ast = Ast{};
-    const tokens = tokenizer_mod.tokenize("not true");
+    const tokens = tokenizer_mod.tokenize("!true");
     const result = try parseExpression(&ast, &tokens, 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_unary, node.tag);
@@ -674,15 +643,15 @@ test "comparison operators" {
     try testing.expectEqual(NodeTag.expr_binary, node.tag);
 }
 
-test "logical and/or" {
+test "logical &&/||" {
     var ast = Ast{};
-    // a = 1 and b = 2 or c = 3
-    // and binds tighter than or, so: (a=1 and b=2) or c=3
-    const tokens = tokenizer_mod.tokenize("a = 1 and b = 2 or c = 3");
+    // a = 1 && b = 2 || c = 3
+    // && binds tighter than ||, so: (a=1 && b=2) || c=3
+    const tokens = tokenizer_mod.tokenize("a = 1 && b = 2 || c = 3");
     const result = try parseExpression(&ast, &tokens, 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_binary, node.tag);
-    // Top should be 'or'
+    // Top should be '||'
 }
 
 test "function call" {
@@ -765,20 +734,23 @@ test "expression stops at right brace" {
     try testing.expectEqual(@as(u16, 3), result.pos);
 }
 
-test "in operator with list" {
+test "in function call with list" {
     var ast = Ast{};
-    const tokens = tokenizer_mod.tokenize("status in [1, 2, 3]");
+    const tokens = tokenizer_mod.tokenize("in(status, [1, 2, 3])");
     const result = try parseExpression(&ast, &tokens, 0);
     const node = ast.getNode(result.node);
-    try testing.expectEqual(NodeTag.expr_in, node.tag);
+    try testing.expectEqual(NodeTag.expr_function_call, node.tag);
+    try testing.expectEqual(@as(u16, 2), ast.listLen(node.data.unary));
 }
 
-test "not in operator with list" {
+test "negated in function call with list" {
     var ast = Ast{};
-    const tokens = tokenizer_mod.tokenize("status not in [1, 2, 3]");
+    const tokens = tokenizer_mod.tokenize("!in(status, [1, 2, 3])");
     const result = try parseExpression(&ast, &tokens, 0);
     const node = ast.getNode(result.node);
-    try testing.expectEqual(NodeTag.expr_not_in, node.tag);
+    try testing.expectEqual(NodeTag.expr_unary, node.tag);
+    const operand = ast.getNode(node.data.unary);
+    try testing.expectEqual(NodeTag.expr_function_call, operand.tag);
 }
 
 test "multi-arg function" {

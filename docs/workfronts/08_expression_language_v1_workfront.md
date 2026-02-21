@@ -16,11 +16,9 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - Membership is stdlib function only: `in(value, list)`.
 - Negated membership is written as `!in(value, list)`.
 - Keep query pipeline `|>` only at query/operator level in v1.
-- No backward compatibility aliases:
-  - Reject `not`, `and`, `or`
-  - Reject `notIn`, `isNotIn`
-  - Reject SQL spellings like `not in`, `is null`, `is not null`
-- Do not silently alias legacy spellings; fail closed with explicit diagnostics.
+- `and`, `or`, `not`, and `in` are not keywords; they are plain identifiers and valid as user-defined names.
+- No backward compatibility aliases for legacy textual logical/membership forms.
+- Legacy spellings (for example `a and b`, `status not in [...]`) must fail closed as invalid expression shape.
 
 ## Current Gaps Snapshot
 - Evaluator does not explicitly handle membership function semantics and `expr_parameter`/`expr_list` node semantics in row predicate evaluation paths.
@@ -66,17 +64,17 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - Parser tests cover valid symbolic forms and fail-closed invalid legacy forms.
 
 ### Tasks
-- [ ] `E01` Add tokenizer support for symbolic logical operators.
+- [x] `E01` Add tokenizer support for symbolic logical operators.
   - Accept: `!`, `&&`, `||`.
-  - Reject: `not`, `and`, `or`.
-- [ ] `E02` Remove parser support for keyword logical operators.
-  - Remove unary/binary logical parsing via `not`/`and`/`or`.
-- [ ] `E03` Remove parser support for infix membership operators.
-  - Reject `in`, `notIn`, `isNotIn` as infix forms.
+  - Ensure `not`, `and`, `or`, `in` tokenize as identifiers.
+- [x] `E02` Remove parser support for keyword logical operators.
+  - Remove unary/binary logical parsing via textual `not`/`and`/`or`; support symbolic forms only.
+- [x] `E03` Remove parser support for infix membership operators.
+  - `in` is function-form only; infix and camelCase legacy forms fail closed.
 - [ ] `E04` Parse membership only as stdlib call: `in(value, list)`.
   - Enforce argument count and argument shape at parse boundary where possible.
 - [ ] `E05` Parser regression tests for fail-closed legacy forms.
-  - `not`, `and`, `or`, `notIn`, `isNotIn`, `not in`, `is null`, `is not null`.
+  - `a and b`, `not a`, `status in [1]`, `notIn`, `isNotIn`, `not in`, `is null`, `is not null`.
 - [ ] `E06` Precedence tests for symbolic boolean logic.
   - Ensure `!` binds tighter than comparison, `&&` tighter than `||`, with explicit parentheses cases.
 
@@ -149,7 +147,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - Diagnostics are explicit, deterministic, and context-aware.
 
 ### Tasks
-- [ ] `D01` Normalize parser error messages for invalid logical/membership keyword usage.
+- [ ] `D01` Normalize parser error messages for invalid legacy logical/membership textual forms.
 - [ ] `D02` Normalize evaluator errors for null arithmetic, type mismatch, and invalid predicate result.
 - [ ] `D03` Ensure mutation-path diagnostics include precise assignment path for expression failures.
 - [ ] `D04` Add regression tests for fail-closed behavior on removed keyword forms and unsupported expression shapes.
@@ -166,5 +164,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 
 ## Implementation Log
 - `2026-02-21`: (Decision update) Language direction changed to symbolic logic (`!`, `&&`, `||`) and function-only membership (`in(value, list)`, `!in(value, list)`), with no backward compatibility aliases.
+- `2026-02-21`: (Decision update) `and`, `or`, `not`, and `in` are ordinary identifiers (not reserved words) and may be used as user-defined names.
 - `2026-02-21`: (Superseded) Earlier `notIn`-oriented `E01` implementation is superseded by the decision update above and must be replaced by new Phase 1 tasks before merge.
+- `2026-02-21`: (`E01`,`E02`,`E03`) tokenizer/parser/evaluator migrated to symbolic boolean operators and function-form membership only; textual forms now tokenize as identifiers and fail as invalid expression shapes. commit=`<pending>`. tests=`zig test src/parser/tokenizer.zig`, `zig test src/parser/expression.zig`, `zig test src/parser/parser_test.zig`, `zig build test` (1 unrelated pre-existing failure in `features.mutations.delete_test`).
 - `YYYY-MM-DD`: (task id) short note, commit hash, tests run.

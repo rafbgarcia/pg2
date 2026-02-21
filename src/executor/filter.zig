@@ -377,7 +377,7 @@ pub fn applyBinaryOp(lhs: Value, rhs: Value, op: TokenType) EvalError!Value {
     if (lhs == .null_value or rhs == .null_value) {
         return switch (op) {
             .plus, .minus, .star, .slash => error.NullArithmeticOperand,
-            .kw_and, .kw_or => error.TypeMismatch,
+            .and_and, .or_or => error.TypeMismatch,
             else => Value{ .null_value = {} },
         };
     }
@@ -393,8 +393,8 @@ pub fn applyBinaryOp(lhs: Value, rhs: Value, op: TokenType) EvalError!Value {
         .less_equal => applyComparison(lhs, rhs, .lte),
         .greater_than => applyComparison(lhs, rhs, .gt),
         .greater_equal => applyComparison(lhs, rhs, .gte),
-        .kw_and => applyLogical(lhs, rhs, .@"and"),
-        .kw_or => applyLogical(lhs, rhs, .@"or"),
+        .and_and => applyLogical(lhs, rhs, .@"and"),
+        .or_or => applyLogical(lhs, rhs, .@"or"),
         else => error.TypeMismatch,
     };
 }
@@ -658,7 +658,7 @@ pub fn applyUnaryOp(operand: Value, op: TokenType) EvalError!Value {
     if (operand == .null_value) return Value{ .null_value = {} };
 
     return switch (op) {
-        .kw_not => blk: {
+        .bang => blk: {
             if (operand != .bool) return error.TypeMismatch;
             break :blk Value{ .bool = !operand.bool };
         },
@@ -918,7 +918,7 @@ test "binary comparison" {
 
 test "logical and" {
     var tree = Ast{};
-    const source = "true and false";
+    const source = "true && false";
     const tokens = tokenizer_mod.tokenize(source);
     const lhs = try tree.addNode(.expr_literal, .{ .token = 0 });
     const rhs = try tree.addNode(.expr_literal, .{ .token = 2 });
@@ -943,7 +943,7 @@ test "logical and" {
 
 test "logical or" {
     var tree = Ast{};
-    const source = "true or false";
+    const source = "true || false";
     const tokens = tokenizer_mod.tokenize(source);
     const lhs = try tree.addNode(.expr_literal, .{ .token = 0 });
     const rhs = try tree.addNode(.expr_literal, .{ .token = 2 });
@@ -1188,7 +1188,7 @@ test "predicate wrapper — null returns error" {
 }
 
 test "unary not" {
-    const result = try applyUnaryOp(.{ .bool = true }, .kw_not);
+    const result = try applyUnaryOp(.{ .bool = true }, .bang);
     try testing.expect(!result.bool);
 }
 
