@@ -123,7 +123,7 @@ pub const FeatureEnv = struct {
         self.disk = disk_mod.SimulatedDisk.init(testing_allocator);
         errdefer self.disk.deinit();
 
-        self.backing_memory = try testing_allocator.alloc(u8, 256 * 1024 * 1024);
+        self.backing_memory = try testing_allocator.alloc(u8, 64 * 1024 * 1024);
         errdefer testing_allocator.free(self.backing_memory);
 
         self.runtime = try BootstrappedRuntime.init(
