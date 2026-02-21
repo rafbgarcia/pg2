@@ -8,6 +8,7 @@
 const std = @import("std");
 const ast_mod = @import("../parser/ast.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
+const heap_storage_mod = @import("../storage/heap.zig");
 const row_mod = @import("../storage/row.zig");
 const buffer_pool_mod = @import("../storage/buffer_pool.zig");
 const wal_mod = @import("../storage/wal.zig");
@@ -26,6 +27,7 @@ const NodeIndex = ast_mod.NodeIndex;
 const NodeTag = ast_mod.NodeTag;
 const null_node = ast_mod.null_node;
 const TokenizeResult = tokenizer_mod.TokenizeResult;
+const RowId = heap_storage_mod.RowId;
 const Value = row_mod.Value;
 const RowSchema = row_mod.RowSchema;
 const BufferPool = buffer_pool_mod.BufferPool;
@@ -264,7 +266,16 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
 
     // Check for mutations.
     if (findMutationOp(&ops, op_count)) |mut_idx| {
-        executeMutation(ctx, &result, model_id, &ops, op_count, mut_idx);
+        executeMutation(
+            ctx,
+            &result,
+            pipeline_idx,
+            model_id,
+            &ops,
+            op_count,
+            mut_idx,
+            &string_arena,
+        );
         return result;
     }
 
@@ -1886,12 +1897,15 @@ fn executeLeftJoinBounded(
 fn executeMutation(
     ctx: *const ExecContext,
     result: *QueryResult,
+    pipeline_node: NodeIndex,
     model_id: ModelId,
     ops: *const [max_operators]OpDescriptor,
     op_count: u16,
     mut_idx: u16,
+    string_arena: *scan_mod.StringArena,
 ) void {
     const mut_op = ops[mut_idx];
+    const has_projection = hasNonEmptySelectionSet(ctx.ast, pipeline_node);
     var diagnostic = mutation_mod.MutationDiagnostic{};
 
     switch (mut_op.kind) {
@@ -1913,10 +1927,31 @@ fn executeMutation(
                 return;
             };
             result.stats.rows_inserted = 1;
-            _ = row_id;
+            if (has_projection) {
+                string_arena.reset();
+                materializeRowsById(
+                    ctx,
+                    result,
+                    model_id,
+                    &[_]RowId{row_id},
+                    string_arena,
+                );
+            }
         },
         .update_op => {
             const predicate = findPredicate(ctx.ast, ops, op_count);
+            var before_rows = QueryResult.init(ctx.scratch_rows_a);
+            if (has_projection) {
+                string_arena.reset();
+                if (!materializeRowsMatchingPredicate(
+                    ctx,
+                    &before_rows,
+                    model_id,
+                    predicate,
+                    string_arena,
+                )) return;
+            }
+
             const node = ctx.ast.getNode(mut_op.node);
             const count = mutation_mod.executeUpdateWithDiagnostic(
                 ctx.catalog,
@@ -1939,9 +1974,29 @@ fn executeMutation(
                 return;
             };
             result.stats.rows_updated = count;
+            if (has_projection) {
+                string_arena.reset();
+                materializeRowsBySourceRows(
+                    ctx,
+                    result,
+                    model_id,
+                    before_rows.rows[0..before_rows.row_count],
+                    string_arena,
+                );
+            }
         },
         .delete_op => {
             const predicate = findPredicate(ctx.ast, ops, op_count);
+            if (has_projection) {
+                string_arena.reset();
+                if (!materializeRowsMatchingPredicate(
+                    ctx,
+                    result,
+                    model_id,
+                    predicate,
+                    string_arena,
+                )) return;
+            }
             const count = mutation_mod.executeDelete(
                 ctx.catalog,
                 ctx.pool,
@@ -1971,6 +2026,142 @@ fn executeMutation(
             setError(result, "unexpected mutation type");
         },
     }
+
+    if (has_projection and !result.has_error) {
+        _ = applyFlatColumnProjection(ctx, result, pipeline_node, model_id);
+    }
+}
+
+fn hasNonEmptySelectionSet(tree: *const Ast, pipeline_node: NodeIndex) bool {
+    const selection = getPipelineSelection(tree, pipeline_node) orelse return false;
+    return tree.getNode(selection).data.unary != null_node;
+}
+
+fn materializeRowsMatchingPredicate(
+    ctx: *const ExecContext,
+    out: *QueryResult,
+    model_id: ModelId,
+    predicate_node: NodeIndex,
+    string_arena: *scan_mod.StringArena,
+) bool {
+    const model = &ctx.catalog.models[model_id];
+    const scan_result = scan_mod.tableScanInto(
+        ctx.catalog,
+        ctx.pool,
+        ctx.undo_log,
+        ctx.snapshot,
+        ctx.tx_manager,
+        model_id,
+        out.rows[0..scan_mod.max_result_rows],
+        string_arena,
+    ) catch |err| {
+        setBoundaryError(
+            out,
+            "table scan failed",
+            runtime_errors.classifyScan(err),
+            err,
+        );
+        return false;
+    };
+    out.row_count = scan_result.row_count;
+
+    if (predicate_node != null_node) {
+        const schema = &model.row_schema;
+        const original_count = out.row_count;
+        var write_idx: u16 = 0;
+        var read_idx: u16 = 0;
+        while (read_idx < out.row_count) : (read_idx += 1) {
+            const row = &out.rows[read_idx];
+            const matches = filter_mod.evaluatePredicate(
+                ctx.ast,
+                ctx.tokens,
+                ctx.source,
+                predicate_node,
+                row.values[0..row.column_count],
+                schema,
+            ) catch false;
+
+            if (matches) {
+                if (write_idx != read_idx) out.rows[write_idx] = out.rows[read_idx];
+                write_idx += 1;
+            }
+        }
+        out.row_count = write_idx;
+        std.debug.assert(out.row_count <= original_count);
+    }
+    return true;
+}
+
+fn materializeRowsById(
+    ctx: *const ExecContext,
+    out: *QueryResult,
+    model_id: ModelId,
+    row_ids: []const RowId,
+    string_arena: *scan_mod.StringArena,
+) void {
+    var scanned_rows = QueryResult.init(ctx.scratch_rows_b);
+    if (!materializeRowsMatchingPredicate(
+        ctx,
+        &scanned_rows,
+        model_id,
+        null_node,
+        string_arena,
+    )) {
+        out.has_error = scanned_rows.has_error;
+        out.error_message = scanned_rows.error_message;
+        out.row_count = 0;
+        return;
+    }
+
+    var write_idx: u16 = 0;
+    for (row_ids) |row_id| {
+        var read_idx: u16 = 0;
+        while (read_idx < scanned_rows.row_count) : (read_idx += 1) {
+            const candidate = scanned_rows.rows[read_idx];
+            if (candidate.row_id.page_id != row_id.page_id) continue;
+            if (candidate.row_id.slot != row_id.slot) continue;
+            out.rows[write_idx] = candidate;
+            write_idx += 1;
+            break;
+        }
+    }
+    out.row_count = write_idx;
+}
+
+fn materializeRowsBySourceRows(
+    ctx: *const ExecContext,
+    out: *QueryResult,
+    model_id: ModelId,
+    source_rows: []const ResultRow,
+    string_arena: *scan_mod.StringArena,
+) void {
+    var scanned_rows = QueryResult.init(ctx.scratch_rows_b);
+    if (!materializeRowsMatchingPredicate(
+        ctx,
+        &scanned_rows,
+        model_id,
+        null_node,
+        string_arena,
+    )) {
+        out.has_error = scanned_rows.has_error;
+        out.error_message = scanned_rows.error_message;
+        out.row_count = 0;
+        return;
+    }
+
+    var write_idx: u16 = 0;
+    for (source_rows) |source_row| {
+        var read_idx: u16 = 0;
+        while (read_idx < scanned_rows.row_count) : (read_idx += 1) {
+            const candidate = scanned_rows.rows[read_idx];
+            if (candidate.row_id.page_id != source_row.row_id.page_id) continue;
+            if (candidate.row_id.slot != source_row.row_id.slot) continue;
+            out.rows[write_idx] = candidate;
+            write_idx += 1;
+            break;
+        }
+    }
+    out.row_count = write_idx;
 }
 
 fn setMutationBoundaryError(

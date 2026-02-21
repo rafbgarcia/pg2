@@ -85,6 +85,29 @@ test "feature insert returns explicit insert count via session path" {
     );
 }
 
+test "feature insert returns selected fields via session path" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\  field(active, bool, notNull)
+        \\}
+    );
+
+    const result = try executor.run(
+        "User |> insert(id = 1, name = \"Alice\", active = true) { id name }",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=1 inserted_rows=1 updated_rows=0 deleted_rows=0\n1,Alice\n",
+        result,
+    );
+}
+
 test "feature insert high-volume sequential requests remain queryable via session path" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
