@@ -26,7 +26,7 @@ test "feature delete removes row via session path" {
         result,
     );
 
-    result = try executor.run("User |> where(id = 1) |> delete {}");
+    result = try executor.run("User |> where(id == 1) |> delete {}");
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=1\n",
         result,
@@ -61,13 +61,13 @@ test "feature delete with no matching rows reports zero deletions via session pa
         result,
     );
 
-    result = try executor.run("User |> where(id = 999) |> delete {}");
+    result = try executor.run("User |> where(id == 999) |> delete {}");
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
         result,
     );
 
-    result = try executor.run("User |> where(id = 1) { id name active }");
+    result = try executor.run("User |> where(id == 1) { id name active }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,Alice,true\n",
         result,
@@ -97,7 +97,7 @@ test "feature delete returns pre-delete selected fields via session path" {
     );
 
     result = try executor.run(
-        "User |> where(id = 1) |> delete { id name active }",
+        "User |> where(id == 1) |> delete { id name active }",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=1\n1,Alice,true\n",
@@ -139,17 +139,17 @@ test "feature delete failure abort keeps previously deleted row visible via sess
         result,
     );
 
-    result = try executor.run("User |> where(active = true) |> delete {}");
+    result = try executor.run("User |> where(active == true) |> delete {}");
     try std.testing.expect(std.mem.startsWith(u8, result, "ERR query: "));
     try std.testing.expect(std.mem.indexOf(u8, result, "code=UndoLogFull") != null);
 
-    result = try executor.run("User |> where(id = 1) { id name active }");
+    result = try executor.run("User |> where(id == 1) { id name active }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,A,true\n",
         result,
     );
 
-    result = try executor.run("User |> where(id = 2) { id name active }");
+    result = try executor.run("User |> where(id == 2) { id name active }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n2,B,true\n",
         result,
@@ -198,20 +198,20 @@ test "feature delete returning delivery failure aborts mutation via session path
     }
 
     const overflow_result = try executor.run(
-        "User |> where(active = true) |> delete { id }",
+        "User |> where(active == true) |> delete { id }",
     );
     try std.testing.expect(std.mem.startsWith(u8, overflow_result, "ERR query: "));
     try std.testing.expect(
         std.mem.indexOf(u8, overflow_result, "code=ReturningBufferExhausted") != null,
     );
 
-    var result = try executor.run("User |> where(id = 1) { id active }");
+    var result = try executor.run("User |> where(id == 1) { id active }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,true\n",
         result,
     );
 
-    result = try executor.run("User |> where(id = 4096) { id active }");
+    result = try executor.run("User |> where(id == 4096) { id active }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n4096,true\n",
         result,

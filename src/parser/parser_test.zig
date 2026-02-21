@@ -26,7 +26,7 @@ test "parse simple query" {
 
 test "parse pipeline query" {
     const source =
-        "User |> where(active = true) |> sort(name asc) |> limit(10) { id email }";
+        "User |> where(active == true) |> sort(name asc) |> limit(10) { id email }";
     const tokens = tokenizer_mod.tokenize(source);
     const result = parse(&tokens, source);
     try testing.expect(!result.has_error);
@@ -72,7 +72,7 @@ test "parse schema field default accepts comma-separated literal" {
 }
 
 test "parse let binding" {
-    const source = "let active_users = User |> where(active = true) { id }";
+    const source = "let active_users = User |> where(active == true) { id }";
     const tokens = tokenizer_mod.tokenize(source);
     const result = parse(&tokens, source);
     try testing.expect(!result.has_error);
@@ -95,7 +95,7 @@ test "parse mutation insert" {
 }
 
 test "parse mutation delete" {
-    const source = "User |> where(id = 1) |> delete";
+    const source = "User |> where(id == 1) |> delete";
     const tokens = tokenizer_mod.tokenize(source);
     const result = parse(&tokens, source);
     try testing.expect(!result.has_error);
@@ -110,7 +110,7 @@ test "parse nested selection" {
 
 test "parse nested selection with pipeline" {
     const source =
-        "User { id posts |> where(published = true) { id title } }";
+        "User { id posts |> where(published == true) { id title } }";
     const tokens = tokenizer_mod.tokenize(source);
     const result = parse(&tokens, source);
     try testing.expect(!result.has_error);
@@ -146,7 +146,7 @@ test "parse where membership call rejects non-list second argument" {
 }
 
 test "parse where symbolic boolean precedence with explicit parentheses" {
-    const source = "User |> where((a = 1 || b = 2) && !archived) { id }";
+    const source = "User |> where((a == 1 || b == 2) && !archived) { id }";
     const tokens = tokenizer_mod.tokenize(source);
     const result = parse(&tokens, source);
     try testing.expect(!result.has_error);
@@ -181,6 +181,28 @@ test "parse where rejects legacy textual logical forms" {
     try testing.expect(not_result.has_error);
 }
 
+test "parse rejects single equals in expression contexts" {
+    const where_source = "User |> where(id = 1) { id }";
+    const where_tokens = tokenizer_mod.tokenize(where_source);
+    const where_result = parse(&where_tokens, where_source);
+    try testing.expect(where_result.has_error);
+
+    const select_source = "User { id is_admin: active = true }";
+    const select_tokens = tokenizer_mod.tokenize(select_source);
+    const select_result = parse(&select_tokens, select_source);
+    try testing.expect(select_result.has_error);
+
+    const sort_source = "User |> sort(id = 1 asc) { id }";
+    const sort_tokens = tokenizer_mod.tokenize(sort_source);
+    const sort_result = parse(&sort_tokens, sort_source);
+    try testing.expect(sort_result.has_error);
+
+    const update_rhs_source = "User |> update(name = id = 1) { id }";
+    const update_rhs_tokens = tokenizer_mod.tokenize(update_rhs_source);
+    const update_rhs_result = parse(&update_rhs_tokens, update_rhs_source);
+    try testing.expect(update_rhs_result.has_error);
+}
+
 test "parse error on invalid syntax" {
     const source = "|> where";
     const tokens = tokenizer_mod.tokenize(source);
@@ -197,7 +219,7 @@ test "parse sort with multiple keys" {
 
 test "parse update mutation" {
     const source =
-        \\User |> where(id = 1) |> update(name = "Bob") { id name }
+        \\User |> where(id == 1) |> update(name = "Bob") { id name }
     ;
     const tokens = tokenizer_mod.tokenize(source);
     const result = parse(&tokens, source);
@@ -206,7 +228,7 @@ test "parse update mutation" {
 
 test "parse contextual keyword identifiers in query positions" {
     const source =
-        "User |> where(offset = 1) |> sort(offset desc) |> update(offset = offset + 1) { offset }";
+        "User |> where(offset == 1) |> sort(offset desc) |> update(offset = offset + 1) { offset }";
     const tokens = tokenizer_mod.tokenize(source);
     const result = parse(&tokens, source);
     try testing.expect(!result.has_error);
@@ -217,7 +239,7 @@ test "parse scope in schema" {
         \\User {
         \\  field(id, i64, notNull, primaryKey)
         \\  field(active, bool, nullable)
-        \\  scope active |> where(active = true)
+        \\  scope active |> where(active == true)
         \\}
     ;
     const tokens = tokenizer_mod.tokenize(source);

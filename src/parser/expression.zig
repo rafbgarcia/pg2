@@ -39,7 +39,7 @@ fn precedence(tok_type: TokenType) u8 {
         .bang => 1,
         .star, .slash => 2,
         .plus, .minus => 3,
-        .equal, .not_equal, .less_than, .greater_than, .less_equal, .greater_equal => 4,
+        .equal_equal, .not_equal, .less_than, .greater_than, .less_equal, .greater_equal => 4,
         .and_and => 5,
         .or_or => 6,
         else => 255,
@@ -56,7 +56,7 @@ fn isOperator(tok_type: TokenType) bool {
         .minus,
         .star,
         .slash,
-        .equal,
+        .equal_equal,
         .not_equal,
         .less_than,
         .greater_than,
@@ -662,7 +662,7 @@ test "unary minus parses as unary expression" {
 
 test "contextual keyword parses as column reference in expression" {
     var ast = Ast{};
-    const tokens = tokenizer_mod.tokenize("offset = 1");
+    const tokens = tokenizer_mod.tokenize("offset == 1");
     const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_binary, node.tag);
@@ -672,7 +672,7 @@ test "contextual keyword parses as column reference in expression" {
 
 test "comparison operators" {
     var ast = Ast{};
-    const tokens = tokenizer_mod.tokenize("x = 5");
+    const tokens = tokenizer_mod.tokenize("x == 5");
     const result = try parseExpression(&ast, &tokens, "", 0);
     const node = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_binary, node.tag);
@@ -680,9 +680,9 @@ test "comparison operators" {
 
 test "logical &&/||" {
     var ast = Ast{};
-    // a = 1 && b = 2 || c = 3
-    // && binds tighter than ||, so: (a=1 && b=2) || c=3
-    const tokens = tokenizer_mod.tokenize("a = 1 && b = 2 || c = 3");
+    // a == 1 && b == 2 || c == 3
+    // && binds tighter than ||, so: (a==1 && b==2) || c==3
+    const tokens = tokenizer_mod.tokenize("a == 1 && b == 2 || c == 3");
     const result = try parseExpression(&ast, &tokens, "", 0);
     const root = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_binary, root.tag);
@@ -692,18 +692,18 @@ test "logical &&/||" {
     try testing.expectEqual(NodeTag.expr_binary, lhs.tag);
     try testing.expectEqual(TokenType.and_and, tokens.tokens[lhs.extra].token_type);
 
-    try expectBinaryOperator(&ast, &tokens, lhs.data.binary.lhs, .equal);
-    try expectBinaryOperator(&ast, &tokens, lhs.data.binary.rhs, .equal);
-    try expectBinaryOperator(&ast, &tokens, root.data.binary.rhs, .equal);
+    try expectBinaryOperator(&ast, &tokens, lhs.data.binary.lhs, .equal_equal);
+    try expectBinaryOperator(&ast, &tokens, lhs.data.binary.rhs, .equal_equal);
+    try expectBinaryOperator(&ast, &tokens, root.data.binary.rhs, .equal_equal);
 }
 
 test "precedence: unary bang binds tighter than comparison" {
     var ast = Ast{};
-    const tokens = tokenizer_mod.tokenize("!active = enabled");
+    const tokens = tokenizer_mod.tokenize("!active == enabled");
     const result = try parseExpression(&ast, &tokens, "", 0);
     const root = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_binary, root.tag);
-    try testing.expectEqual(TokenType.equal, tokens.tokens[root.extra].token_type);
+    try testing.expectEqual(TokenType.equal_equal, tokens.tokens[root.extra].token_type);
 
     const lhs = ast.getNode(root.data.binary.lhs);
     try testing.expectEqual(NodeTag.expr_unary, lhs.tag);
@@ -715,7 +715,7 @@ test "precedence: unary bang binds tighter than comparison" {
 
 test "parentheses override && and || precedence" {
     var ast = Ast{};
-    const tokens = tokenizer_mod.tokenize("(a = 1 || b = 2) && c = 3");
+    const tokens = tokenizer_mod.tokenize("(a == 1 || b == 2) && c == 3");
     const result = try parseExpression(&ast, &tokens, "", 0);
     const root = ast.getNode(result.node);
     try testing.expectEqual(NodeTag.expr_binary, root.tag);
@@ -725,9 +725,9 @@ test "parentheses override && and || precedence" {
     try testing.expectEqual(NodeTag.expr_binary, lhs.tag);
     try testing.expectEqual(TokenType.or_or, tokens.tokens[lhs.extra].token_type);
 
-    try expectBinaryOperator(&ast, &tokens, lhs.data.binary.lhs, .equal);
-    try expectBinaryOperator(&ast, &tokens, lhs.data.binary.rhs, .equal);
-    try expectBinaryOperator(&ast, &tokens, root.data.binary.rhs, .equal);
+    try expectBinaryOperator(&ast, &tokens, lhs.data.binary.lhs, .equal_equal);
+    try expectBinaryOperator(&ast, &tokens, lhs.data.binary.rhs, .equal_equal);
+    try expectBinaryOperator(&ast, &tokens, root.data.binary.rhs, .equal_equal);
 }
 
 test "function call" {
@@ -797,15 +797,15 @@ test "nested expression" {
 
 test "expression stops at pipe arrow" {
     var ast = Ast{};
-    const tokens = tokenizer_mod.tokenize("x = 5 |> sort");
+    const tokens = tokenizer_mod.tokenize("x == 5 |> sort");
     const result = try parseExpression(&ast, &tokens, "", 0);
     // Should stop before |>
-    try testing.expectEqual(@as(u16, 3), result.pos); // consumed "x = 5" (tokens 0,1,2), stopped at |> (token 3)
+    try testing.expectEqual(@as(u16, 3), result.pos); // consumed "x == 5" (tokens 0,1,2), stopped at |> (token 3)
 }
 
 test "expression stops at right brace" {
     var ast = Ast{};
-    const tokens = tokenizer_mod.tokenize("x = 5 }");
+    const tokens = tokenizer_mod.tokenize("x == 5 }");
     const result = try parseExpression(&ast, &tokens, "", 0);
     try testing.expectEqual(@as(u16, 3), result.pos);
 }

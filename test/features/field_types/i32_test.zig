@@ -24,13 +24,13 @@ test "feature i32 fields preserve 32-bit signed values across insert and update"
         result,
     );
 
-    result = try executor.run("TelemetryCounter |> where(id = 1) |> update(delta = 100) {}");
+    result = try executor.run("TelemetryCounter |> where(id == 1) |> update(delta = 100) {}");
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=1 deleted_rows=0\n",
         result,
     );
 
-    result = try executor.run("TelemetryCounter |> where(id = 1) { id delta }");
+    result = try executor.run("TelemetryCounter |> where(id == 1) { id delta }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,100\n",
         result,

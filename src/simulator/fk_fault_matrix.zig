@@ -251,7 +251,7 @@ fn runFkRestrictCrashRestart(seed: u64) !ScenarioOutcome {
             &snap,
             &tm,
             models.user,
-            "User |> where(id = 1) |> delete",
+            "User |> where(id == 1) |> delete",
         );
         try std.testing.expectError(error.ReferentialIntegrityViolation, delete_result);
         before_crash_violation = 1;
@@ -293,7 +293,7 @@ fn runFkRestrictCrashRestart(seed: u64) !ScenarioOutcome {
             &snap_delete,
             &tm,
             models.user,
-            "User |> where(id = 1) |> delete",
+            "User |> where(id == 1) |> delete",
         );
         try std.testing.expectError(error.ReferentialIntegrityViolation, delete_result);
         after_crash_violation = 1;
@@ -395,7 +395,7 @@ fn runFkCascadeCrashRestart(seed: u64) !ScenarioOutcome {
             &snap_delete,
             &tm,
             models.user,
-            "User |> where(id = 1) |> delete",
+            "User |> where(id == 1) |> delete",
         );
         try std.testing.expectEqual(@as(u32, 1), deleted_before_crash);
         try tm.commit(tx_delete);
@@ -525,7 +525,7 @@ fn runFkUpdateSetNullCrashRestart(seed: u64) !ScenarioOutcome {
             &snap_update,
             &tm,
             models.user,
-            "User |> where(id = 1) |> update(id = 2)",
+            "User |> where(id == 1) |> update(id = 2)",
         );
         try std.testing.expectEqual(@as(u32, 1), updated_before_crash);
         try tm.commit(tx_update);

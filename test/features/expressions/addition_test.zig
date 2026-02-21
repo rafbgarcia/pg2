@@ -24,14 +24,14 @@ test "feature update supports addition on representative numeric types" {
     _ = try executor.run("Counter |> insert(id = 1, v_i64 = 41, v_u64 = 9, v_f64 = 3.5) {}");
 
     var result = try executor.run(
-        "Counter |> where(id = 1) |> update(v_i64 = v_i64 + 1, v_u64 = v_u64 + 2, v_f64 = v_f64 + 0.25) {}",
+        "Counter |> where(id == 1) |> update(v_i64 = v_i64 + 1, v_u64 = v_u64 + 2, v_f64 = v_f64 + 0.25) {}",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=1 deleted_rows=0\n",
         result,
     );
 
-    result = try executor.run("Counter |> where(id = 1) { id v_i64 v_u64 v_f64 }");
+    result = try executor.run("Counter |> where(id == 1) { id v_i64 v_u64 v_f64 }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,42,11,3.75\n",
         result,
@@ -53,7 +53,7 @@ test "feature update addition fails closed on type mismatch" {
 
     _ = try executor.run("CounterMismatch |> insert(id = 1, value = 41) {}");
     const result = try executor.run(
-        "CounterMismatch |> where(id = 1) |> update(value = value + \"1\") {}",
+        "CounterMismatch |> where(id == 1) |> update(value = value + \"1\") {}",
     );
     try std.testing.expectEqualStrings(
         "ERR query: update failed; class=fatal; code=TypeMismatch\n",
@@ -76,7 +76,7 @@ test "feature update addition fails closed on overflow for constrained integer t
 
     _ = try executor.run("CounterOverflow |> insert(id = 1, value = 255) {}");
     const result = try executor.run(
-        "CounterOverflow |> where(id = 1) |> update(value = value + 1) {}",
+        "CounterOverflow |> where(id == 1) |> update(value = value + 1) {}",
     );
 
     try expectContains(result, "ERR query: phase=mutation code=IntegerOutOfRange");
@@ -99,7 +99,7 @@ test "feature update addition fails closed on null arithmetic operand" {
 
     _ = try executor.run("CounterNull |> insert(id = 1, value = null) {}");
     const result = try executor.run(
-        "CounterNull |> where(id = 1) |> update(value = value + 1) {}",
+        "CounterNull |> where(id == 1) |> update(value = value + 1) {}",
     );
 
     try expectContains(result, "ERR query: phase=mutation code=NullArithmeticOperand");

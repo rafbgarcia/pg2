@@ -29,7 +29,7 @@ test "feature i64 fields preserve large integer values across insert and update"
     );
 
     result = try executor.run(
-        "LedgerEntry |> where(id = 1) |> update(balance_cents = 1250000000000) {}",
+        "LedgerEntry |> where(id == 1) |> update(balance_cents = 1250000000000) {}",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=1 deleted_rows=0\n",
@@ -37,7 +37,7 @@ test "feature i64 fields preserve large integer values across insert and update"
     );
 
     result = try executor.run(
-        "LedgerEntry |> where(id = 1) { id balance_cents }",
+        "LedgerEntry |> where(id == 1) { id balance_cents }",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,1250000000000\n",

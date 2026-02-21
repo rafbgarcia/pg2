@@ -99,6 +99,7 @@ pub const TokenType = enum(u8) {
 
     // Operators
     pipe_arrow, // |>
+    equal_equal, // ==
     equal, // =
     not_equal, // !=
     less_than, // <
@@ -260,6 +261,11 @@ pub fn tokenize(source: []const u8) TokenizeResult {
             }
             if (std.mem.eql(u8, two, "!=")) {
                 addToken(&result, .not_equal, start, 2, line);
+                pos += 2;
+                continue;
+            }
+            if (std.mem.eql(u8, two, "==")) {
+                addToken(&result, .equal_equal, start, 2, line);
                 pos += 2;
                 continue;
             }
@@ -536,22 +542,23 @@ test "parameter token" {
 }
 
 test "operators" {
-    const source = "|> = != <= >= < > + - * / ! && ||";
+    const source = "|> == = != <= >= < > + - * / ! && ||";
     const result = tokenize(source);
     try testing.expectEqual(TokenType.pipe_arrow, result.tokens[0].token_type);
-    try testing.expectEqual(TokenType.equal, result.tokens[1].token_type);
-    try testing.expectEqual(TokenType.not_equal, result.tokens[2].token_type);
-    try testing.expectEqual(TokenType.less_equal, result.tokens[3].token_type);
-    try testing.expectEqual(TokenType.greater_equal, result.tokens[4].token_type);
-    try testing.expectEqual(TokenType.less_than, result.tokens[5].token_type);
-    try testing.expectEqual(TokenType.greater_than, result.tokens[6].token_type);
-    try testing.expectEqual(TokenType.plus, result.tokens[7].token_type);
-    try testing.expectEqual(TokenType.minus, result.tokens[8].token_type);
-    try testing.expectEqual(TokenType.star, result.tokens[9].token_type);
-    try testing.expectEqual(TokenType.slash, result.tokens[10].token_type);
-    try testing.expectEqual(TokenType.bang, result.tokens[11].token_type);
-    try testing.expectEqual(TokenType.and_and, result.tokens[12].token_type);
-    try testing.expectEqual(TokenType.or_or, result.tokens[13].token_type);
+    try testing.expectEqual(TokenType.equal_equal, result.tokens[1].token_type);
+    try testing.expectEqual(TokenType.equal, result.tokens[2].token_type);
+    try testing.expectEqual(TokenType.not_equal, result.tokens[3].token_type);
+    try testing.expectEqual(TokenType.less_equal, result.tokens[4].token_type);
+    try testing.expectEqual(TokenType.greater_equal, result.tokens[5].token_type);
+    try testing.expectEqual(TokenType.less_than, result.tokens[6].token_type);
+    try testing.expectEqual(TokenType.greater_than, result.tokens[7].token_type);
+    try testing.expectEqual(TokenType.plus, result.tokens[8].token_type);
+    try testing.expectEqual(TokenType.minus, result.tokens[9].token_type);
+    try testing.expectEqual(TokenType.star, result.tokens[10].token_type);
+    try testing.expectEqual(TokenType.slash, result.tokens[11].token_type);
+    try testing.expectEqual(TokenType.bang, result.tokens[12].token_type);
+    try testing.expectEqual(TokenType.and_and, result.tokens[13].token_type);
+    try testing.expectEqual(TokenType.or_or, result.tokens[14].token_type);
 }
 
 test "punctuation" {
@@ -576,7 +583,7 @@ test "comments are skipped" {
 }
 
 test "multiline tokenization" {
-    const source = "User\n  |> where(active = true)";
+    const source = "User\n  |> where(active == true)";
     const result = tokenize(source);
     try testing.expectEqual(@as(u16, 1), result.tokens[0].line);
     // |> is on line 2
@@ -629,7 +636,7 @@ test "dot operator" {
 }
 
 test "full pipeline tokenizes correctly" {
-    const source = "User |> where(active = true) |> sort(name asc) |> limit(10) { id email }";
+    const source = "User |> where(active == true) |> sort(name asc) |> limit(10) { id email }";
     const result = tokenize(source);
     try testing.expect(!result.has_error);
     // User, |>, where, (, active, =, true, ), |>, sort, (, name, asc, ), |>, limit, (, 10, ), {, id, email, }, EOF = 24

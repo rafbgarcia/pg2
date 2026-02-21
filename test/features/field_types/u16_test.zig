@@ -24,13 +24,13 @@ test "feature u16 fields preserve 16-bit unsigned values across insert and updat
         result,
     );
 
-    result = try executor.run("OrderStats |> where(id = 1) |> update(daily_orders = 12345) {}");
+    result = try executor.run("OrderStats |> where(id == 1) |> update(daily_orders = 12345) {}");
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=1 deleted_rows=0\n",
         result,
     );
 
-    result = try executor.run("OrderStats |> where(id = 1) { id daily_orders }");
+    result = try executor.run("OrderStats |> where(id == 1) { id daily_orders }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,12345\n",
         result,

@@ -27,7 +27,7 @@ test "internal integer matrix insert accepts mixed boundary values in one statem
     );
 
     const result = try executor.run(
-        "IntegerMatrix |> where(id = 1) { id v_i8 v_i16 v_i32 v_i64 v_u8 v_u16 v_u32 v_u64 }",
+        "IntegerMatrix |> where(id == 1) { id v_i8 v_i16 v_i32 v_i64 v_u8 v_u16 v_u32 v_u64 }",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n" ++

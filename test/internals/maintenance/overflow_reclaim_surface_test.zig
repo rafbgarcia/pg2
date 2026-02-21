@@ -32,12 +32,12 @@ test "internal overflow delete drains reclaim queue deterministically" {
     );
     _ = try executor.run(insert_req);
 
-    var result = try executor.run("User |> where(id = 1) |> delete {}");
+    var result = try executor.run("User |> where(id == 1) |> delete {}");
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=1\n",
         result,
     );
-    result = try executor.run("User |> where(id = 1) { id name }");
+    result = try executor.run("User |> where(id == 1) { id name }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
         result,
@@ -83,7 +83,7 @@ test "internal inspect exposes overflow reclaim backlog and throughput counters"
     var update_req_buf: [3000]u8 = undefined;
     const update_req = try std.fmt.bufPrint(
         update_req_buf[0..],
-        "User |> where(id = 1) |> update(name = \"{s}\", bio = \"{s}\") {{}}",
+        "User |> where(id == 1) |> update(name = \"{s}\", bio = \"{s}\") {{}}",
         .{ long_name_b[0..], long_bio_b[0..] },
     );
     result = try executor.run(update_req);

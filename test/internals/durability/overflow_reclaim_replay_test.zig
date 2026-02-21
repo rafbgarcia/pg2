@@ -43,7 +43,7 @@ test "internal overflow reclaim WAL replay restores page state after crash and i
     // Persist overflow chain pages before delete so replay must reclaim them.
     try env.runtime.pool.flushAll();
 
-    result = try executor.run("User |> where(id = 1) |> delete {}");
+    result = try executor.run("User |> where(id == 1) |> delete {}");
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=1\n",
         result,

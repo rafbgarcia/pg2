@@ -387,7 +387,7 @@ pub fn applyBinaryOp(lhs: Value, rhs: Value, op: TokenType) EvalError!Value {
         .minus => applyArithmetic(lhs, rhs, .sub),
         .star => applyArithmetic(lhs, rhs, .mul),
         .slash => applyArithmetic(lhs, rhs, .div),
-        .equal => applyComparison(lhs, rhs, .eq),
+        .equal_equal => applyComparison(lhs, rhs, .eq),
         .not_equal => applyComparison(lhs, rhs, .neq),
         .less_than => applyComparison(lhs, rhs, .lt),
         .less_equal => applyComparison(lhs, rhs, .lte),
@@ -893,7 +893,7 @@ test "binary addition" {
 
 test "binary comparison" {
     var tree = Ast{};
-    const source = "5 = 5";
+    const source = "5 == 5";
     const tokens = tokenizer_mod.tokenize(source);
     const lhs = try tree.addNode(.expr_literal, .{ .token = 0 });
     const rhs = try tree.addNode(.expr_literal, .{ .token = 2 });
@@ -1223,7 +1223,7 @@ test "string comparison" {
     const result = try applyBinaryOp(
         .{ .string = "abc" },
         .{ .string = "abc" },
-        .equal,
+        .equal_equal,
     );
     try testing.expect(result.bool);
 }

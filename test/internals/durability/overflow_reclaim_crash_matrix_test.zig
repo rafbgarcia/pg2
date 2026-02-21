@@ -95,7 +95,7 @@ fn runCrashScenario(crash_point: CrashPoint) !ScenarioOutcome {
     var update_buf: [3000]u8 = undefined;
     const update_req = try std.fmt.bufPrint(
         update_buf[0..],
-        "User |> where(id = 1) |> update(name = \"{s}\", bio = \"{s}\") {{}}",
+        "User |> where(id == 1) |> update(name = \"{s}\", bio = \"{s}\") {{}}",
         .{ name_b[0..], bio_b[0..] },
     );
     result = try executor.run(update_req);
@@ -266,7 +266,7 @@ test "internal crash matrix: repeated replay cycles remain idempotent after dura
     var update_buf: [3000]u8 = undefined;
     const update_req = try std.fmt.bufPrint(
         update_buf[0..],
-        "User |> where(id = 1) |> update(name = \"{s}\", bio = \"{s}\") {{}}",
+        "User |> where(id == 1) |> update(name = \"{s}\", bio = \"{s}\") {{}}",
         .{ name_b[0..], bio_b[0..] },
     );
     result = try executor.run(update_req);

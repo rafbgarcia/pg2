@@ -46,7 +46,7 @@ test "internal overflow multi-chain unlink drains one committed chain per succes
     var update_req_buf: [3000]u8 = undefined;
     const update_req = try std.fmt.bufPrint(
         update_req_buf[0..],
-        "User |> where(id = 1) |> update(name = \"{s}\", bio = \"{s}\") {{}}",
+        "User |> where(id == 1) |> update(name = \"{s}\", bio = \"{s}\") {{}}",
         .{ long_name_b[0..], long_bio_b[0..] },
     );
     result = try executor.run(update_req);

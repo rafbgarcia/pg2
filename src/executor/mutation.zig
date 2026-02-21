@@ -2600,7 +2600,7 @@ test "delete removes row" {
         ins.data.unary,
     );
 
-    const src2 = "User |> where(id = 1) |> delete";
+    const src2 = "User |> where(id == 1) |> delete";
     const tok2 = tokenizer_mod.tokenize(src2);
     const p2 = parser_mod.parse(&tok2, src2);
     const r2 = p2.ast.getNode(p2.ast.root);
@@ -2681,7 +2681,7 @@ test "delete updates catalog stats" {
         env.catalog.models[env.model_id].row_count,
     );
 
-    const src3 = "User |> where(id = 1) |> delete";
+    const src3 = "User |> where(id == 1) |> delete";
     const tok3 = tokenizer_mod.tokenize(src3);
     const p3 = parser_mod.parse(&tok3, src3);
     const r3 = p3.ast.getNode(p3.ast.root);
@@ -2738,7 +2738,7 @@ test "update modifies row" {
         ins1.data.unary,
     );
 
-    const src2 = "User |> where(id = 1) |> update(name = \"Bob\")";
+    const src2 = "User |> where(id == 1) |> update(name = \"Bob\")";
     const tok2 = tokenizer_mod.tokenize(src2);
     const p2 = parser_mod.parse(&tok2, src2);
     const r2 = p2.ast.getNode(p2.ast.root);
@@ -2817,7 +2817,7 @@ test "update spills oversized string and read resolves overflow payload" {
     var src2_buf: [1500]u8 = undefined;
     const src2 = try std.fmt.bufPrint(
         src2_buf[0..],
-        "User |> where(id = 1) |> update(name = \"{s}\")",
+        "User |> where(id == 1) |> update(name = \"{s}\")",
         .{long_name[0..]},
     );
     const tok2 = tokenizer_mod.tokenize(src2);
@@ -2900,7 +2900,7 @@ test "overflow WAL lifecycle is deterministic for replace path" {
     var update_src_buf: [1600]u8 = undefined;
     const update_src = try std.fmt.bufPrint(
         update_src_buf[0..],
-        "User |> where(id = 1) |> update(name = \"{s}\")",
+        "User |> where(id == 1) |> update(name = \"{s}\")",
         .{second_name[0..]},
     );
     const update_tok = tokenizer_mod.tokenize(update_src);
@@ -3014,7 +3014,7 @@ test "overflow WAL lifecycle includes unlink and reclaim on delete" {
         insert_op.data.unary,
     );
 
-    const delete_src = "User |> where(id = 1) |> delete";
+    const delete_src = "User |> where(id == 1) |> delete";
     const delete_tok = tokenizer_mod.tokenize(delete_src);
     const delete_parsed = parser_mod.parse(&delete_tok, delete_src);
     const delete_root = delete_parsed.ast.getNode(delete_parsed.ast.root);
@@ -3108,7 +3108,7 @@ test "overflow lifecycle WAL records survive crash and restart recovery" {
     var update_src_buf: [1600]u8 = undefined;
     const update_src = try std.fmt.bufPrint(
         update_src_buf[0..],
-        "User |> where(id = 1) |> update(name = \"{s}\")",
+        "User |> where(id == 1) |> update(name = \"{s}\")",
         .{name_b[0..]},
     );
     const update_tok = tokenizer_mod.tokenize(update_src);
@@ -3134,7 +3134,7 @@ test "overflow lifecycle WAL records survive crash and restart recovery" {
         testing.allocator,
     );
 
-    const delete_src = "User |> where(id = 1) |> delete";
+    const delete_src = "User |> where(id == 1) |> delete";
     const delete_tok = tokenizer_mod.tokenize(delete_src);
     const delete_parsed = parser_mod.parse(&delete_tok, delete_src);
     const delete_root = delete_parsed.ast.getNode(delete_parsed.ast.root);
@@ -3359,7 +3359,7 @@ test "update pushes undo entry" {
 
     try testing.expectEqual(@as(usize, 0), env.undo_log.len());
 
-    const src2 = "User |> where(id = 1) |> update(name = \"Bob\")";
+    const src2 = "User |> where(id == 1) |> update(name = \"Bob\")";
     const tok2 = tokenizer_mod.tokenize(src2);
     const p2 = parser_mod.parse(&tok2, src2);
     const r2 = p2.ast.getNode(p2.ast.root);
@@ -3542,7 +3542,7 @@ test "delete restrict blocks parent delete when child references exist" {
         post_insert_op.data.unary,
     );
 
-    const delete_src = "User |> where(id = 1) |> delete";
+    const delete_src = "User |> where(id == 1) |> delete";
     const delete_tok = tokenizer_mod.tokenize(delete_src);
     const delete_parsed = parser_mod.parse(&delete_tok, delete_src);
     const delete_root = delete_parsed.ast.getNode(delete_parsed.ast.root);
@@ -3615,7 +3615,7 @@ test "delete cascade removes referencing child rows" {
         post_insert_op.data.unary,
     );
 
-    const delete_src = "User |> where(id = 1) |> delete";
+    const delete_src = "User |> where(id == 1) |> delete";
     const delete_tok = tokenizer_mod.tokenize(delete_src);
     const delete_parsed = parser_mod.parse(&delete_tok, delete_src);
     const delete_root = delete_parsed.ast.getNode(delete_parsed.ast.root);
@@ -3697,7 +3697,7 @@ test "update restrict blocks parent key update when child references exist" {
         post_insert_op.data.unary,
     );
 
-    const update_src = "User |> where(id = 1) |> update(id = 2)";
+    const update_src = "User |> where(id == 1) |> update(id = 2)";
     const update_tok = tokenizer_mod.tokenize(update_src);
     const update_parsed = parser_mod.parse(&update_tok, update_src);
     const update_root = update_parsed.ast.getNode(update_parsed.ast.root);
@@ -3772,7 +3772,7 @@ test "update cascade rewrites child foreign keys" {
         post_insert_op.data.unary,
     );
 
-    const update_src = "User |> where(id = 1) |> update(id = 2)";
+    const update_src = "User |> where(id == 1) |> update(id = 2)";
     const update_tok = tokenizer_mod.tokenize(update_src);
     const update_parsed = parser_mod.parse(&update_tok, update_src);
     const update_root = update_parsed.ast.getNode(update_parsed.ast.root);
@@ -3857,7 +3857,7 @@ test "update set null clears child foreign keys" {
         post_insert_op.data.unary,
     );
 
-    const update_src = "User |> where(id = 1) |> update(id = 2)";
+    const update_src = "User |> where(id == 1) |> update(id = 2)";
     const update_tok = tokenizer_mod.tokenize(update_src);
     const update_parsed = parser_mod.parse(&update_tok, update_src);
     const update_root = update_parsed.ast.getNode(update_parsed.ast.root);

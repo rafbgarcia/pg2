@@ -305,7 +305,7 @@ test "replayCommittedOverflowLifecycle reclaims chain and is idempotent" {
 
     try pool.flushAll();
 
-    const delete_src = "User |> where(id = 1) |> delete";
+    const delete_src = "User |> where(id == 1) |> delete";
     const delete_tok = tokenizer_mod.tokenize(delete_src);
     const delete_parsed = parser_mod.parse(&delete_tok, delete_src);
     const delete_root = delete_parsed.ast.getNode(delete_parsed.ast.root);

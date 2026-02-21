@@ -785,7 +785,7 @@ test "load schema with scope" {
         \\User {
         \\  field(id, i64, notNull, primaryKey)
         \\  field(active, bool, nullable)
-        \\  scope active |> where(active = true)
+        \\  scope active |> where(active == true)
         \\}
     ;
     const tokens = tokenizer_mod.tokenize(source);

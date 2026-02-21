@@ -25,14 +25,14 @@ test "feature update supports row growth via session path" {
     );
 
     result = try executor.run(
-        "User |> where(id = 1) |> update(name = \"Alicia\") {}",
+        "User |> where(id == 1) |> update(name = \"Alicia\") {}",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=1 deleted_rows=0\n",
         result,
     );
 
-    result = try executor.run("User |> where(id = 1) { id name active }");
+    result = try executor.run("User |> where(id == 1) { id name active }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,Alicia,true\n",
         result,
@@ -62,7 +62,7 @@ test "feature update returns selected fields via session path" {
     );
 
     result = try executor.run(
-        "User |> where(id = 1) |> update(name = \"Alicia\") { id name active }",
+        "User |> where(id == 1) |> update(name = \"Alicia\") { id name active }",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=1 deleted_rows=0\n1,Alicia,true\n",
@@ -106,20 +106,20 @@ test "feature update returning delivery failure aborts mutation via session path
     }
 
     const overflow_result = try executor.run(
-        "User |> where(active = true) |> update(active = false) { id }",
+        "User |> where(active == true) |> update(active = false) { id }",
     );
     try std.testing.expect(std.mem.startsWith(u8, overflow_result, "ERR query: "));
     try std.testing.expect(
         std.mem.indexOf(u8, overflow_result, "code=ReturningBufferExhausted") != null,
     );
 
-    var result = try executor.run("User |> where(id = 1) { id active }");
+    var result = try executor.run("User |> where(id == 1) { id active }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,true\n",
         result,
     );
 
-    result = try executor.run("User |> where(id = 4096) { id active }");
+    result = try executor.run("User |> where(id == 4096) { id active }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n4096,true\n",
         result,

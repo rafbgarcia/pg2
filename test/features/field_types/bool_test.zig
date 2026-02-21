@@ -17,21 +17,21 @@ test "feature bool fields support true/false lifecycle" {
 
     _ = try executor.run("FeatureFlag |> insert(id = 1, enabled = true) {}");
 
-    var result = try executor.run("FeatureFlag |> where(id = 1) { id enabled }");
+    var result = try executor.run("FeatureFlag |> where(id == 1) { id enabled }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,true\n",
         result,
     );
 
     result = try executor.run(
-        "FeatureFlag |> where(id = 1) |> update(enabled = false) {}",
+        "FeatureFlag |> where(id == 1) |> update(enabled = false) {}",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=1 deleted_rows=0\n",
         result,
     );
 
-    result = try executor.run("FeatureFlag |> where(id = 1) { id enabled }");
+    result = try executor.run("FeatureFlag |> where(id == 1) { id enabled }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,false\n",
         result,

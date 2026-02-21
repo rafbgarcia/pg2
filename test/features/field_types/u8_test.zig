@@ -24,13 +24,13 @@ test "feature u8 fields preserve 8-bit unsigned values across insert and update"
         result,
     );
 
-    result = try executor.run("Packet |> where(id = 1) |> update(hops = 200) {}");
+    result = try executor.run("Packet |> where(id == 1) |> update(hops = 200) {}");
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=1 deleted_rows=0\n",
         result,
     );
 
-    result = try executor.run("Packet |> where(id = 1) { id hops }");
+    result = try executor.run("Packet |> where(id == 1) { id hops }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,200\n",
         result,

@@ -2539,7 +2539,7 @@ test "execute where filter" {
     );
     defer r2.deinit();
 
-    const src3 = "User |> where(active = true)";
+    const src3 = "User |> where(active == true)";
     const tok3 = tokenizer_mod.tokenize(src3);
     const p3 = parser_mod.parse(&tok3, src3);
     var result = try execute(
@@ -2638,7 +2638,7 @@ test "execute captures deterministic inspect plan metadata" {
     var snap = try env.tm.snapshot(tx);
     defer snap.deinit();
 
-    const src = "User |> where(active = true) |> sort(id desc) |> inspect";
+    const src = "User |> where(active == true) |> sort(id desc) |> inspect";
     const tok = tokenizer_mod.tokenize(src);
     const p = parser_mod.parse(&tok, src);
     var result = try execute(
@@ -2993,7 +2993,7 @@ test "execute delete via pipeline" {
     );
     defer r1.deinit();
 
-    const src2 = "User |> where(id = 1) |> delete";
+    const src2 = "User |> where(id == 1) |> delete";
     const tok2 = tokenizer_mod.tokenize(src2);
     const p2 = parser_mod.parse(&tok2, src2);
     var result = try execute(

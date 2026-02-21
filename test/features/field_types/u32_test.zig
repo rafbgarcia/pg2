@@ -24,13 +24,13 @@ test "feature u32 fields preserve 32-bit unsigned values across insert and updat
         result,
     );
 
-    result = try executor.run("PageStats |> where(id = 1) |> update(bytes_written = 4096) {}");
+    result = try executor.run("PageStats |> where(id == 1) |> update(bytes_written = 4096) {}");
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=1 deleted_rows=0\n",
         result,
     );
 
-    result = try executor.run("PageStats |> where(id = 1) { id bytes_written }");
+    result = try executor.run("PageStats |> where(id == 1) { id bytes_written }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,4096\n",
         result,

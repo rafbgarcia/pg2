@@ -21,7 +21,7 @@ test "feature insert allows omitted nullable field and persists null" {
         result,
     );
 
-    result = try executor.run("User |> where(id = 1) { id bio }");
+    result = try executor.run("User |> where(id == 1) { id bio }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,null\n",
         result,
@@ -47,7 +47,7 @@ test "feature insert allows explicit null assignment to nullable field" {
         result,
     );
 
-    result = try executor.run("User |> where(id = 1) { id display_name }");
+    result = try executor.run("User |> where(id == 1) { id display_name }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,null\n",
         result,
@@ -73,7 +73,7 @@ test "feature insert applies default for omitted nullable field" {
         result,
     );
 
-    result = try executor.run("User |> where(id = 1) { id nickname }");
+    result = try executor.run("User |> where(id == 1) { id nickname }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,anon\n",
         result,
@@ -99,7 +99,7 @@ test "feature insert explicit null bypasses default on nullable field" {
         result,
     );
 
-    result = try executor.run("User |> where(id = 1) { id nickname }");
+    result = try executor.run("User |> where(id == 1) { id nickname }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,null\n",
         result,
@@ -125,7 +125,7 @@ test "feature insert explicit value overrides default on nullable field" {
         result,
     );
 
-    result = try executor.run("User |> where(id = 1) { id nickname }");
+    result = try executor.run("User |> where(id == 1) { id nickname }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,ada\n",
         result,

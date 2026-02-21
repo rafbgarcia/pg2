@@ -41,7 +41,7 @@ test "feature query returns deterministic rows via session path" {
     );
 
     result = try executor.run(
-        "User |> where(active = true) |> sort(name asc) { id name active }",
+        "User |> where(active == true) |> sort(name asc) { id name active }",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=2 inserted_rows=0 updated_rows=0 deleted_rows=0\n2,Alice,true\n1,Charlie,true\n",
@@ -71,7 +71,7 @@ test "feature query projection returns only requested columns via session path" 
         result,
     );
 
-    result = try executor.run("User |> where(id = 1) { id name }");
+    result = try executor.run("User |> where(id == 1) { id name }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n" ++
             "1,Alice\n",

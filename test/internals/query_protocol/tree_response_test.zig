@@ -96,7 +96,7 @@ test "internal query protocol keeps quoted string framing for punctuation" {
     );
 
     result = try executor.run(
-        "User |> where(id = 1) { name posts |> sort(id asc) { id title } }",
+        "User |> where(id == 1) { name posts |> sort(id asc) { id title } }",
     );
     const expected =
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n" ++

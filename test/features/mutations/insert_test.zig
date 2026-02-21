@@ -138,19 +138,19 @@ test "feature insert high-volume sequential requests remain queryable via sessio
         );
     }
 
-    var result = try executor.run("User |> where(id = 1) { id name active }");
+    var result = try executor.run("User |> where(id == 1) { id name active }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,user-1,true\n",
         result,
     );
 
-    result = try executor.run("User |> where(id = 256) { id name active }");
+    result = try executor.run("User |> where(id == 256) { id name active }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n256,user-256,true\n",
         result,
     );
 
-    result = try executor.run("User |> where(id = 512) { id name active }");
+    result = try executor.run("User |> where(id == 512) { id name active }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n512,user-512,true\n",
         result,
@@ -213,7 +213,7 @@ test "feature insert large-row payloads remain readable via session path" {
         result,
     );
 
-    result = try executor.run("Document |> where(id = 1) { id title payload }");
+    result = try executor.run("Document |> where(id == 1) { id title payload }");
     var expected_row_a: [1500]u8 = undefined;
     const expected_a = try std.fmt.bufPrint(
         expected_row_a[0..],
@@ -222,7 +222,7 @@ test "feature insert large-row payloads remain readable via session path" {
     );
     try std.testing.expectEqualStrings(expected_a, result);
 
-    result = try executor.run("Document |> where(id = 2) { id title payload }");
+    result = try executor.run("Document |> where(id == 2) { id title payload }");
     var expected_row_b: [1500]u8 = undefined;
     const expected_b = try std.fmt.bufPrint(
         expected_row_b[0..],
@@ -231,7 +231,7 @@ test "feature insert large-row payloads remain readable via session path" {
     );
     try std.testing.expectEqualStrings(expected_b, result);
 
-    result = try executor.run("Document |> where(id = 3) { id title payload }");
+    result = try executor.run("Document |> where(id == 3) { id title payload }");
     var expected_row_c: [1500]u8 = undefined;
     const expected_c = try std.fmt.bufPrint(
         expected_row_c[0..],
@@ -260,7 +260,7 @@ test "feature insert supports 128 total fields with deterministic readback" {
         result,
     );
 
-    result = try executor.run("WideUser |> where(id = 1) { id f002 f003 f126 f127 }");
+    result = try executor.run("WideUser |> where(id == 1) { id f002 f003 f126 f127 }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,v002,true,false,1127\n",
         result,
@@ -318,7 +318,7 @@ test "feature insert duplicate key fails closed late in high-volume workload" {
         result,
     );
 
-    result = try executor.run("User |> where(id = 299) { id name active }");
+    result = try executor.run("User |> where(id == 299) { id name active }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n299,user-299,true\n",
         result,

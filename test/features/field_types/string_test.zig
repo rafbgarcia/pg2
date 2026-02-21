@@ -22,7 +22,7 @@ test "feature string fields preserve user-facing text values across insert and u
     );
 
     var result = try executor.run(
-        "CustomerProfile |> where(id = 1) { id display_name }",
+        "CustomerProfile |> where(id == 1) { id display_name }",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,Ada Lovelace\n",
@@ -30,7 +30,7 @@ test "feature string fields preserve user-facing text values across insert and u
     );
 
     result = try executor.run(
-        "CustomerProfile |> where(id = 1) |> update(display_name = \"Grace Hopper\") {}",
+        "CustomerProfile |> where(id == 1) |> update(display_name = \"Grace Hopper\") {}",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=1 deleted_rows=0\n",
@@ -38,7 +38,7 @@ test "feature string fields preserve user-facing text values across insert and u
     );
 
     result = try executor.run(
-        "CustomerProfile |> where(id = 1) { id display_name }",
+        "CustomerProfile |> where(id == 1) { id display_name }",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,Grace Hopper\n",
@@ -74,7 +74,7 @@ test "feature string fields support overflow-backed large values end-to-end" {
         result,
     );
 
-    result = try executor.run("User |> where(id = 1) { id name }");
+    result = try executor.run("User |> where(id == 1) { id name }");
     var expected_select_a: [1300]u8 = undefined;
     const expected_a = try std.fmt.bufPrint(
         expected_select_a[0..],
@@ -88,7 +88,7 @@ test "feature string fields support overflow-backed large values end-to-end" {
     var update_req_buf: [1700]u8 = undefined;
     const update_req = try std.fmt.bufPrint(
         update_req_buf[0..],
-        "User |> where(id = 1) |> update(name = \"{s}\") {{}}",
+        "User |> where(id == 1) |> update(name = \"{s}\") {{}}",
         .{long_name_b[0..]},
     );
     result = try executor.run(update_req);
@@ -97,7 +97,7 @@ test "feature string fields support overflow-backed large values end-to-end" {
         result,
     );
 
-    result = try executor.run("User |> where(id = 1) { id name }");
+    result = try executor.run("User |> where(id == 1) { id name }");
     var expected_select_b: [1300]u8 = undefined;
     const expected_b = try std.fmt.bufPrint(
         expected_select_b[0..],

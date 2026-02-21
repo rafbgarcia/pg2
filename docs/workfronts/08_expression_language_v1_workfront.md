@@ -79,7 +79,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - `in` is function-form only; infix and camelCase legacy forms fail closed.
 - [x] `E04` Parse membership only as stdlib call: `in(value, list)`.
   - Enforce argument count and argument shape at parse boundary where possible.
-- [ ] `E05` Switch expression equality syntax from `=` to `==`.
+- [x] `E05` Switch expression equality syntax from `=` to `==`.
   - Tokenizer: emit dedicated `==` token for expression equality.
   - Parser: use `==` for comparison nodes and fail closed on `=` in expression positions.
   - Keep `=` valid only for assignment/config grammar positions.
@@ -183,6 +183,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - Do not implement until explicit product sign-off.
 
 ## Implementation Log
+- 2026-02-21: Completed `E05` by introducing a dedicated `==` tokenizer token for expression equality, migrating expression parsing/evaluation from `=` to `==`, and keeping `=` only for assignment/config grammar. Added parser regressions that reject `=` in expression contexts (`where`, computed `select`, `sort(expr)`, assignment RHS expression) and migrated query/test fixtures using expression predicates to `==`.
 - 2026-02-21: Product decision captured: expression equality uses `==`; `=` is assignment/config-only syntax. Added migration tasks for tokenizer/parser/evaluator and feature coverage, including fail-closed rejection of `=` in expression contexts.
 - 2026-02-21: Completed `E06` by adding parser/expression precedence coverage for symbolic boolean logic. Added AST-shape assertions proving `!` binds tighter than comparison, `&&` binds tighter than `||`, and parentheses override default grouping. Added parser-level fail-closed regressions for legacy textual logical forms (`and`/`or`/`not`) in `where(...)`.
 - 2026-02-21: Completed `E04` by enforcing parse-time membership shape for `in(value, list)` only (exactly two args; second arg must be list literal), threading source text through parser/expression entry points so `in` remains a plain identifier token while membership-call validation stays explicit and fail-closed. Added parser/expression regression tests for valid form and invalid arity/shape.

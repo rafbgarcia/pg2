@@ -1053,7 +1053,7 @@ test "session rejects CRUD pipeline without explicit returning block" {
     const result = try session.handleRequest(
         &pool,
         &conn,
-        "User |> where(id = 1)",
+        "User |> where(id == 1)",
         response_buf[0..],
     );
     try std.testing.expect(result.is_query_error);

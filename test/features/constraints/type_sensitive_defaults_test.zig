@@ -25,7 +25,7 @@ test "feature insert applies typed defaults across representative field types" {
     );
 
     result = try executor.run(
-        "Settings |> where(id = 1) { id enabled retry_budget label created_at }",
+        "Settings |> where(id == 1) { id enabled retry_budget label created_at }",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,true,3,anon,1700000000123456\n",
@@ -52,7 +52,7 @@ test "feature insert explicit null bypasses nullable bool default" {
         result,
     );
 
-    result = try executor.run("Preference |> where(id = 1) { id email_opt_in }");
+    result = try executor.run("Preference |> where(id == 1) { id email_opt_in }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,null\n",
         result,

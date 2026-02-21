@@ -22,7 +22,7 @@ test "feature insert applies schema defaults for omitted fields" {
         result,
     );
 
-    result = try executor.run("User |> where(id = 1) { id tier marketing_opt_in }");
+    result = try executor.run("User |> where(id == 1) { id tier marketing_opt_in }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,free,false\n",
         result,

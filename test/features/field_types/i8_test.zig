@@ -24,13 +24,13 @@ test "feature i8 fields preserve 8-bit signed values across insert and update" {
         result,
     );
 
-    result = try executor.run("DeviceState |> where(id = 1) |> update(level = 42) {}");
+    result = try executor.run("DeviceState |> where(id == 1) |> update(level = 42) {}");
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=1 deleted_rows=0\n",
         result,
     );
 
-    result = try executor.run("DeviceState |> where(id = 1) { id level }");
+    result = try executor.run("DeviceState |> where(id == 1) { id level }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,42\n",
         result,
