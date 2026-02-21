@@ -9,6 +9,7 @@ comptime {
     _ = @import("constraints/foreign_key_violation_test.zig");
     _ = @import("constraints/nullable_test.zig");
     _ = @import("constraints/not_null_test.zig");
+    _ = @import("constraints/type_sensitive_defaults_test.zig");
     _ = @import("schema_definition/reference_test.zig");
     _ = @import("semantic_validations/type_mismatch_test.zig");
     _ = @import("semantic_validations/unknown_field_test.zig");
@@ -28,5 +29,5 @@ comptime {
     _ = @import("mutations/insert_test.zig");
     _ = @import("queries/select_test.zig");
     _ = @import("mutations/update_test.zig");
-    _ = @import("mutations/update_arithmetic_test.zig");
+    _ = @import("operators/addition_test.zig");
 }

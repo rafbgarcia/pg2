@@ -31,6 +31,7 @@ pub const EvalError = error{
     TypeMismatch,
     DivisionByZero,
     NumericOverflow,
+    NullArithmeticOperand,
     ColumnNotFound,
     InvalidLiteral,
     UnknownFunction,
@@ -373,11 +374,12 @@ pub fn parseLiteralValue(
 
 /// Apply a binary operator to two values.
 pub fn applyBinaryOp(lhs: Value, rhs: Value, op: TokenType) EvalError!Value {
-    // Null propagation: any op with null yields null (except logical and/or).
-    if (op != .kw_and and op != .kw_or) {
-        if (lhs == .null_value or rhs == .null_value) {
-            return Value{ .null_value = {} };
-        }
+    if (lhs == .null_value or rhs == .null_value) {
+        return switch (op) {
+            .plus, .minus, .star, .slash => error.NullArithmeticOperand,
+            .kw_and, .kw_or => error.TypeMismatch,
+            else => Value{ .null_value = {} },
+        };
     }
 
     return switch (op) {
@@ -1014,13 +1016,13 @@ test "function call — coalesce" {
     try testing.expectEqual(@as(i64, 42), result.i64);
 }
 
-test "null propagation in arithmetic" {
-    const result = try applyBinaryOp(
+test "arithmetic rejects null operands" {
+    const result = applyBinaryOp(
         .{ .i64 = 5 },
         .{ .null_value = {} },
         .plus,
     );
-    try testing.expect(result == .null_value);
+    try testing.expectError(error.NullArithmeticOperand, result);
 }
 
 test "division by zero" {

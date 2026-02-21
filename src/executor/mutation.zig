@@ -75,6 +75,7 @@ pub const MutationError = error{
     StackUnderflow,
     DivisionByZero,
     NumericOverflow,
+    NullArithmeticOperand,
     UnknownFunction,
     NullInPredicate,
     ResultOverflow,
@@ -93,6 +94,7 @@ pub const MutationError = error{
 pub const MutationDiagnosticCode = enum {
     IntegerOutOfRange,
     TypeMismatch,
+    NullArithmeticOperand,
     ColumnNotFound,
     NumericOverflow,
 };
@@ -1627,6 +1629,12 @@ pub fn buildRowFromAssignments(
                     node.extra,
                     expressionLocationToken(tree, expr_node),
                 );
+            } else if (mapped == error.NullArithmeticOperand) {
+                setNullArithmeticOperandDiagnostic(
+                    diagnostic,
+                    node.extra,
+                    expressionLocationToken(tree, expr_node),
+                );
             }
             return mapped;
         };
@@ -1707,6 +1715,12 @@ fn applyAssignments(
                 setIntegerRangeDiagnosticForColumn(
                     diagnostic,
                     schema.columns[col_idx].column_type,
+                    node.extra,
+                    expressionLocationToken(tree, expr_node),
+                );
+            } else if (mapped == error.NullArithmeticOperand) {
+                setNullArithmeticOperandDiagnostic(
+                    diagnostic,
                     node.extra,
                     expressionLocationToken(tree, expr_node),
                 );
@@ -1839,6 +1853,20 @@ fn setIntegerRangeDiagnosticForColumn(
         field_token,
         location_token,
         message,
+    );
+}
+
+fn setNullArithmeticOperandDiagnostic(
+    diagnostic: ?*MutationDiagnostic,
+    field_token: u16,
+    location_token: ?u16,
+) void {
+    setDiagnostic(
+        diagnostic,
+        .NullArithmeticOperand,
+        field_token,
+        location_token,
+        "arithmetic operand cannot be null",
     );
 }
 
@@ -2084,6 +2112,7 @@ fn mapFilterError(err: filter_mod.EvalError) MutationError {
         error.TypeMismatch => error.TypeMismatch,
         error.DivisionByZero => error.DivisionByZero,
         error.NumericOverflow => error.NumericOverflow,
+        error.NullArithmeticOperand => error.NullArithmeticOperand,
         error.ColumnNotFound => error.ColumnNotFound,
         error.InvalidLiteral => error.InvalidLiteral,
         error.UnknownFunction => error.UnknownFunction,
