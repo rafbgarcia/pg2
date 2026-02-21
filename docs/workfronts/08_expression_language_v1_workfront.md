@@ -9,16 +9,21 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - Fresh sessions need a deterministic, itemized backlog they can pick from without rediscovery.
 
 ## Confirmed User-Facing Language Rule (2026-02-21)
-- Use single-word operators/functions only.
-- Multi-word SQL spellings are not accepted.
-- Required forms:
-  - `notIn` (not `not in`)
-  - `isNull` (not `is null`)
-  - `isNotNull` (not `is not null`)
-- Do not silently alias legacy SQL spellings; fail closed with explicit diagnostics.
+- Use symbolic logical operators only:
+  - Unary negation: `!`
+  - Conjunction: `&&`
+  - Disjunction: `||`
+- Membership is stdlib function only: `in(value, list)`.
+- Negated membership is written as `!in(value, list)`.
+- Keep query pipeline `|>` only at query/operator level in v1.
+- No backward compatibility aliases:
+  - Reject `not`, `and`, `or`
+  - Reject `notIn`, `isNotIn`
+  - Reject SQL spellings like `not in`, `is null`, `is not null`
+- Do not silently alias legacy spellings; fail closed with explicit diagnostics.
 
 ## Current Gaps Snapshot
-- Evaluator does not explicitly handle `expr_in`, `expr_not_in`, `expr_parameter`, `expr_list` node semantics in row predicate evaluation paths.
+- Evaluator does not explicitly handle membership function semantics and `expr_parameter`/`expr_list` node semantics in row predicate evaluation paths.
 - `lower`, `upper`, `trim` are placeholders.
 - `now()` is placeholder and must be wired to injected clock semantics.
 - No dedicated feature files for most expression capabilities.
@@ -57,37 +62,38 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 
 ## Phase 1: Language Surface and Parsing
 ### Gate
-- Tokenizer/parser accept only single-word expression operators/functions.
-- Parser tests cover valid forms and fail-closed invalid legacy forms.
+- Tokenizer/parser accept `!`, `&&`, `||` and function-form membership `in(value, list)`.
+- Parser tests cover valid symbolic forms and fail-closed invalid legacy forms.
 
 ### Tasks
-- [ ] `E01` Add tokenizer keyword support for `notIn`.
-  - Accept: tokenized as one operator token.
-  - Reject: split `not in`.
-- [ ] `E02` Add tokenizer keyword support for `isNull`.
-- [ ] `E03` Add tokenizer keyword support for `isNotNull`.
-- [ ] `E04` Extend expression parser for `notIn`.
-  - Ensure precedence with comparison/logical operators is explicit and tested.
-- [ ] `E05` Extend expression parser for unary null predicates.
-  - `field isNull`
-  - `field isNotNull`
-- [ ] `E06` Parser regression tests for legacy SQL spellings rejection.
-  - `not in`, `is null`, `is not null` must return explicit parse errors.
+- [ ] `E01` Add tokenizer support for symbolic logical operators.
+  - Accept: `!`, `&&`, `||`.
+  - Reject: `not`, `and`, `or`.
+- [ ] `E02` Remove parser support for keyword logical operators.
+  - Remove unary/binary logical parsing via `not`/`and`/`or`.
+- [ ] `E03` Remove parser support for infix membership operators.
+  - Reject `in`, `notIn`, `isNotIn` as infix forms.
+- [ ] `E04` Parse membership only as stdlib call: `in(value, list)`.
+  - Enforce argument count and argument shape at parse boundary where possible.
+- [ ] `E05` Parser regression tests for fail-closed legacy forms.
+  - `not`, `and`, `or`, `notIn`, `isNotIn`, `not in`, `is null`, `is not null`.
+- [ ] `E06` Precedence tests for symbolic boolean logic.
+  - Ensure `!` binds tighter than comparison, `&&` tighter than `||`, with explicit parentheses cases.
 
 ## Phase 2: Evaluator Semantics
 ### Gate
 - Evaluator handles all parsed expression node forms and enforces type/null rules.
 
 ### Tasks
-- [ ] `E07` Implement evaluator semantics for `expr_in`.
-  - LHS scalar membership against RHS list.
+- [ ] `E07` Implement evaluator semantics for `in(value, list)`.
+  - Scalar membership against list literal/expression.
   - Type mismatch and null behavior defined and tested.
-- [ ] `E08` Implement evaluator semantics for `expr_not_in`.
-- [ ] `E09` Implement evaluator semantics for list literals in membership checks.
+- [ ] `E08` Implement evaluator semantics for `!in(value, list)`.
+- [ ] `E09` Implement evaluator semantics for list literals in function-based membership checks.
 - [ ] `E10` Implement parameter expression evaluation (`expr_parameter`) with explicit binding source.
   - Undefined parameter must fail closed with deterministic error.
-- [ ] `E11` Implement `isNull` evaluator semantics.
-- [ ] `E12` Implement `isNotNull` evaluator semantics.
+- [ ] `E11` Normalize null-comparison behavior under symbolic boolean operators.
+- [ ] `E12` Add evaluator regressions for removed legacy logical/membership forms.
 
 ## Phase 3: Built-in Functions and Deterministic Time
 ### Gate
@@ -126,9 +132,9 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - [ ] `T06` `test/features/expressions/comparisons_test.zig`
 - [ ] `T07` `test/features/expressions/boolean_logic_test.zig`
 - [ ] `T08` `test/features/expressions/in_test.zig`
-- [ ] `T09` `test/features/expressions/not_in_test.zig` (uses `notIn`)
-- [ ] `T10` `test/features/expressions/is_null_test.zig` (uses `isNull`)
-- [ ] `T11` `test/features/expressions/is_not_null_test.zig` (uses `isNotNull`)
+- [ ] `T09` `test/features/expressions/not_in_test.zig` (uses `!in(value, list)`)
+- [ ] `T10` `test/features/expressions/symbolic_logic_tokens_test.zig` (covers `!`, `&&`, `||`)
+- [ ] `T11` `test/features/expressions/legacy_keyword_rejection_test.zig` (rejects `not`, `and`, `or`, `notIn`, `isNotIn`)
 - [ ] `T12` `test/features/expressions/parameters_test.zig`
 - [ ] `T13` `test/features/expressions/functions_numeric_test.zig`
 - [ ] `T14` `test/features/expressions/functions_string_test.zig`
@@ -143,11 +149,22 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - Diagnostics are explicit, deterministic, and context-aware.
 
 ### Tasks
-- [ ] `D01` Normalize parser error messages for invalid single-word operator usage.
+- [ ] `D01` Normalize parser error messages for invalid logical/membership keyword usage.
 - [ ] `D02` Normalize evaluator errors for null arithmetic, type mismatch, and invalid predicate result.
 - [ ] `D03` Ensure mutation-path diagnostics include precise assignment path for expression failures.
-- [ ] `D04` Add regression tests for fail-closed behavior on unsupported spellings and unsupported expression shapes.
+- [ ] `D04` Add regression tests for fail-closed behavior on removed keyword forms and unsupported expression shapes.
+
+## Phase 7: Pending Product Decision
+### Gate
+- Product decision captured explicitly before implementation.
+
+### Tasks
+- [ ] `P01` Evaluate expression-level pipeline syntax for function composition in expressions.
+  - Candidate (pending): `status |> in([a, b, c])`.
+  - Keep query-level pipeline `|>` behavior unchanged.
+  - Do not implement until explicit product sign-off.
 
 ## Implementation Log
+- `2026-02-21`: (Decision update) Language direction changed to symbolic logic (`!`, `&&`, `||`) and function-only membership (`in(value, list)`, `!in(value, list)`), with no backward compatibility aliases.
+- `2026-02-21`: (Superseded) Earlier `notIn`-oriented `E01` implementation is superseded by the decision update above and must be replaced by new Phase 1 tasks before merge.
 - `YYYY-MM-DD`: (task id) short note, commit hash, tests run.
-
