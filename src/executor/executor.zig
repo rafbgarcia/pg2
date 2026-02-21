@@ -1940,20 +1940,20 @@ fn executeMutation(
         },
         .update_op => {
             const predicate = findPredicate(ctx.ast, ops, op_count);
-            var before_rows = QueryResult.init(ctx.scratch_rows_a);
-            if (has_projection) {
+            var returning_capture: mutation_mod.ReturningCapture = undefined;
+            const capture: ?*mutation_mod.ReturningCapture = if (has_projection) blk: {
                 string_arena.reset();
-                if (!materializeRowsMatchingPredicate(
-                    ctx,
-                    &before_rows,
-                    model_id,
-                    predicate,
-                    string_arena,
-                )) return;
-            }
+                result.row_count = 0;
+                returning_capture = .{
+                    .rows = result.rows[0..scan_mod.max_result_rows],
+                    .row_count = &result.row_count,
+                    .string_arena = string_arena,
+                };
+                break :blk &returning_capture;
+            } else null;
 
             const node = ctx.ast.getNode(mut_op.node);
-            const count = mutation_mod.executeUpdateWithDiagnostic(
+            const count = mutation_mod.executeUpdateWithDiagnosticAndReturning(
                 ctx.catalog,
                 ctx.pool,
                 ctx.wal,
@@ -1968,36 +1968,28 @@ fn executeMutation(
                 predicate,
                 node.data.unary,
                 ctx.allocator,
+                capture,
                 &diagnostic,
             ) catch |err| {
                 setMutationBoundaryError(result, ctx, .update_op, err, &diagnostic);
                 return;
             };
             result.stats.rows_updated = count;
-            if (has_projection) {
-                string_arena.reset();
-                materializeRowsBySourceRows(
-                    ctx,
-                    result,
-                    model_id,
-                    before_rows.rows[0..before_rows.row_count],
-                    string_arena,
-                );
-            }
         },
         .delete_op => {
             const predicate = findPredicate(ctx.ast, ops, op_count);
-            if (has_projection) {
+            var returning_capture: mutation_mod.ReturningCapture = undefined;
+            const capture: ?*mutation_mod.ReturningCapture = if (has_projection) blk: {
                 string_arena.reset();
-                if (!materializeRowsMatchingPredicate(
-                    ctx,
-                    result,
-                    model_id,
-                    predicate,
-                    string_arena,
-                )) return;
-            }
-            const count = mutation_mod.executeDelete(
+                result.row_count = 0;
+                returning_capture = .{
+                    .rows = result.rows[0..scan_mod.max_result_rows],
+                    .row_count = &result.row_count,
+                    .string_arena = string_arena,
+                };
+                break :blk &returning_capture;
+            } else null;
+            const count = mutation_mod.executeDeleteWithReturning(
                 ctx.catalog,
                 ctx.pool,
                 ctx.wal,
@@ -2011,6 +2003,7 @@ fn executeMutation(
                 ctx.source,
                 predicate,
                 ctx.allocator,
+                capture,
             ) catch |err| {
                 setBoundaryError(
                     result,
@@ -2120,42 +2113,6 @@ fn materializeRowsById(
             const candidate = scanned_rows.rows[read_idx];
             if (candidate.row_id.page_id != row_id.page_id) continue;
             if (candidate.row_id.slot != row_id.slot) continue;
-            out.rows[write_idx] = candidate;
-            write_idx += 1;
-            break;
-        }
-    }
-    out.row_count = write_idx;
-}
-
-fn materializeRowsBySourceRows(
-    ctx: *const ExecContext,
-    out: *QueryResult,
-    model_id: ModelId,
-    source_rows: []const ResultRow,
-    string_arena: *scan_mod.StringArena,
-) void {
-    var scanned_rows = QueryResult.init(ctx.scratch_rows_b);
-    if (!materializeRowsMatchingPredicate(
-        ctx,
-        &scanned_rows,
-        model_id,
-        null_node,
-        string_arena,
-    )) {
-        out.has_error = scanned_rows.has_error;
-        out.error_message = scanned_rows.error_message;
-        out.row_count = 0;
-        return;
-    }
-
-    var write_idx: u16 = 0;
-    for (source_rows) |source_row| {
-        var read_idx: u16 = 0;
-        while (read_idx < scanned_rows.row_count) : (read_idx += 1) {
-            const candidate = scanned_rows.rows[read_idx];
-            if (candidate.row_id.page_id != source_row.row_id.page_id) continue;
-            if (candidate.row_id.slot != source_row.row_id.slot) continue;
             out.rows[write_idx] = candidate;
             write_idx += 1;
             break;

@@ -46,6 +46,7 @@ const TxId = tx_mod.TxId;
 const Snapshot = tx_mod.Snapshot;
 const TxManager = tx_mod.TxManager;
 const UndoLog = undo_mod.UndoLog;
+const ResultRow = scan_mod.ResultRow;
 
 /// Maximum encoded row size.
 pub const max_row_buf_size = 8000;
@@ -154,6 +155,14 @@ const OverflowChainStats = struct {
     first_page_id: u64,
     page_count: u32,
     payload_bytes: u32,
+};
+
+/// Optional bounded row capture sink for mutation RETURNING semantics.
+/// Rows are appended in mutation scan order into caller-owned storage.
+pub const ReturningCapture = struct {
+    rows: []ResultRow,
+    row_count: *u16,
+    string_arena: *scan_mod.StringArena,
 };
 
 /// Execute an INSERT operation.
@@ -343,7 +352,7 @@ pub fn executeUpdate(
     first_assignment_node: NodeIndex,
     allocator: Allocator,
 ) MutationError!u32 {
-    return executeUpdateWithDiagnostic(
+    return executeUpdateWithDiagnosticAndReturning(
         catalog,
         pool,
         wal,
@@ -358,6 +367,7 @@ pub fn executeUpdate(
         predicate_node,
         first_assignment_node,
         allocator,
+        null,
         null,
     );
 }
@@ -377,6 +387,44 @@ pub fn executeUpdateWithDiagnostic(
     predicate_node: NodeIndex,
     first_assignment_node: NodeIndex,
     allocator: Allocator,
+    diagnostic: ?*MutationDiagnostic,
+) MutationError!u32 {
+    return executeUpdateWithDiagnosticAndReturning(
+        catalog,
+        pool,
+        wal,
+        undo_log,
+        tx_id,
+        snapshot,
+        tx_manager,
+        model_id,
+        tree,
+        tokens,
+        source,
+        predicate_node,
+        first_assignment_node,
+        allocator,
+        null,
+        diagnostic,
+    );
+}
+
+pub fn executeUpdateWithDiagnosticAndReturning(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    undo_log: *UndoLog,
+    tx_id: TxId,
+    snapshot: *const Snapshot,
+    tx_manager: *const TxManager,
+    model_id: ModelId,
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    predicate_node: NodeIndex,
+    first_assignment_node: NodeIndex,
+    allocator: Allocator,
+    returning_capture: ?*ReturningCapture,
     diagnostic: ?*MutationDiagnostic,
 ) MutationError!u32 {
     std.debug.assert(model_id < catalog.model_count);
@@ -475,6 +523,14 @@ pub fn executeUpdateWithDiagnostic(
                 row.row_id,
                 new_values[0..row.column_count],
             );
+            if (returning_capture) |capture| {
+                try appendReturningRow(
+                    capture,
+                    row.row_id,
+                    new_values[0..row.column_count],
+                    row.column_count,
+                );
+            }
             updated_count += 1;
         }
     }
@@ -501,6 +557,40 @@ pub fn executeDelete(
     source: []const u8,
     predicate_node: NodeIndex,
     allocator: Allocator,
+) MutationError!u32 {
+    return executeDeleteWithReturning(
+        catalog,
+        pool,
+        wal,
+        undo_log,
+        tx_id,
+        snapshot,
+        tx_manager,
+        model_id,
+        tree,
+        tokens,
+        source,
+        predicate_node,
+        allocator,
+        null,
+    );
+}
+
+pub fn executeDeleteWithReturning(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    undo_log: *UndoLog,
+    tx_id: TxId,
+    snapshot: *const Snapshot,
+    tx_manager: *const TxManager,
+    model_id: ModelId,
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    predicate_node: NodeIndex,
+    allocator: Allocator,
+    returning_capture: ?*ReturningCapture,
 ) MutationError!u32 {
     std.debug.assert(model_id < catalog.model_count);
     _ = allocator;
@@ -568,6 +658,14 @@ pub fn executeDelete(
                 model_id,
                 row.values[0..row.column_count],
             );
+            if (returning_capture) |capture| {
+                try appendReturningRow(
+                    capture,
+                    row.row_id,
+                    row.values[0..row.column_count],
+                    row.column_count,
+                );
+            }
             try deleteSingleRow(
                 catalog,
                 pool,
@@ -585,6 +683,36 @@ pub fn executeDelete(
         catalog.decrementRowCount(model_id, deleted_count);
     }
     return deleted_count;
+}
+
+fn appendReturningRow(
+    capture: *ReturningCapture,
+    row_id: RowId,
+    values: []const Value,
+    column_count: u16,
+) MutationError!void {
+    std.debug.assert(column_count <= scan_mod.max_columns);
+    if (capture.row_count.* >= capture.rows.len) return error.ResultOverflow;
+
+    var out = ResultRow.init();
+    out.row_id = row_id;
+    out.column_count = column_count;
+
+    for (0..column_count) |i| {
+        out.values[i] = try cloneValueForReturning(values[i], capture.string_arena);
+    }
+    capture.rows[capture.row_count.*] = out;
+    capture.row_count.* += 1;
+}
+
+fn cloneValueForReturning(
+    value: Value,
+    arena: *scan_mod.StringArena,
+) MutationError!Value {
+    return switch (value) {
+        .string => |s| .{ .string = arena.copyString(s) catch return error.OutOfMemory },
+        else => value,
+    };
 }
 
 /// Delete a single matched row: undo push, tombstone, WAL append.
