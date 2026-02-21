@@ -8,6 +8,10 @@ Support request-scoped variables (`let`) and multiple statements in a single req
 - Real workflows need query chaining (for example: derive ids, then update/delete using those ids).
 - Request-level atomicity must be explicit and testable before this can be safely promoted.
 
+## Dependencies
+- Hard dependency: `docs/workfronts/03_degrade_spill_workfront.md` is treated as complete for this workfront's execution semantics.
+- Assumption: spill/temp storage paths are available for deterministic variable materialization beyond in-memory thresholds.
+
 ## Proposed Query Shape
 ```pg2
 let userIds = User |> where(active = true) { id }
@@ -62,7 +66,7 @@ Additional confirmed decisions (2026-02-21):
   - undefined variable
   - duplicate variable name in same request
   - invalid variable type in predicate context
-  - variable memory limit exceeded (fail-closed boundary code until spill integration)
+  - variable value/type incompatibility for declared usage context
 
 ### Gate
 - Parser/semantic tests prove deterministic diagnostics for all invalid forms.
@@ -103,17 +107,18 @@ Additional confirmed decisions (2026-02-21):
 ### Gate
 - Session tests prove stable wire output for success and failure across multi-statement requests.
 
-## Phase 5: Memory and Spill Integration Boundary
+## Phase 5: Variable Materialization Under Spill-Ready Runtime
 ### Scope
 - Define deterministic in-memory limits for variable materialization.
-- Integrate with Workfront 03 degrade/spill mechanisms once available.
-- Until Workfront 03 integration lands, overflow conditions return explicit bounded-resource errors (fail closed, no silent truncation).
+- Use Workfront 03 spill/temp mechanisms when variable materialization exceeds in-memory thresholds.
+- Preserve deterministic execution and deterministic error classification for storage hard failures.
 
 ### Gate
 - Deterministic tests verify:
   - bounded in-memory behavior
-  - fail-closed behavior without spill
-  - spill handoff contract once Workfront 03 phases are available
+  - deterministic spill behavior for variable materialization
+  - deterministic hard-failure behavior for spill storage faults
+
 ## Phase 6: Feature Test Matrix (One File Per Capability)
 Create dedicated files under `test/features/variables_and_multi_statement/`:
 1. `let_scalar_test.zig`
