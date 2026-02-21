@@ -80,6 +80,7 @@ pub const MutationError = error{
     UnknownFunction,
     NullInPredicate,
     ResultOverflow,
+    ReturningBufferExhausted,
     OverflowRegionExhausted,
     OverflowReclaimQueueFull,
     // WAL errors
@@ -692,7 +693,7 @@ fn appendReturningRow(
     column_count: u16,
 ) MutationError!void {
     std.debug.assert(column_count <= scan_mod.max_columns);
-    if (capture.row_count.* >= capture.rows.len) return error.ResultOverflow;
+    if (capture.row_count.* >= capture.rows.len) return error.ReturningBufferExhausted;
 
     var out = ResultRow.init();
     out.row_id = row_id;
@@ -710,7 +711,7 @@ fn cloneValueForReturning(
     arena: *scan_mod.StringArena,
 ) MutationError!Value {
     return switch (value) {
-        .string => |s| .{ .string = arena.copyString(s) catch return error.OutOfMemory },
+        .string => |s| .{ .string = arena.copyString(s) catch return error.ReturningBufferExhausted },
         else => value,
     };
 }
