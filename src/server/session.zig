@@ -817,6 +817,7 @@ fn serializeInspectStats(
 fn planOpLabel(op: exec_mod.PlanOp) []const u8 {
     return switch (op) {
         .where_filter => "where",
+        .having_filter => "having",
         .group_op => "group",
         .limit_op => "limit",
         .offset_op => "offset",

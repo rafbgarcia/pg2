@@ -124,6 +124,14 @@ test "parse group and aggregation" {
     try testing.expect(!result.has_error);
 }
 
+test "parse having with aggregate predicate" {
+    const source =
+        "Post |> group(author_id) |> having(count(*) > 1 && sum(score) >= 10) { author_id }";
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(!result.has_error);
+}
+
 test "parse computed field" {
     const source = "User { id full_name: lower(name) }";
     const tokens = tokenizer_mod.tokenize(source);

@@ -94,6 +94,7 @@ pub const max_operators = capacity_mod.max_pipeline_operators;
 
 pub const PlanOp = enum {
     where_filter,
+    having_filter,
     group_op,
     limit_op,
     offset_op,
@@ -565,6 +566,13 @@ fn applyReadOperators(
         const op = ops[i];
         switch (op.kind) {
             .where_filter => applyWhereFilter(
+                ctx,
+                result,
+                op.node,
+                schema,
+                &group_runtime,
+            ),
+            .having_filter => applyWhereFilter(
                 ctx,
                 result,
                 op.node,
@@ -1064,7 +1072,7 @@ fn collectPostGroupAggregates(
     while (op_idx < op_count) : (op_idx += 1) {
         const op = ops[op_idx];
         switch (op.kind) {
-            .where_filter => {
+            .where_filter, .having_filter => {
                 const where_node = ctx.ast.getNode(op.node);
                 if (!registerAggregateExprTree(
                     ctx,
@@ -2266,6 +2274,7 @@ fn buildOperatorList(
         const node = tree.getNode(current);
         const kind: ?OpKind = switch (node.tag) {
             .op_where => .where_filter,
+            .op_having => .having_filter,
             .op_group => .group_op,
             .op_limit => .limit_op,
             .op_offset => .offset_op,

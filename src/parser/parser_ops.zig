@@ -30,6 +30,7 @@ pub fn parseOperator(
     if (tok_type == .kw_limit) return parseSingleExprOp(ast, tokens, source, pos, .op_limit);
     if (tok_type == .kw_offset) return parseSingleExprOp(ast, tokens, source, pos, .op_offset);
     if (tok_type == .kw_group) return parseGroupOp(ast, tokens, pos);
+    if (tok_type == .kw_having) return parseSingleExprOp(ast, tokens, source, pos, .op_having);
     if (tok_type == .kw_insert) return parseMutationOp(ast, tokens, source, pos, .op_insert);
     if (tok_type == .kw_update) return parseMutationOp(ast, tokens, source, pos, .op_update);
     if (tok_type == .identifier) {

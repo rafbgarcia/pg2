@@ -28,6 +28,7 @@ pub const TokenType = enum(u8) {
     kw_limit,
     kw_offset,
     kw_group,
+    kw_having,
     kw_unique,
     kw_delete,
     kw_insert,
@@ -375,6 +376,7 @@ pub fn isContextualIdentifier(tok_type: TokenType) bool {
         .kw_limit,
         .kw_offset,
         .kw_group,
+        .kw_having,
         .kw_unique,
         .kw_delete,
         .kw_insert,
@@ -396,6 +398,7 @@ fn classifyWord(text: []const u8, starts_upper: bool) TokenType {
         .{ .word = "limit", .tok = .kw_limit },
         .{ .word = "offset", .tok = .kw_offset },
         .{ .word = "group", .tok = .kw_group },
+        .{ .word = "having", .tok = .kw_having },
         .{ .word = "unique", .tok = .kw_unique },
         .{ .word = "delete", .tok = .kw_delete },
         .{ .word = "insert", .tok = .kw_insert },
@@ -518,15 +521,16 @@ test "unterminated string" {
 }
 
 test "keywords recognized" {
-    const source = "where sort limit offset group let fn";
+    const source = "where sort limit offset group having let fn";
     const result = tokenize(source);
     try testing.expectEqual(TokenType.kw_where, result.tokens[0].token_type);
     try testing.expectEqual(TokenType.kw_sort, result.tokens[1].token_type);
     try testing.expectEqual(TokenType.kw_limit, result.tokens[2].token_type);
     try testing.expectEqual(TokenType.kw_offset, result.tokens[3].token_type);
     try testing.expectEqual(TokenType.kw_group, result.tokens[4].token_type);
-    try testing.expectEqual(TokenType.kw_let, result.tokens[5].token_type);
-    try testing.expectEqual(TokenType.kw_fn, result.tokens[6].token_type);
+    try testing.expectEqual(TokenType.kw_having, result.tokens[5].token_type);
+    try testing.expectEqual(TokenType.kw_let, result.tokens[6].token_type);
+    try testing.expectEqual(TokenType.kw_fn, result.tokens[7].token_type);
 }
 
 test "model name starts uppercase" {
@@ -705,6 +709,7 @@ test "reference and RI keywords" {
 test "contextual identifier helper allows operator keywords only" {
     try testing.expect(isContextualIdentifier(.identifier));
     try testing.expect(isContextualIdentifier(.kw_offset));
+    try testing.expect(isContextualIdentifier(.kw_having));
     try testing.expect(isContextualIdentifier(.kw_desc));
     try testing.expect(!isContextualIdentifier(.and_and));
     try testing.expect(!isContextualIdentifier(.kw_i64));
