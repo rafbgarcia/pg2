@@ -29,5 +29,5 @@ comptime {
     _ = @import("mutations/insert_test.zig");
     _ = @import("queries/select_test.zig");
     _ = @import("mutations/update_test.zig");
-    _ = @import("operators/addition_test.zig");
+    _ = @import("expressions/addition_test.zig");
 }
