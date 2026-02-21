@@ -125,7 +125,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - [ ] `E18` `where` expression parity suite.
 - [ ] `E19` `update` assignment expression parity suite.
 - [ ] `E20` computed `select` expression parity suite.
-- [ ] `E21` `sort(expr)` expression parity suite.
+- [x] `E21` `sort(expr)` expression parity suite.
 - [ ] `E22` `having` expression parity suite (with aggregates).
 
 ## Phase 5: Feature Test Matrix (One Capability Per File)
@@ -193,6 +193,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - Do not implement until explicit product sign-off.
 
 ## Implementation Log
+- 2026-02-21: Completed `E21` by extending sort-key parsing to accept general expression keys (not only aggregate/builtin-led forms), while preserving bare-column sort syntax. Added parser coverage for arithmetic sort expressions and validated runtime parity through feature tests using `sort(base + extra ...)`, `sort(base - extra ...)`, and `sort(in(status, [...]) ...)` in `test/features/expressions/`. Kept computed-select assertions out of this change because computed projection shaping remains gated under `E20`.
 - 2026-02-21: Completed `T01` by adding `test/features/expressions/subtraction_test.zig` with dedicated feature coverage for representative numeric subtraction (`i64`, `u64`, `f64`) plus fail-closed mutation diagnostics for type mismatch, constrained integer underflow (`IntegerOutOfRange` with assignment path), and null arithmetic operands. Imported the new file in `test/features/features_specs_test.zig` and validated via `zig build test`.
 - 2026-02-21: Added explicit follow-up planning for membership diagnostics (`D05`) and runtime list value-model decisioning (`R01`-`R03`) so future variable/subquery-backed membership support is gated by an explicit product/runtime model decision.
 - 2026-02-21: Completed `E07`, `E08`, and `E09` by adding dedicated evaluator handling for membership function calls (`in(value, list)`) with list-literal element evaluation and null-aware semantics: `in(null, list) -> null`, no-match with null element -> `null`, direct match -> `true`, null-free miss -> `false`. Enforced fail-closed type mismatch for incompatible non-null membership comparisons and added unit coverage in `src/executor/filter.zig` plus feature coverage in `test/features/expressions/in_test.zig` (including `!in(...)` behavior and assignment-path type mismatch failure).

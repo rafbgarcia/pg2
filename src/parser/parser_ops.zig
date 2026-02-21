@@ -99,50 +99,11 @@ fn parseSortOp(
             pos += 1;
         }
 
-        if (isAggOrFn(tokens.tokens[pos].token_type)) {
-            const expr = try expression_mod.parseExpression(ast, tokens, source, pos);
-            pos = expr.pos;
-            var direction: u16 = 0;
-            if (pos < tokens.count and tokens.tokens[pos].token_type == .kw_desc) {
-                direction = 1;
-                pos += 1;
-            } else if (pos < tokens.count and tokens.tokens[pos].token_type == .kw_asc) {
-                pos += 1;
-            }
-            const key_node = try ast.addNodeFull(
-                .sort_key,
-                .{ .unary = expr.node },
-                direction | sort_key_expr_mask,
-                null_node,
-            );
-            if (first_key == null_node) {
-                first_key = key_node;
-                last_key = key_node;
-            } else {
-                ast.setNext(last_key, key_node);
-                last_key = key_node;
-            }
-            continue;
-        }
+        const key_node = if (isBareSortColumnKey(tokens, pos))
+            try parseSortColumnKey(ast, tokens, &pos)
+        else
+            try parseSortExpressionKey(ast, tokens, source, &pos);
 
-        if (!tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type)) return error.UnexpectedToken;
-        const field_tok = pos;
-        pos += 1;
-
-        var direction: u16 = 0;
-        if (pos < tokens.count and tokens.tokens[pos].token_type == .kw_asc) {
-            pos += 1;
-        } else if (pos < tokens.count and tokens.tokens[pos].token_type == .kw_desc) {
-            direction = 1;
-            pos += 1;
-        }
-
-        const key_node = try ast.addNodeFull(
-            .sort_key,
-            .{ .token = field_tok },
-            direction & sort_key_desc_mask,
-            null_node,
-        );
         if (first_key == null_node) {
             first_key = key_node;
             last_key = key_node;
@@ -156,6 +117,64 @@ fn parseSortOp(
 
     const node = try ast.addNode(.op_sort, .{ .unary = first_key });
     return .{ .node = node, .pos = pos };
+}
+
+fn isBareSortColumnKey(tokens: *const TokenizeResult, pos: u16) bool {
+    if (pos >= tokens.count) return false;
+    if (!tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type)) return false;
+    const next = pos + 1;
+    if (next >= tokens.count) return true;
+    return switch (tokens.tokens[next].token_type) {
+        .kw_asc, .kw_desc, .comma, .right_paren => true,
+        else => false,
+    };
+}
+
+fn parseSortDirection(tokens: *const TokenizeResult, pos: *u16) u16 {
+    var direction: u16 = 0;
+    if (pos.* < tokens.count and tokens.tokens[pos.*].token_type == .kw_asc) {
+        pos.* += 1;
+    } else if (pos.* < tokens.count and tokens.tokens[pos.*].token_type == .kw_desc) {
+        direction = 1;
+        pos.* += 1;
+    }
+    return direction;
+}
+
+fn parseSortColumnKey(
+    ast: *Ast,
+    tokens: *const TokenizeResult,
+    pos: *u16,
+) ParseError!NodeIndex {
+    if (!tokenizer_mod.isContextualIdentifier(tokens.tokens[pos.*].token_type)) {
+        return error.UnexpectedToken;
+    }
+    const field_tok = pos.*;
+    pos.* += 1;
+    const direction = parseSortDirection(tokens, pos);
+    return ast.addNodeFull(
+        .sort_key,
+        .{ .token = field_tok },
+        direction & sort_key_desc_mask,
+        null_node,
+    );
+}
+
+fn parseSortExpressionKey(
+    ast: *Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    pos: *u16,
+) ParseError!NodeIndex {
+    const expr = try expression_mod.parseExpression(ast, tokens, source, pos.*);
+    pos.* = expr.pos;
+    const direction = parseSortDirection(tokens, pos);
+    return ast.addNodeFull(
+        .sort_key,
+        .{ .unary = expr.node },
+        direction | sort_key_expr_mask,
+        null_node,
+    );
 }
 
 fn parseSingleExprOp(

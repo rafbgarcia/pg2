@@ -217,6 +217,13 @@ test "parse sort with multiple keys" {
     try testing.expect(!result.has_error);
 }
 
+test "parse sort with arithmetic expression key" {
+    const source = "User |> sort(score + bonus desc, id asc) { id }";
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(!result.has_error);
+}
+
 test "parse update mutation" {
     const source =
         \\User |> where(id == 1) |> update(name = "Bob") { id name }
