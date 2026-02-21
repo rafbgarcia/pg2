@@ -4,7 +4,7 @@ const pg2 = @import("pg2");
 const overflow_mod = pg2.storage.overflow;
 const feature = @import("../test_env_test.zig");
 
-test "feature string fields preserve user-facing text values" {
+test "feature string fields preserve user-facing text values across insert and update" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
@@ -17,11 +17,23 @@ test "feature string fields preserve user-facing text values" {
         \\}
     );
 
-    var result = try executor.run(
+    _ = try executor.run(
         "CustomerProfile |> insert(id = 1, display_name = \"Ada Lovelace\") {}",
     );
+
+    var result = try executor.run(
+        "CustomerProfile |> where(id = 1) { id display_name }",
+    );
     try std.testing.expectEqualStrings(
-        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,Ada Lovelace\n",
+        result,
+    );
+
+    result = try executor.run(
+        "CustomerProfile |> where(id = 1) |> update(display_name = \"Grace Hopper\") {}",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=0 updated_rows=1 deleted_rows=0\n",
         result,
     );
 
@@ -29,7 +41,7 @@ test "feature string fields preserve user-facing text values" {
         "CustomerProfile |> where(id = 1) { id display_name }",
     );
     try std.testing.expectEqualStrings(
-        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,Ada Lovelace\n",
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,Grace Hopper\n",
         result,
     );
 }

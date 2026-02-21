@@ -2,7 +2,7 @@
 const std = @import("std");
 const feature = @import("../test_env_test.zig");
 
-test "feature timestamp fields preserve epoch microseconds" {
+test "feature timestamp fields preserve epoch microseconds across insert and update" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
@@ -17,9 +17,21 @@ test "feature timestamp fields preserve epoch microseconds" {
 
     _ = try executor.run("AuditEntry |> insert(id = 1, recorded_at = 1700000000123456) {}");
 
-    const result = try executor.run("AuditEntry |> where(id = 1) { id recorded_at }");
+    var result = try executor.run("AuditEntry |> where(id = 1) { id recorded_at }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,1700000000123456\n",
+        result,
+    );
+
+    result = try executor.run("AuditEntry |> where(id = 1) |> update(recorded_at = 1700000000999999) {}");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=0 updated_rows=1 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run("AuditEntry |> where(id = 1) { id recorded_at }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,1700000000999999\n",
         result,
     );
 }
