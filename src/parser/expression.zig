@@ -88,7 +88,7 @@ fn isEndOfExpression(tok_type: TokenType) bool {
 }
 
 fn isUnaryPrefix(tok_type: TokenType) bool {
-    return tok_type == .kw_not;
+    return tok_type == .kw_not or tok_type == .minus;
 }
 
 /// An entry on the operator stack during shunting-yard.
@@ -251,7 +251,7 @@ pub fn parseExpression(
                 continue;
             }
 
-            if (tok.token_type == .identifier or tok.token_type == .model_name) {
+            if (tokenizer_mod.isContextualIdentifier(tok.token_type) or tok.token_type == .model_name) {
                 const node = try ast.addNode(.expr_column_ref, .{ .token = pos });
                 if (output_count >= max_output_stack) return error.StackOverflow;
                 output_stack[output_count] = node;
@@ -487,8 +487,12 @@ fn flushOperators(
     while (op_count.* > 0) {
         const top = op_stack[op_count.* - 1];
         if (top.tok_type == .left_paren) break;
-        const top_prec = precedence(top.tok_type);
+        const top_prec: u8 = if (top.is_unary)
+            1
+        else
+            precedence(top.tok_type);
         if (top_prec > prec) break;
+        if (top_prec == prec and top.is_unary) break;
         if (top_prec == prec and isRightAssociative(top.tok_type)) break;
         try popOperator(op_stack, op_count, output_stack, output_count, ast);
     }
@@ -640,6 +644,26 @@ test "unary not" {
 
     const operand = ast.getNode(node.data.unary);
     try testing.expectEqual(NodeTag.expr_literal, operand.tag);
+}
+
+test "unary minus parses as unary expression" {
+    var ast = Ast{};
+    const tokens = tokenizer_mod.tokenize("-5");
+    const result = try parseExpression(&ast, &tokens, 0);
+    const node = ast.getNode(result.node);
+    try testing.expectEqual(NodeTag.expr_unary, node.tag);
+    const operand = ast.getNode(node.data.unary);
+    try testing.expectEqual(NodeTag.expr_literal, operand.tag);
+}
+
+test "contextual keyword parses as column reference in expression" {
+    var ast = Ast{};
+    const tokens = tokenizer_mod.tokenize("offset = 1");
+    const result = try parseExpression(&ast, &tokens, 0);
+    const node = ast.getNode(result.node);
+    try testing.expectEqual(NodeTag.expr_binary, node.tag);
+    const lhs = ast.getNode(node.data.binary.lhs);
+    try testing.expectEqual(NodeTag.expr_column_ref, lhs.tag);
 }
 
 test "comparison operators" {

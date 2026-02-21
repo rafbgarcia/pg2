@@ -7,6 +7,7 @@
 //! - Returns strict typed errors for invalid predicates and expression misuse.
 const std = @import("std");
 const ast_mod = @import("../parser/ast.zig");
+const expression_mod = @import("../parser/expression.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
 const row_mod = @import("../storage/row.zig");
 
@@ -676,6 +677,16 @@ pub fn applyUnaryOp(operand: Value, op: TokenType) EvalError!Value {
                 if (operand.i32 == std.math.minInt(i32)) return error.NumericOverflow;
                 break :blk Value{ .i32 = -operand.i32 };
             }
+            if (operand == .u64) {
+                const magnitude = operand.u64;
+                const signed_min_magnitude: u64 = @as(u64, std.math.maxInt(i64)) + 1;
+                if (magnitude > signed_min_magnitude) return error.NumericOverflow;
+                if (magnitude == signed_min_magnitude) {
+                    break :blk Value{ .i64 = std.math.minInt(i64) };
+                }
+                const narrowed = std.math.cast(i64, magnitude) orelse return error.NumericOverflow;
+                break :blk Value{ .i64 = -narrowed };
+            }
             if (operand == .f64) break :blk Value{ .f64 = -operand.f64 };
             return error.TypeMismatch;
         },
@@ -1092,6 +1103,41 @@ test "unary minus overflow returns error" {
     const result = applyUnaryOp(
         .{ .i64 = std.math.minInt(i64) },
         .minus,
+    );
+    try testing.expectError(error.NumericOverflow, result);
+}
+
+test "unary minus supports signed i64 minimum literal through expression path" {
+    var tree = Ast{};
+    const source = "-9223372036854775808";
+    const tokens = tokenizer_mod.tokenize(source);
+    const expr = try expression_mod.parseExpression(&tree, &tokens, 0);
+    const schema = RowSchema{};
+    const result = try evaluateExpression(
+        &tree,
+        &tokens,
+        source,
+        expr.node,
+        &.{},
+        &schema,
+    );
+    try testing.expect(result == .i64);
+    try testing.expectEqual(std.math.minInt(i64), result.i64);
+}
+
+test "unary minus rejects values below signed i64 minimum" {
+    var tree = Ast{};
+    const source = "-9223372036854775809";
+    const tokens = tokenizer_mod.tokenize(source);
+    const expr = try expression_mod.parseExpression(&tree, &tokens, 0);
+    const schema = RowSchema{};
+    const result = evaluateExpression(
+        &tree,
+        &tokens,
+        source,
+        expr.node,
+        &.{},
+        &schema,
     );
     try testing.expectError(error.NumericOverflow, result);
 }

@@ -147,6 +147,14 @@ test "parse update mutation" {
     try testing.expect(!result.has_error);
 }
 
+test "parse contextual keyword identifiers in query positions" {
+    const source =
+        "User |> where(offset = 1) |> sort(offset desc) |> update(offset = offset + 1) { offset }";
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(!result.has_error);
+}
+
 test "parse scope in schema" {
     const source =
         \\User {

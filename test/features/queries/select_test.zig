@@ -74,7 +74,7 @@ test "feature query projection returns only requested columns via session path" 
     result = try executor.run("User |> where(id = 1) { id name }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n" ++
-        "1,Alice\n",
+            "1,Alice\n",
         result,
     );
 }
@@ -156,4 +156,29 @@ test "feature query nested projection returns tree-shaped roots with nested list
         "\"Bob\",[]\n" ++
         "\"Trish\",[]\n";
     try std.testing.expectEqualStrings(expected, result);
+}
+
+test "feature query supports operator-keyword field names in where sort and projection" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\KeywordFields {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(offset, i64, notNull)
+        \\}
+    );
+
+    _ = try executor.run("KeywordFields |> insert(id = 1, offset = 20) {}");
+    _ = try executor.run("KeywordFields |> insert(id = 2, offset = 10) {}");
+
+    const result = try executor.run(
+        "KeywordFields |> where(offset >= 10) |> sort(offset asc) { id offset }",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=2 inserted_rows=0 updated_rows=0 deleted_rows=0\n2,10\n1,20\n",
+        result,
+    );
 }

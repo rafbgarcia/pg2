@@ -89,7 +89,7 @@ fn parseSchemaMember(
     if (tok_type == .kw_scope) {
         if (pos >= tokens.count) return error.UnexpectedToken;
         const scope_name_tok = pos;
-        if (tokens.tokens[pos].token_type != .identifier) return error.UnexpectedToken;
+        if (!tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type)) return error.UnexpectedToken;
         pos += 1;
 
         var first_op: NodeIndex = null_node;
@@ -131,6 +131,9 @@ fn parseSchemaField(
 
     if (pos >= tokens.count) return error.UnexpectedToken;
     const name_tok = pos;
+    if (!tokenizer_mod.isContextualIdentifier(tokens.tokens[name_tok].token_type)) {
+        return error.UnexpectedToken;
+    }
     pos += 1;
     if (pos >= tokens.count or tokens.tokens[pos].token_type != .comma) {
         return error.UnexpectedToken;
@@ -202,20 +205,20 @@ fn parseSchemaReference(
     var first_payload: NodeIndex = null_node;
 
     const alias_tok = pos;
-    if (tokens.tokens[pos].token_type != .identifier) return error.UnexpectedToken;
+    if (!tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type)) return error.UnexpectedToken;
     pos += 1;
     if (tokens.tokens[pos].token_type != .comma) return error.UnexpectedToken;
     pos += 1;
 
     const local_field_tok = pos;
-    if (tokens.tokens[pos].token_type != .identifier) return error.UnexpectedToken;
+    if (!tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type)) return error.UnexpectedToken;
     pos += 1;
     if (tokens.tokens[pos].token_type != .comma) return error.UnexpectedToken;
     pos += 1;
 
     const target_model_tok = pos;
     if (tokens.tokens[pos].token_type != .model_name and
-        tokens.tokens[pos].token_type != .identifier)
+        !tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type))
     {
         return error.UnexpectedToken;
     }
@@ -224,7 +227,7 @@ fn parseSchemaReference(
     pos += 1;
 
     const target_field_tok = pos;
-    if (tokens.tokens[pos].token_type != .identifier) return error.UnexpectedToken;
+    if (!tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type)) return error.UnexpectedToken;
     pos += 1;
     if (tokens.tokens[pos].token_type != .comma) return error.UnexpectedToken;
     pos += 1;
@@ -315,7 +318,7 @@ fn parseSchemaIndex(
         return error.UnexpectedToken;
     }
     pos += 1;
-    if (pos >= tokens.count or tokens.tokens[pos].token_type != .identifier) {
+    if (pos >= tokens.count or !tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type)) {
         return error.UnexpectedToken;
     }
     index_name_tok = pos;
@@ -333,7 +336,7 @@ fn parseSchemaIndex(
     while (pos < tokens.count and tokens.tokens[pos].token_type != .right_bracket) {
         const tt = tokens.tokens[pos].token_type;
         if (expect_column) {
-            if (tt != .identifier) return error.UnexpectedToken;
+            if (!tokenizer_mod.isContextualIdentifier(tt)) return error.UnexpectedToken;
             const col_node = try ast.addNode(.expr_column_ref, .{ .token = pos });
             pos += 1;
             if (first_col == null_node) {

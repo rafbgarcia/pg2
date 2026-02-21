@@ -96,7 +96,7 @@ fn parseLetBinding(
 
     if (pos >= tokens.count) return error.UnexpectedToken;
     const name_tok = pos;
-    if (tokens.tokens[pos].token_type != .identifier) return error.UnexpectedToken;
+    if (!tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type)) return error.UnexpectedToken;
     pos += 1;
 
     if (pos >= tokens.count or tokens.tokens[pos].token_type != .equal) {
@@ -159,7 +159,7 @@ fn parsePipeline(
 
     const source_tok = pos;
     if (tokens.tokens[pos].token_type != .model_name and
-        tokens.tokens[pos].token_type != .identifier)
+        !tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type))
     {
         return error.UnexpectedToken;
     }
@@ -171,7 +171,7 @@ fn parsePipeline(
     if (pos < tokens.count and tokens.tokens[pos].token_type == .dot) {
         pos += 1;
         if (pos < tokens.count and
-            (tokens.tokens[pos].token_type == .identifier or
+            (tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type) or
                 tokens.tokens[pos].token_type == .model_name))
         {
             ast.getNodeMut(source_node).extra = pos;
@@ -271,7 +271,7 @@ fn parseSelectionField(
 
     // Computed field: alias: expr.
     if (pos + 1 < tokens.count and
-        tokens.tokens[pos].token_type == .identifier and
+        tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type) and
         tokens.tokens[pos + 1].token_type == .colon)
     {
         const alias_tok = pos;
@@ -288,7 +288,7 @@ fn parseSelectionField(
     }
 
     // Nested relation or simple field.
-    if (tokens.tokens[pos].token_type == .identifier) {
+    if (tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type)) {
         const next_pos = pos + 1;
         if (next_pos < tokens.count and
             (tokens.tokens[next_pos].token_type == .pipe_arrow or

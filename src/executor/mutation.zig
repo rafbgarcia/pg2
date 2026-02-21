@@ -8,6 +8,7 @@
 //! - Records undo entries required for MVCC visibility and recovery.
 const std = @import("std");
 const ast_mod = @import("../parser/ast.zig");
+const expression_mod = @import("../parser/expression.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
 const page_mod = @import("../storage/page.zig");
 const heap_mod = @import("../storage/heap.zig");
@@ -1908,6 +1909,45 @@ test "insert and scan back" {
         "Alice",
         result.rows[0].values[1].string,
     );
+}
+
+test "mutation coercion accepts signed i64 minimum literal" {
+    var expr_ast = Ast{};
+    const source = "-9223372036854775808";
+    const tokens = tokenizer_mod.tokenize(source);
+    const expr = try expression_mod.parseExpression(&expr_ast, &tokens, 0);
+    const schema = RowSchema{};
+    const value = try filter_mod.evaluateExpression(
+        &expr_ast,
+        &tokens,
+        source,
+        expr.node,
+        &.{},
+        &schema,
+    );
+
+    const coerced = try coerceValueForColumn(value, .i64);
+    try testing.expect(coerced == .i64);
+    try testing.expectEqual(std.math.minInt(i64), coerced.i64);
+}
+
+test "mutation coercion fails closed for i8 underflow literal" {
+    var expr_ast = Ast{};
+    const source = "-129";
+    const tokens = tokenizer_mod.tokenize(source);
+    const expr = try expression_mod.parseExpression(&expr_ast, &tokens, 0);
+    const schema = RowSchema{};
+    const value = try filter_mod.evaluateExpression(
+        &expr_ast,
+        &tokens,
+        source,
+        expr.node,
+        &.{},
+        &schema,
+    );
+
+    const result = coerceValueForColumn(value, .i8);
+    try testing.expectError(error.TypeMismatch, result);
 }
 
 test "insert spills oversized string and scan resolves overflow payload" {

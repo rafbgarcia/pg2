@@ -348,6 +348,32 @@ fn isIdentChar(c: u8) bool {
     return isIdentStart(c) or isDigit(c);
 }
 
+/// Returns true when a token can be interpreted as an identifier in contexts
+/// where the grammar explicitly expects a name.
+///
+/// This is intentionally limited to pipeline/sort operator keywords that would
+/// otherwise collide with field/scope/index names. Logical/type/schema keywords
+/// remain reserved to keep expression parsing deterministic and fail-closed.
+pub fn isContextualIdentifier(tok_type: TokenType) bool {
+    return switch (tok_type) {
+        .identifier,
+        .kw_where,
+        .kw_sort,
+        .kw_limit,
+        .kw_offset,
+        .kw_group,
+        .kw_unique,
+        .kw_delete,
+        .kw_insert,
+        .kw_update,
+        .kw_inspect,
+        .kw_asc,
+        .kw_desc,
+        => true,
+        else => false,
+    };
+}
+
 /// Classify an identifier word as a keyword, aggregate, function, or plain identifier.
 fn classifyWord(text: []const u8, starts_upper: bool) TokenType {
     // Check keywords first.
@@ -661,4 +687,12 @@ test "reference and RI keywords" {
     try testing.expectEqual(TokenType.kw_without_referential_integrity, result.tokens[2].token_type);
     try testing.expectEqual(TokenType.kw_on_delete_restrict, result.tokens[3].token_type);
     try testing.expectEqual(TokenType.kw_on_update_cascade, result.tokens[4].token_type);
+}
+
+test "contextual identifier helper allows operator keywords only" {
+    try testing.expect(isContextualIdentifier(.identifier));
+    try testing.expect(isContextualIdentifier(.kw_offset));
+    try testing.expect(isContextualIdentifier(.kw_desc));
+    try testing.expect(!isContextualIdentifier(.kw_not));
+    try testing.expect(!isContextualIdentifier(.kw_i64));
 }

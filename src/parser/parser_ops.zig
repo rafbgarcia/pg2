@@ -122,7 +122,7 @@ fn parseSortOp(
             continue;
         }
 
-        if (tokens.tokens[pos].token_type != .identifier) return error.UnexpectedToken;
+        if (!tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type)) return error.UnexpectedToken;
         const field_tok = pos;
         pos += 1;
 
@@ -200,7 +200,7 @@ fn parseGroupOp(
             if (tokens.tokens[pos].token_type != .comma) break;
             pos += 1;
         }
-        if (tokens.tokens[pos].token_type != .identifier) return error.UnexpectedToken;
+        if (!tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type)) return error.UnexpectedToken;
         const field_node = try ast.addNode(.expr_column_ref, .{ .token = pos });
         pos += 1;
 
@@ -240,7 +240,7 @@ fn parseMutationOp(
             if (tokens.tokens[pos].token_type != .comma) break;
             pos += 1;
         }
-        if (tokens.tokens[pos].token_type != .identifier) return error.UnexpectedToken;
+        if (!tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type)) return error.UnexpectedToken;
         const field_tok = pos;
         pos += 1;
 
