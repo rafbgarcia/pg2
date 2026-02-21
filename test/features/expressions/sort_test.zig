@@ -1,6 +1,6 @@
 //! Feature coverage for sort expression behavior through server session path.
 const std = @import("std");
-const feature = @import("../../test_env_test.zig");
+const feature = @import("../test_env_test.zig");
 
 fn expectContains(haystack: []const u8, needle: []const u8) !void {
     try std.testing.expect(std.mem.indexOf(u8, haystack, needle) != null);

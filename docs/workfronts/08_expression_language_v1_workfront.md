@@ -133,7 +133,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - Every listed file exists, is imported in feature suite, and passes.
 - Recommended foldering for clarity at scale:
   - Keep all expression behavior under `test/features/expressions/`.
-  - Split by concern: `functions/`, `semantics/`, `contexts/`, `diagnostics/`.
+  - Split by concern: `stdlib/`, `semantics/`, `contexts/`, `diagnostics/`.
   - For built-ins, use one file per function (avoids broad multi-function files and makes failures easier to localize).
 
 ### Tasks
@@ -154,9 +154,9 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - [ ] `T15` `test/features/expressions/logical_and_test.zig` (side note: conjunction `&&` semantics and parse shape)
 - [ ] `T16` `test/features/expressions/logical_or_test.zig` (side note: disjunction `||` semantics and parse shape)
 - [ ] `T17` `test/features/expressions/parameters_test.zig` (side note: parameter binding semantics, undefined-parameter failures, and deterministic diagnostics)
-- [ ] `T18` `test/features/expressions/functions/abs_test.zig`, `test/features/expressions/functions/sqrt_test.zig`, `test/features/expressions/functions/round_test.zig` (side note: numeric builtin behavior and type/arity validation; one file per function)
-- [ ] `T19` `test/features/expressions/functions/lower_test.zig`, `test/features/expressions/functions/upper_test.zig`, `test/features/expressions/functions/trim_test.zig`, `test/features/expressions/functions/length_test.zig`, `test/features/expressions/functions/coalesce_test.zig` (side note: string/null-handling builtins with edge cases; one file per function)
-- [ ] `T20` `test/features/expressions/functions/now_test.zig` (side note: deterministic time function behavior via injected clock; no system clock in core code)
+- [ ] `T18` `test/features/expressions/stdlib/abs_test.zig`, `test/features/expressions/stdlib/sqrt_test.zig`, `test/features/expressions/stdlib/round_test.zig` (side note: numeric builtin behavior and type/arity validation; one file per function)
+- [ ] `T19` `test/features/expressions/stdlib/lower_test.zig`, `test/features/expressions/stdlib/upper_test.zig`, `test/features/expressions/stdlib/trim_test.zig`, `test/features/expressions/stdlib/length_test.zig`, `test/features/expressions/stdlib/coalesce_test.zig` (side note: string/null-handling builtins with edge cases; one file per function)
+- [ ] `T20` `test/features/expressions/stdlib/now_test.zig` (side note: deterministic time function behavior via injected clock; no system clock in core code)
 - [ ] `T21` `test/features/expressions/semantics/null_semantics_test.zig` (side note: null propagation and boolean/null truth-table behavior across arithmetic, comparisons, and predicates)
 - [ ] `T22` `test/features/expressions/contexts/cross_context_test.zig` (side note: same expression semantics in `where`, `update`, computed `select`, `sort(expr)`, and `having`)
 - [ ] `T23` `test/features/expressions/diagnostics/diagnostics_test.zig` (side note: deterministic fail-closed parser/evaluator errors with precise messages/locations for invalid shapes and type/null violations)
@@ -193,6 +193,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - Do not implement until explicit product sign-off.
 
 ## Implementation Log
+- 2026-02-21: Reorganized expression feature folder intent: operator/context behavior remains at `test/features/expressions/*.zig` (including `sort_test.zig`), while standard-library builtin coverage is tracked under `test/features/expressions/stdlib/` (renamed from `functions/` in workfront references).
 - 2026-02-21: Completed `E21` by extending sort-key parsing to accept general expression keys (not only aggregate/builtin-led forms), while preserving bare-column sort syntax. Added parser coverage for arithmetic sort expressions and validated runtime parity through feature tests using `sort(base + extra ...)`, `sort(base - extra ...)`, and `sort(in(status, [...]) ...)` in `test/features/expressions/`. Kept computed-select assertions out of this change because computed projection shaping remains gated under `E20`.
 - 2026-02-21: Completed `T01` by adding `test/features/expressions/subtraction_test.zig` with dedicated feature coverage for representative numeric subtraction (`i64`, `u64`, `f64`) plus fail-closed mutation diagnostics for type mismatch, constrained integer underflow (`IntegerOutOfRange` with assignment path), and null arithmetic operands. Imported the new file in `test/features/features_specs_test.zig` and validated via `zig build test`.
 - 2026-02-21: Added explicit follow-up planning for membership diagnostics (`D05`) and runtime list value-model decisioning (`R01`-`R03`) so future variable/subquery-backed membership support is gated by an explicit product/runtime model decision.
