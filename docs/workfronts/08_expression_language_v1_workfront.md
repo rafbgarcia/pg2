@@ -171,8 +171,18 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - [ ] `D02` Normalize evaluator errors for null arithmetic, type mismatch, and invalid predicate result.
 - [ ] `D03` Ensure mutation-path diagnostics include precise assignment path for expression failures.
 - [ ] `D04` Add regression tests for fail-closed behavior on unsupported textual expression shapes.
+- [ ] `D05` Add membership-specific evaluator diagnostics that identify incompatible operand/list element types for `in(value, list)` failures.
 
-## Phase 7: Pending Product Decision
+## Phase 7: Runtime Value Model Decision
+### Gate
+- Runtime expression value model for collections is explicit before extending membership to variable/subquery-backed list sources.
+
+### Tasks
+- [ ] `R01` Decide whether expression runtime values include first-class list values beyond direct list literals.
+- [ ] `R02` If approved, design `Value` representation and evaluator contracts for list-carrying expressions (including parameter/subquery binding paths).
+- [ ] `R03` If deferred, document explicit v1 boundary and fail-closed behavior for unsupported list-producing expression forms.
+
+## Phase 8: Pending Product Decision
 ### Gate
 - Product decision captured explicitly before implementation.
 
@@ -183,6 +193,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - Do not implement until explicit product sign-off.
 
 ## Implementation Log
+- 2026-02-21: Added explicit follow-up planning for membership diagnostics (`D05`) and runtime list value-model decisioning (`R01`-`R03`) so future variable/subquery-backed membership support is gated by an explicit product/runtime model decision.
 - 2026-02-21: Completed `E07`, `E08`, and `E09` by adding dedicated evaluator handling for membership function calls (`in(value, list)`) with list-literal element evaluation and null-aware semantics: `in(null, list) -> null`, no-match with null element -> `null`, direct match -> `true`, null-free miss -> `false`. Enforced fail-closed type mismatch for incompatible non-null membership comparisons and added unit coverage in `src/executor/filter.zig` plus feature coverage in `test/features/expressions/in_test.zig` (including `!in(...)` behavior and assignment-path type mismatch failure).
 - 2026-02-21: Completed `E05` by introducing a dedicated `==` tokenizer token for expression equality, migrating expression parsing/evaluation from `=` to `==`, and keeping `=` only for assignment/config grammar. Added parser regressions that reject `=` in expression contexts (`where`, computed `select`, `sort(expr)`, assignment RHS expression) and migrated query/test fixtures using expression predicates to `==`.
 - 2026-02-21: Product decision captured: expression equality uses `==`; `=` is assignment/config-only syntax. Added migration tasks for tokenizer/parser/evaluator and feature coverage, including fail-closed rejection of `=` in expression contexts.
