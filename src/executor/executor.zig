@@ -361,6 +361,17 @@ fn executeReadPipeline(
     result.stats.rows_returned = result.row_count;
 }
 
+const ProjectionKind = enum {
+    column,
+    expression,
+};
+
+const ProjectionDescriptor = struct {
+    kind: ProjectionKind,
+    column_index: u16 = 0,
+    expr_node: NodeIndex = null_node,
+};
+
 fn applyFlatColumnProjection(
     ctx: *const ExecContext,
     result: *QueryResult,
@@ -372,7 +383,7 @@ fn applyFlatColumnProjection(
     const source_model = &ctx.catalog.models[model_id];
     const source_schema = &source_model.row_schema;
 
-    var projection_indices: [scan_mod.max_columns]u16 = undefined;
+    var projection_descriptors: [scan_mod.max_columns]ProjectionDescriptor = undefined;
     var projection_count: u16 = 0;
     var joined_column_offset: u16 = source_schema.column_count;
 
@@ -386,11 +397,30 @@ fn applyFlatColumnProjection(
                     setError(result, "select column not found");
                     return false;
                 };
-                if (!appendProjectionIndex(
+                if (!appendProjectionDescriptor(
                     result,
-                    &projection_indices,
+                    &projection_descriptors,
                     &projection_count,
-                    col_idx,
+                    .{
+                        .kind = .column,
+                        .column_index = col_idx,
+                    },
+                )) return false;
+            },
+            .select_computed => {
+                const expr_node = node.data.unary;
+                if (expr_node == null_node) {
+                    setError(result, "computed select expression missing");
+                    return false;
+                }
+                if (!appendProjectionDescriptor(
+                    result,
+                    &projection_descriptors,
+                    &projection_count,
+                    .{
+                        .kind = .expression,
+                        .expr_node = expr_node,
+                    },
                 )) return false;
             },
             .select_nested => {
@@ -429,11 +459,14 @@ fn applyFlatColumnProjection(
                                 setError(result, "select column not found");
                                 return false;
                             };
-                            if (!appendProjectionIndex(
+                            if (!appendProjectionDescriptor(
                                 result,
-                                &projection_indices,
+                                &projection_descriptors,
                                 &projection_count,
-                                joined_column_offset + nested_col_idx,
+                                .{
+                                    .kind = .column,
+                                    .column_index = joined_column_offset + nested_col_idx,
+                                },
                             )) return false;
                         },
                         // Nested relation and computed-field projection shaping
@@ -445,8 +478,6 @@ fn applyFlatColumnProjection(
                 }
                 joined_column_offset += target_model.row_schema.column_count;
             },
-            // Computed-field projection shaping is not implemented in this pass.
-            .select_computed => return true,
             else => return true,
         }
         field = node.next;
@@ -457,12 +488,30 @@ fn applyFlatColumnProjection(
     var row_index: u16 = 0;
     while (row_index < result.row_count) : (row_index += 1) {
         var projected: [scan_mod.max_columns]Value = undefined;
-        for (projection_indices[0..projection_count], 0..) |source_idx, out_idx| {
-            if (source_idx >= result.rows[row_index].column_count) {
-                setError(result, "projection column out of bounds");
-                return false;
+        for (projection_descriptors[0..projection_count], 0..) |descriptor, out_idx| {
+            switch (descriptor.kind) {
+                .column => {
+                    if (descriptor.column_index >= result.rows[row_index].column_count) {
+                        setError(result, "projection column out of bounds");
+                        return false;
+                    }
+                    projected[out_idx] = result.rows[row_index].values[descriptor.column_index];
+                },
+                .expression => {
+                    const value = filter_mod.evaluateExpression(
+                        ctx.ast,
+                        ctx.tokens,
+                        ctx.source,
+                        descriptor.expr_node,
+                        result.rows[row_index].values[0..result.rows[row_index].column_count],
+                        source_schema,
+                    ) catch {
+                        setError(result, "select computed expression evaluation failed");
+                        return false;
+                    };
+                    projected[out_idx] = value;
+                },
             }
-            projected[out_idx] = result.rows[row_index].values[source_idx];
         }
         @memcpy(
             result.rows[row_index].values[0..projection_count],
@@ -474,17 +523,17 @@ fn applyFlatColumnProjection(
     return true;
 }
 
-fn appendProjectionIndex(
+fn appendProjectionDescriptor(
     result: *QueryResult,
-    projection_indices: *[scan_mod.max_columns]u16,
+    projection_descriptors: *[scan_mod.max_columns]ProjectionDescriptor,
     projection_count: *u16,
-    idx: u16,
+    descriptor: ProjectionDescriptor,
 ) bool {
     if (projection_count.* >= scan_mod.max_columns) {
         setError(result, "projection column capacity exceeded");
         return false;
     }
-    projection_indices.*[projection_count.*] = idx;
+    projection_descriptors.*[projection_count.*] = descriptor;
     projection_count.* += 1;
     return true;
 }

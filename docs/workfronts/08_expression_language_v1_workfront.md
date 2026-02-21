@@ -124,7 +124,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 ### Tasks
 - [x] `E18` `where` expression parity suite.
 - [x] `E19` `update` assignment expression parity suite.
-- [ ] `E20` computed `select` expression parity suite.
+- [x] `E20` computed `select` expression parity suite.
 - [x] `E21` `sort(expr)` expression parity suite.
 - [ ] `E22` `having` expression parity suite (with aggregates).
 
@@ -193,6 +193,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - Do not implement until explicit product sign-off.
 
 ## Implementation Log
+- 2026-02-21: Completed `E20` by implementing runtime projection support for top-level computed select fields (`select_computed`) in `src/executor/executor.zig` and adding `test/features/expressions/computed_select_test.zig`. Coverage includes parity between `where` and computed projection for composed boolean/arithmetic/membership expressions, null equality semantics in computed output (`status == null || status != null`), and fail-closed computed projection errors for incompatible comparison types. Imported in `test/features/features_specs_test.zig` and validated with `zig build test`.
 - 2026-02-21: Completed `E19` by adding `test/features/expressions/update_assignment_test.zig` with dedicated parity coverage for expression evaluation in `update(...)` assignments: composed boolean/arithmetic/membership expressions aligned with `where` outcomes, null equality semantics (`status == null || status != null`) assigned through update paths, fail-closed incompatible comparison typing (`string == i64`), and fail-closed null arithmetic operand diagnostics with assignment path (`path=update.flag`). Imported the file in `test/features/features_specs_test.zig` and validated via `zig build test`.
 - 2026-02-21: Completed `E11` and `E12a` by normalizing evaluator null/comparison semantics in `src/executor/filter.zig`: symbolic boolean operators now evaluate with null-aware three-valued logic instead of fail-closed type mismatch on null operands; equality operators now apply explicit null semantics (`null == null` true, mixed null `!=` true) and fail closed on incompatible non-numeric cross-type comparisons. Added evaluator regressions for null-aware boolean behavior, null equality/ordering outcomes, and equality type-mismatch failures. Revalidated `test/features/expressions/where_test.zig` against the original parity expectations that depend on these semantics.
 - 2026-02-21: Completed `E18` by adding `test/features/expressions/where_test.zig` with dedicated parity coverage for `where(...)` across arithmetic/comparison predicates, boolean precedence/parentheses behavior, membership composition (`in`/`!in`), direct and negated boolean-column predicates, and fail-closed handling for non-boolean predicate outputs. Imported the suite in `test/features/features_specs_test.zig` and validated with `zig build test`.
