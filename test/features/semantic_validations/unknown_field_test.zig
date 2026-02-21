@@ -19,7 +19,7 @@ test "feature insert fails closed on unknown field assignment" {
         "User |> insert(id = 1, nickname = \"ali\") {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=ColumnNotFound\n",
+        "ERR query: phase=mutation code=ColumnNotFound path=insert.nickname line=1 col=24 message=\"field does not exist on model; check the schema field name or update the assignment\"\n",
         result,
     );
 }

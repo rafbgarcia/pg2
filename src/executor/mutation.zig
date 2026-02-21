@@ -90,6 +90,26 @@ pub const MutationError = error{
     UnsupportedReferentialAction,
 };
 
+pub const MutationDiagnosticCode = enum {
+    IntegerOutOfRange,
+    TypeMismatch,
+    ColumnNotFound,
+    NumericOverflow,
+};
+
+pub const MutationDiagnostic = struct {
+    has_value: bool = false,
+    code: MutationDiagnosticCode = .TypeMismatch,
+    field_token: ?u16 = null,
+    location_token: ?u16 = null,
+    message: [220]u8 = std.mem.zeroes([220]u8),
+
+    pub fn messageSlice(self: *const MutationDiagnostic) []const u8 {
+        const len = std.mem.indexOfScalar(u8, &self.message, 0) orelse self.message.len;
+        return self.message[0..len];
+    }
+};
+
 const PinnedMutationPage = struct {
     pool: *BufferPool,
     page_id: u64,
@@ -150,6 +170,32 @@ pub fn executeInsert(
     source: []const u8,
     first_assignment_node: NodeIndex,
 ) MutationError!RowId {
+    return executeInsertWithDiagnostic(
+        catalog,
+        pool,
+        wal,
+        tx_id,
+        model_id,
+        tree,
+        tokens,
+        source,
+        first_assignment_node,
+        null,
+    );
+}
+
+pub fn executeInsertWithDiagnostic(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    tx_id: TxId,
+    model_id: ModelId,
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    first_assignment_node: NodeIndex,
+    diagnostic: ?*MutationDiagnostic,
+) MutationError!RowId {
     std.debug.assert(model_id < catalog.model_count);
     const model = &catalog.models[model_id];
     const schema = &model.row_schema;
@@ -167,6 +213,7 @@ pub fn executeInsert(
         first_assignment_node,
         &values,
         &assigned_columns,
+        diagnostic,
     );
     applyColumnDefaultsForInsert(
         catalog,
@@ -294,6 +341,42 @@ pub fn executeUpdate(
     first_assignment_node: NodeIndex,
     allocator: Allocator,
 ) MutationError!u32 {
+    return executeUpdateWithDiagnostic(
+        catalog,
+        pool,
+        wal,
+        undo_log,
+        tx_id,
+        snapshot,
+        tx_manager,
+        model_id,
+        tree,
+        tokens,
+        source,
+        predicate_node,
+        first_assignment_node,
+        allocator,
+        null,
+    );
+}
+
+pub fn executeUpdateWithDiagnostic(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    undo_log: *UndoLog,
+    tx_id: TxId,
+    snapshot: *const Snapshot,
+    tx_manager: *const TxManager,
+    model_id: ModelId,
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    predicate_node: NodeIndex,
+    first_assignment_node: NodeIndex,
+    allocator: Allocator,
+    diagnostic: ?*MutationDiagnostic,
+) MutationError!u32 {
     std.debug.assert(model_id < catalog.model_count);
     const model = &catalog.models[model_id];
     const schema = &model.row_schema;
@@ -361,6 +444,7 @@ pub fn executeUpdate(
                 schema,
                 first_assignment_node,
                 new_values[0..row.column_count],
+                diagnostic,
             ) catch |e| return e;
 
             try enforceOutgoingReferentialIntegrity(
@@ -1504,6 +1588,7 @@ pub fn buildRowFromAssignments(
     first_assignment: NodeIndex,
     out_values: []Value,
     out_assigned: []bool,
+    diagnostic: ?*MutationDiagnostic,
 ) MutationError!void {
     std.debug.assert(out_values.len >= schema.column_count);
     std.debug.assert(out_assigned.len >= schema.column_count);
@@ -1514,8 +1599,16 @@ pub fn buildRowFromAssignments(
         std.debug.assert(node.tag == .assignment);
 
         const field_name = tokens.getText(node.extra, source);
-        const col_idx = schema.findColumn(field_name) orelse
+        const col_idx = schema.findColumn(field_name) orelse {
+            setDiagnostic(
+                diagnostic,
+                .ColumnNotFound,
+                node.extra,
+                node.extra,
+                "field does not exist on model; check the schema field name or update the assignment",
+            );
             return error.ColumnNotFound;
+        };
 
         const expr_node = node.data.unary;
         const val = filter_mod.evaluateExpression(
@@ -1525,10 +1618,27 @@ pub fn buildRowFromAssignments(
             expr_node,
             &.{},
             schema,
-        ) catch |e| return mapFilterError(e);
+        ) catch |e| {
+            const mapped = mapFilterError(e);
+            if (mapped == error.NumericOverflow) {
+                setIntegerRangeDiagnosticForColumn(
+                    diagnostic,
+                    schema.columns[col_idx].column_type,
+                    node.extra,
+                    expressionLocationToken(tree, expr_node),
+                );
+            }
+            return mapped;
+        };
 
         const expected_type = schema.columns[col_idx].column_type;
-        out_values[col_idx] = try coerceValueForColumn(val, expected_type);
+        out_values[col_idx] = coerceValueForColumn(
+            val,
+            expected_type,
+            diagnostic,
+            node.extra,
+            expressionLocationToken(tree, expr_node),
+        ) catch |e| return e;
         out_assigned[col_idx] = true;
         current = node.next;
     }
@@ -1561,6 +1671,7 @@ fn applyAssignments(
     schema: *const RowSchema,
     first_assignment: NodeIndex,
     values: []Value,
+    diagnostic: ?*MutationDiagnostic,
 ) MutationError!void {
     std.debug.assert(values.len >= schema.column_count);
 
@@ -1570,8 +1681,16 @@ fn applyAssignments(
         std.debug.assert(node.tag == .assignment);
 
         const field_name = tokens.getText(node.extra, source);
-        const col_idx = schema.findColumn(field_name) orelse
+        const col_idx = schema.findColumn(field_name) orelse {
+            setDiagnostic(
+                diagnostic,
+                .ColumnNotFound,
+                node.extra,
+                node.extra,
+                "field does not exist on model; check the schema field name or update the assignment",
+            );
             return error.ColumnNotFound;
+        };
 
         // Evaluate expression with current row values for context.
         const expr_node = node.data.unary;
@@ -1582,33 +1701,220 @@ fn applyAssignments(
             expr_node,
             values,
             schema,
-        ) catch |e| return mapFilterError(e);
+        ) catch |e| {
+            const mapped = mapFilterError(e);
+            if (mapped == error.NumericOverflow) {
+                setIntegerRangeDiagnosticForColumn(
+                    diagnostic,
+                    schema.columns[col_idx].column_type,
+                    node.extra,
+                    expressionLocationToken(tree, expr_node),
+                );
+            }
+            return mapped;
+        };
 
         const expected_type = schema.columns[col_idx].column_type;
-        values[col_idx] = try coerceValueForColumn(val, expected_type);
+        values[col_idx] = coerceValueForColumn(
+            val,
+            expected_type,
+            diagnostic,
+            node.extra,
+            expressionLocationToken(tree, expr_node),
+        ) catch |e| return e;
         current = node.next;
     }
 }
 
-fn coerceValueForColumn(value: Value, target: ColumnType) MutationError!Value {
+fn coerceValueForColumn(
+    value: Value,
+    target: ColumnType,
+    diagnostic: ?*MutationDiagnostic,
+    field_token: u16,
+    location_token: ?u16,
+) MutationError!Value {
     if (value == .null_value) return value;
     if (value.columnType()) |actual| {
         if (actual == target) return value;
     }
 
     return switch (target) {
-        .i8 => Value{ .i8 = try toI8(value) },
-        .i16 => Value{ .i16 = try toI16(value) },
-        .i32 => Value{ .i32 = try toI32(value) },
-        .i64 => Value{ .i64 = try toI64(value) },
-        .u8 => Value{ .u8 = try toU8(value) },
-        .u16 => Value{ .u16 = try toU16(value) },
-        .u32 => Value{ .u32 = try toU32(value) },
-        .u64 => Value{ .u64 = try toU64(value) },
-        .f64 => Value{ .f64 = try toF64(value) },
-        .bool => if (value == .bool) value else error.TypeMismatch,
-        .string => if (value == .string) value else error.TypeMismatch,
-        .timestamp => Value{ .timestamp = try toI64(value) },
+        .i8 => Value{ .i8 = toI8(value) catch |e| {
+            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
+            return e;
+        } },
+        .i16 => Value{ .i16 = toI16(value) catch |e| {
+            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
+            return e;
+        } },
+        .i32 => Value{ .i32 = toI32(value) catch |e| {
+            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
+            return e;
+        } },
+        .i64 => Value{ .i64 = toI64(value) catch |e| {
+            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
+            return e;
+        } },
+        .u8 => Value{ .u8 = toU8(value) catch |e| {
+            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
+            return e;
+        } },
+        .u16 => Value{ .u16 = toU16(value) catch |e| {
+            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
+            return e;
+        } },
+        .u32 => Value{ .u32 = toU32(value) catch |e| {
+            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
+            return e;
+        } },
+        .u64 => Value{ .u64 = toU64(value) catch |e| {
+            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
+            return e;
+        } },
+        .f64 => Value{ .f64 = toF64(value) catch |e| {
+            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
+            return e;
+        } },
+        .bool => if (value == .bool) value else blk: {
+            annotateCoercionError(diagnostic, error.TypeMismatch, value, target, field_token, location_token);
+            break :blk error.TypeMismatch;
+        },
+        .string => if (value == .string) value else blk: {
+            annotateCoercionError(diagnostic, error.TypeMismatch, value, target, field_token, location_token);
+            break :blk error.TypeMismatch;
+        },
+        .timestamp => Value{ .timestamp = toI64(value) catch |e| {
+            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
+            return e;
+        } },
+    };
+}
+
+fn annotateCoercionError(
+    diagnostic: ?*MutationDiagnostic,
+    err: MutationError,
+    value: Value,
+    target: ColumnType,
+    field_token: u16,
+    location_token: ?u16,
+) void {
+    if (isIntegerTarget(target) and isIntegerValue(value)) {
+        setIntegerRangeDiagnosticForColumn(
+            diagnostic,
+            target,
+            field_token,
+            location_token,
+        );
+        return;
+    }
+
+    if (err == error.TypeMismatch) {
+        var message_buf: [160]u8 = std.mem.zeroes([160]u8);
+        const message = std.fmt.bufPrint(
+            message_buf[0..],
+            "value type is incompatible with {s}",
+            .{columnTypeName(target)},
+        ) catch "value type is incompatible with target column";
+        setDiagnostic(
+            diagnostic,
+            .TypeMismatch,
+            field_token,
+            location_token,
+            message,
+        );
+    }
+}
+
+fn setIntegerRangeDiagnosticForColumn(
+    diagnostic: ?*MutationDiagnostic,
+    target: ColumnType,
+    field_token: u16,
+    location_token: ?u16,
+) void {
+    var message_buf: [160]u8 = std.mem.zeroes([160]u8);
+    const message = integerRangeMessage(&message_buf, target);
+    setDiagnostic(
+        diagnostic,
+        .IntegerOutOfRange,
+        field_token,
+        location_token,
+        message,
+    );
+}
+
+fn integerRangeMessage(buf: *[160]u8, target: ColumnType) []const u8 {
+    return switch (target) {
+        .i8 => std.fmt.bufPrint(buf[0..], "value is out of range (-128 to 127)", .{}) catch "value is out of range for i8",
+        .i16 => std.fmt.bufPrint(buf[0..], "value is out of range (-32768 to 32767)", .{}) catch "value is out of range for i16",
+        .i32 => std.fmt.bufPrint(buf[0..], "value is out of range (-2147483648 to 2147483647)", .{}) catch "value is out of range for i32",
+        .i64 => std.fmt.bufPrint(buf[0..], "value is out of range (-9223372036854775808 to 9223372036854775807)", .{}) catch "value is out of range for i64",
+        .u8 => std.fmt.bufPrint(buf[0..], "value is out of range (0 to 255)", .{}) catch "value is out of range for u8",
+        .u16 => std.fmt.bufPrint(buf[0..], "value is out of range (0 to 65535)", .{}) catch "value is out of range for u16",
+        .u32 => std.fmt.bufPrint(buf[0..], "value is out of range (0 to 4294967295)", .{}) catch "value is out of range for u32",
+        .u64 => std.fmt.bufPrint(buf[0..], "value is out of range (0 to 18446744073709551615)", .{}) catch "value is out of range for u64",
+        else => std.fmt.bufPrint(buf[0..], "value is out of range for {s}", .{columnTypeName(target)}) catch "value is out of range for target column",
+    };
+}
+
+fn setDiagnostic(
+    diagnostic: ?*MutationDiagnostic,
+    code: MutationDiagnosticCode,
+    field_token: ?u16,
+    location_token: ?u16,
+    message: []const u8,
+) void {
+    const diag = diagnostic orelse return;
+    diag.has_value = true;
+    diag.code = code;
+    diag.field_token = field_token;
+    diag.location_token = location_token;
+    @memset(&diag.message, 0);
+    const message_len = @min(message.len, diag.message.len);
+    @memcpy(diag.message[0..message_len], message[0..message_len]);
+}
+
+fn isIntegerTarget(target: ColumnType) bool {
+    return switch (target) {
+        .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64, .timestamp => true,
+        else => false,
+    };
+}
+
+fn isIntegerValue(value: Value) bool {
+    return switch (value) {
+        .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64 => true,
+        else => false,
+    };
+}
+
+fn columnTypeName(target: ColumnType) []const u8 {
+    return switch (target) {
+        .i8 => "i8",
+        .i16 => "i16",
+        .i32 => "i32",
+        .i64 => "i64",
+        .u8 => "u8",
+        .u16 => "u16",
+        .u32 => "u32",
+        .u64 => "u64",
+        .f64 => "f64",
+        .bool => "bool",
+        .string => "string",
+        .timestamp => "timestamp",
+    };
+}
+
+fn expressionLocationToken(tree: *const Ast, expr_node: NodeIndex) ?u16 {
+    const node = tree.getNode(expr_node);
+    return switch (node.tag) {
+        .expr_literal,
+        .expr_column_ref,
+        .expr_function_call,
+        .expr_aggregate,
+        .expr_parameter,
+        => node.data.token,
+        .expr_binary, .expr_unary => node.extra,
+        else => null,
     };
 }
 
@@ -1926,7 +2232,13 @@ test "mutation coercion accepts signed i64 minimum literal" {
         &schema,
     );
 
-    const coerced = try coerceValueForColumn(value, .i64);
+    const coerced = try coerceValueForColumn(
+        value,
+        .i64,
+        null,
+        0,
+        null,
+    );
     try testing.expect(coerced == .i64);
     try testing.expectEqual(std.math.minInt(i64), coerced.i64);
 }
@@ -1946,7 +2258,13 @@ test "mutation coercion fails closed for i8 underflow literal" {
         &schema,
     );
 
-    const result = coerceValueForColumn(value, .i8);
+    const result = coerceValueForColumn(
+        value,
+        .i8,
+        null,
+        0,
+        null,
+    );
     try testing.expectError(error.TypeMismatch, result);
 }
 

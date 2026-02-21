@@ -161,7 +161,7 @@ pub const QueryResult = struct {
     row_count: u16 = 0,
     stats: ExecStats = .{},
     has_error: bool = false,
-    error_message: [128]u8 = std.mem.zeroes([128]u8),
+    error_message: [512]u8 = std.mem.zeroes([512]u8),
 
     pub fn init(rows: []ResultRow) QueryResult {
         std.debug.assert(rows.len >= scan_mod.max_result_rows);
@@ -1892,11 +1892,12 @@ fn executeMutation(
     mut_idx: u16,
 ) void {
     const mut_op = ops[mut_idx];
+    var diagnostic = mutation_mod.MutationDiagnostic{};
 
     switch (mut_op.kind) {
         .insert_op => {
             const node = ctx.ast.getNode(mut_op.node);
-            const row_id = mutation_mod.executeInsert(
+            const row_id = mutation_mod.executeInsertWithDiagnostic(
                 ctx.catalog,
                 ctx.pool,
                 ctx.wal,
@@ -1906,13 +1907,9 @@ fn executeMutation(
                 ctx.tokens,
                 ctx.source,
                 node.data.unary,
+                &diagnostic,
             ) catch |err| {
-                setBoundaryError(
-                    result,
-                    "insert failed",
-                    runtime_errors.classifyMutation(err),
-                    err,
-                );
+                setMutationBoundaryError(result, ctx, .insert_op, err, &diagnostic);
                 return;
             };
             result.stats.rows_inserted = 1;
@@ -1921,7 +1918,7 @@ fn executeMutation(
         .update_op => {
             const predicate = findPredicate(ctx.ast, ops, op_count);
             const node = ctx.ast.getNode(mut_op.node);
-            const count = mutation_mod.executeUpdate(
+            const count = mutation_mod.executeUpdateWithDiagnostic(
                 ctx.catalog,
                 ctx.pool,
                 ctx.wal,
@@ -1936,13 +1933,9 @@ fn executeMutation(
                 predicate,
                 node.data.unary,
                 ctx.allocator,
+                &diagnostic,
             ) catch |err| {
-                setBoundaryError(
-                    result,
-                    "update failed",
-                    runtime_errors.classifyMutation(err),
-                    err,
-                );
+                setMutationBoundaryError(result, ctx, .update_op, err, &diagnostic);
                 return;
             };
             result.stats.rows_updated = count;
@@ -1978,6 +1971,77 @@ fn executeMutation(
             setError(result, "unexpected mutation type");
         },
     }
+}
+
+fn setMutationBoundaryError(
+    result: *QueryResult,
+    ctx: *const ExecContext,
+    op_kind: PlanOp,
+    err: mutation_mod.MutationError,
+    diagnostic: *const mutation_mod.MutationDiagnostic,
+) void {
+    if (!diagnostic.has_value) {
+        const summary = switch (op_kind) {
+            .insert_op => "insert failed",
+            .update_op => "update failed",
+            .delete_op => "delete failed",
+            else => "mutation failed",
+        };
+        setBoundaryError(
+            result,
+            summary,
+            runtime_errors.classifyMutation(err),
+            err,
+        );
+        return;
+    }
+
+    const field_name: []const u8 = if (diagnostic.field_token) |field_tok|
+        ctx.tokens.getText(field_tok, ctx.source)
+    else
+        "field";
+    const path_prefix: []const u8 = switch (op_kind) {
+        .insert_op => "insert",
+        .update_op => "update",
+        .delete_op => "delete",
+        else => "mutation",
+    };
+
+    const token_idx = diagnostic.location_token orelse diagnostic.field_token orelse 0;
+    const line: u16 = if (token_idx < ctx.tokens.count) ctx.tokens.tokens[token_idx].line else 1;
+    const col: u16 = tokenColumn(ctx.tokens, ctx.source, token_idx);
+    const code_name = @tagName(diagnostic.code);
+    result.has_error = true;
+    @memset(&result.error_message, 0);
+    _ = std.fmt.bufPrint(
+        result.error_message[0..],
+        "phase=mutation code={s} path={s}.{s} line={d} col={d} message=\"{s}\"",
+        .{
+            code_name,
+            path_prefix,
+            field_name,
+            line,
+            col,
+            diagnostic.messageSlice(),
+        },
+    ) catch setBoundaryError(
+        result,
+        "mutation failed",
+        runtime_errors.classifyMutation(err),
+        err,
+    );
+}
+
+fn tokenColumn(tokens: *const TokenizeResult, source: []const u8, token_idx: u16) u16 {
+    if (token_idx >= tokens.count) return 1;
+    const tok = tokens.tokens[token_idx];
+    const start: usize = @intCast(tok.start);
+    var line_start = start;
+    while (line_start > 0 and source[line_start - 1] != '\n') {
+        line_start -= 1;
+    }
+    const col = start - line_start + 1;
+    return @intCast(@min(col, std.math.maxInt(u16)));
 }
 
 /// Find the pipeline node from the AST root.
