@@ -44,8 +44,8 @@ src/
   replication/   # WAL streaming, replica sync
   server/        # Wire protocol, connection handling
 test/
-  features/      # User-facing features, serves as quick reference of what's currently supported
-  internals/     # Internal machinery tests
+  features/      # Test files mapping 1-1 to what's currently supported
+  internals/     # Other tests
 docs/
   ...
 ```
