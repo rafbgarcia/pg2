@@ -137,40 +137,40 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - For built-ins, use one file per function (avoids broad multi-function files and makes failures easier to localize).
 
 ### Tasks
-- [ ] `test/features/expressions/subtraction_test.zig` (side note: binary subtraction `a - b`; includes numeric type/null behavior)
-- [ ] `test/features/expressions/multiplication_test.zig` (side note: binary multiplication `a * b`; includes numeric type/null behavior)
-- [ ] `test/features/expressions/division_test.zig` (side note: binary division `a / b`; includes divide-by-zero and numeric type/null behavior)
-- [ ] `test/features/expressions/unary_minus_test.zig` (side note: unary negation `-a`/`-(expr)`; distinct from binary subtraction)
-- [ ] `test/features/expressions/precedence_parentheses_test.zig` (side note: operator precedence and explicit grouping across arithmetic/comparison/boolean operators)
-- [ ] `test/features/expressions/lt_test.zig` (side note: less-than `<` comparison semantics and type/null behavior)
-- [ ] `test/features/expressions/lte_test.zig` (side note: less-than-or-equal `<=` comparison semantics and type/null behavior)
-- [ ] `test/features/expressions/gt_test.zig` (side note: greater-than `>` comparison semantics and type/null behavior)
-- [ ] `test/features/expressions/gte_test.zig` (side note: greater-than-or-equal `>=` comparison semantics and type/null behavior)
-- [ ] `test/features/expressions/equality_test.zig` (side note: equality `==` semantics including null comparison behavior)
-- [ ] `test/features/expressions/inequality_test.zig` (side note: inequality `!=` semantics including null comparison behavior)
-- [ ] `test/features/expressions/boolean_logic_test.zig` (side note: boolean operator semantics for `!`, `&&`, `||` including short-circuit and null interactions)
-- [ ] `test/features/expressions/in_test.zig` (includes `!in(value, list)` cases)
-- [ ] `test/features/expressions/logical_not_test.zig` (side note: unary logical negation `!` semantics and parse shape)
-- [ ] `test/features/expressions/logical_and_test.zig` (side note: conjunction `&&` semantics and parse shape)
-- [ ] `test/features/expressions/logical_or_test.zig` (side note: disjunction `||` semantics and parse shape)
-- [ ] `test/features/expressions/parameters_test.zig` (side note: parameter binding semantics, undefined-parameter failures, and deterministic diagnostics)
-- [ ] `test/features/expressions/functions/abs_test.zig`, `test/features/expressions/functions/sqrt_test.zig`, `test/features/expressions/functions/round_test.zig` (side note: numeric builtin behavior and type/arity validation; one file per function)
-- [ ] `test/features/expressions/functions/lower_test.zig`, `test/features/expressions/functions/upper_test.zig`, `test/features/expressions/functions/trim_test.zig`, `test/features/expressions/functions/length_test.zig`, `test/features/expressions/functions/coalesce_test.zig` (side note: string/null-handling builtins with edge cases; one file per function)
-- [ ] `test/features/expressions/functions/now_test.zig` (side note: deterministic time function behavior via injected clock; no system clock in core code)
-- [ ] `test/features/expressions/semantics/null_semantics_test.zig` (side note: null propagation and boolean/null truth-table behavior across arithmetic, comparisons, and predicates)
-- [ ] `test/features/expressions/contexts/cross_context_test.zig` (side note: same expression semantics in `where`, `update`, computed `select`, `sort(expr)`, and `having`)
-- [ ] `test/features/expressions/diagnostics/diagnostics_test.zig` (side note: deterministic fail-closed parser/evaluator errors with precise messages/locations for invalid shapes and type/null violations)
-- [ ] Import all new expression files in `test/features/features_specs_test.zig`. (side note: keep feature suite discovery complete and deterministic)
+- [ ] `T01` `test/features/expressions/subtraction_test.zig` (side note: binary subtraction `a - b`; includes numeric type/null behavior)
+- [ ] `T02` `test/features/expressions/multiplication_test.zig` (side note: binary multiplication `a * b`; includes numeric type/null behavior)
+- [ ] `T03` `test/features/expressions/division_test.zig` (side note: binary division `a / b`; includes divide-by-zero and numeric type/null behavior)
+- [ ] `T04` `test/features/expressions/unary_minus_test.zig` (side note: unary negation `-a`/`-(expr)`; distinct from binary subtraction)
+- [ ] `T05` `test/features/expressions/precedence_parentheses_test.zig` (side note: operator precedence and explicit grouping across arithmetic/comparison/boolean operators)
+- [ ] `T06` `test/features/expressions/lt_test.zig` (side note: less-than `<` comparison semantics and type/null behavior)
+- [ ] `T07` `test/features/expressions/lte_test.zig` (side note: less-than-or-equal `<=` comparison semantics and type/null behavior)
+- [ ] `T08` `test/features/expressions/gt_test.zig` (side note: greater-than `>` comparison semantics and type/null behavior)
+- [ ] `T09` `test/features/expressions/gte_test.zig` (side note: greater-than-or-equal `>=` comparison semantics and type/null behavior)
+- [ ] `T10` `test/features/expressions/equality_test.zig` (side note: equality `==` semantics including null comparison behavior)
+- [ ] `T11` `test/features/expressions/inequality_test.zig` (side note: inequality `!=` semantics including null comparison behavior)
+- [ ] `T12` `test/features/expressions/boolean_logic_test.zig` (side note: boolean operator semantics for `!`, `&&`, `||` including short-circuit and null interactions)
+- [ ] `T13` `test/features/expressions/in_test.zig` (includes `!in(value, list)` cases)
+- [ ] `T14` `test/features/expressions/logical_not_test.zig` (side note: unary logical negation `!` semantics and parse shape)
+- [ ] `T15` `test/features/expressions/logical_and_test.zig` (side note: conjunction `&&` semantics and parse shape)
+- [ ] `T16` `test/features/expressions/logical_or_test.zig` (side note: disjunction `||` semantics and parse shape)
+- [ ] `T17` `test/features/expressions/parameters_test.zig` (side note: parameter binding semantics, undefined-parameter failures, and deterministic diagnostics)
+- [ ] `T18` `test/features/expressions/functions/abs_test.zig`, `test/features/expressions/functions/sqrt_test.zig`, `test/features/expressions/functions/round_test.zig` (side note: numeric builtin behavior and type/arity validation; one file per function)
+- [ ] `T19` `test/features/expressions/functions/lower_test.zig`, `test/features/expressions/functions/upper_test.zig`, `test/features/expressions/functions/trim_test.zig`, `test/features/expressions/functions/length_test.zig`, `test/features/expressions/functions/coalesce_test.zig` (side note: string/null-handling builtins with edge cases; one file per function)
+- [ ] `T20` `test/features/expressions/functions/now_test.zig` (side note: deterministic time function behavior via injected clock; no system clock in core code)
+- [ ] `T21` `test/features/expressions/semantics/null_semantics_test.zig` (side note: null propagation and boolean/null truth-table behavior across arithmetic, comparisons, and predicates)
+- [ ] `T22` `test/features/expressions/contexts/cross_context_test.zig` (side note: same expression semantics in `where`, `update`, computed `select`, `sort(expr)`, and `having`)
+- [ ] `T23` `test/features/expressions/diagnostics/diagnostics_test.zig` (side note: deterministic fail-closed parser/evaluator errors with precise messages/locations for invalid shapes and type/null violations)
+- [ ] `T24` Import all new expression files in `test/features/features_specs_test.zig`. (side note: keep feature suite discovery complete and deterministic)
 
 ## Phase 6: Diagnostics and Hardening
 ### Gate
 - Diagnostics are explicit, deterministic, and context-aware.
 
 ### Tasks
-- [ ] Normalize parser error messages for invalid legacy logical/membership textual forms (shape errors, not keyword errors).
-- [ ] Normalize evaluator errors for null arithmetic, type mismatch, and invalid predicate result.
-- [ ] Ensure mutation-path diagnostics include precise assignment path for expression failures.
-- [ ] Add regression tests for fail-closed behavior on unsupported textual expression shapes.
+- [ ] `D01` Normalize parser error messages for invalid legacy logical/membership textual forms (shape errors, not keyword errors).
+- [ ] `D02` Normalize evaluator errors for null arithmetic, type mismatch, and invalid predicate result.
+- [ ] `D03` Ensure mutation-path diagnostics include precise assignment path for expression failures.
+- [ ] `D04` Add regression tests for fail-closed behavior on unsupported textual expression shapes.
 
 ## Phase 7: Pending Product Decision
 ### Gate
