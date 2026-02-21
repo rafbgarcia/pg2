@@ -113,6 +113,13 @@ pub const FeatureEnv = struct {
     executor: TestExecutor,
 
     pub fn init(self: *FeatureEnv) !void {
+        return self.initWithConfig(.{ .max_query_slots = 1 });
+    }
+
+    pub fn initWithConfig(
+        self: *FeatureEnv,
+        config: bootstrap_mod.BootstrapConfig,
+    ) !void {
         self.disk = disk_mod.SimulatedDisk.init(testing_allocator);
         errdefer self.disk.deinit();
 
@@ -122,7 +129,7 @@ pub const FeatureEnv = struct {
         self.runtime = try BootstrappedRuntime.init(
             self.backing_memory,
             self.disk.storage(),
-            .{ .max_query_slots = 1 },
+            config,
         );
         self.catalog = .{};
         self.executor.init(&self.runtime, &self.catalog);

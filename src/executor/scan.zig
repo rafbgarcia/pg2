@@ -269,30 +269,19 @@ fn scanSlotInto(
 ) ScanError!void {
     std.debug.assert(@as(usize, row_count.*) < out_rows.len);
 
-    // Read raw row data. Skip deleted slots.
-    const row_data = HeapPage.read(page, slot_idx) catch return;
+    // Read raw row data if the slot currently stores a visible heap tuple.
+    // Tombstoned slots can still be visible through undo (e.g. aborted delete),
+    // so visibility resolution must run even when HeapPage.read fails.
+    const row_data_opt = HeapPage.read(page, slot_idx) catch null;
 
-    // For M4: rows without undo history are always visible.
-    // If undo_log has an entry, use findVisible; otherwise use heap data.
-    const data_to_decode = blk: {
-        const head = undo_log.getHead(page_id, slot_idx);
-        if (head == null) {
-            // No undo history — row is visible to all snapshots.
-            break :blk row_data;
-        }
-        // Has undo history — check visibility.
-        const vis = undo_log.findVisible(
-            page_id,
-            slot_idx,
-            snapshot,
-            tx_manager,
-        );
-        if (vis) |old_data| {
-            break :blk old_data;
-        }
-        // null means current heap version is visible.
-        break :blk row_data;
-    };
+    const data_to_decode = resolveVisibleVersion(
+        undo_log,
+        page_id,
+        slot_idx,
+        snapshot,
+        tx_manager,
+        row_data_opt,
+    ) orelse return;
 
     // Decode and append to result.
     var row = ResultRow.init();
@@ -333,17 +322,16 @@ pub fn indexFind(
     const page = pool.pin(row_id.page_id) catch |e| return mapPoolError(e);
     defer pool.unpin(row_id.page_id, false);
 
-    const row_data = HeapPage.read(page, row_id.slot) catch return null;
+    const row_data_opt = HeapPage.read(page, row_id.slot) catch null;
 
-    // MVCC check.
     const data_to_decode = resolveVisibleVersion(
         undo_log,
         row_id.page_id,
         row_id.slot,
         snapshot,
         tx_manager,
-        row_data,
-    );
+        row_data_opt,
+    ) orelse return null;
 
     var row = ResultRow.init();
     row.row_id = row_id;
@@ -396,17 +384,16 @@ pub fn indexRange(
         };
         defer pool.unpin(row_id.page_id, false);
 
-        const row_data = HeapPage.read(page, row_id.slot) catch continue;
+        const row_data_opt = HeapPage.read(page, row_id.slot) catch null;
 
-        // MVCC check.
         const data_to_decode = resolveVisibleVersion(
             undo_log,
             row_id.page_id,
             row_id.slot,
             snapshot,
             tx_manager,
-            row_data,
-        );
+            row_data_opt,
+        ) orelse continue;
 
         var row = ResultRow.init();
         row.row_id = row_id;
@@ -497,17 +484,17 @@ fn resolveVisibleVersion(
     slot_idx: u16,
     snapshot: *const Snapshot,
     tx_manager: *const TxManager,
-    heap_data: []const u8,
-) []const u8 {
+    heap_data_opt: ?[]const u8,
+) ?[]const u8 {
     const head = undo_log.getHead(page_id, slot_idx);
-    if (head == null) return heap_data;
+    if (head == null) return heap_data_opt;
     const vis = undo_log.findVisible(
         page_id,
         slot_idx,
         snapshot,
         tx_manager,
     );
-    return vis orelse heap_data;
+    return vis orelse heap_data_opt;
 }
 
 fn mapPoolError(err: buffer_pool_mod.BufferPoolError) ScanError {

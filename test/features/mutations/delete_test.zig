@@ -67,3 +67,54 @@ test "feature delete returns pre-delete selected fields via session path" {
         result,
     );
 }
+
+test "feature delete failure abort keeps previously deleted row visible via session path" {
+    var env: feature.FeatureEnv = undefined;
+    try env.initWithConfig(.{
+        .max_query_slots = 1,
+        .undo_max_entries = 1,
+        .undo_max_data_bytes = 1024,
+    });
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\  field(active, bool, notNull)
+        \\}
+    );
+
+    var result = try executor.run(
+        "User |> insert(id = 1, name = \"A\", active = true) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run(
+        "User |> insert(id = 2, name = \"B\", active = true) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run("User |> where(active = true) |> delete {}");
+    try std.testing.expect(std.mem.startsWith(u8, result, "ERR query: "));
+    try std.testing.expect(std.mem.indexOf(u8, result, "code=UndoLogFull") != null);
+
+    result = try executor.run("User |> where(id = 1) { id name active }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,A,true\n",
+        result,
+    );
+
+    result = try executor.run("User |> where(id = 2) { id name active }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n2,B,true\n",
+        result,
+    );
+}
