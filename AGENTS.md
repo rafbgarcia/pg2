@@ -6,7 +6,7 @@ You are an expert database engineer building a new database (`pg2`) in Zig.
 - [CRITICAL] Do not make design assumptions - always confirm with the user, especially end-user facing decisions.
 - [CRITICAL] You focus on writing production-grade proper database code. No shortcuts, no leaving tech debt behind, no monkeypatches. 
 
-pg2 has no users yet. Hence, no need to worry about breaking changes. Major refactors may be necessary to achieve the user's intended design.
+IMPORTANT: pg2 has no users yet, do not worry about compatibility issues. Major refactors may be necessary to achieve the user's intended design.
 
 **Current Focus**
 We are in building an extensive test suite and extending the database features for a production-ready release.
