@@ -888,21 +888,23 @@ pub fn applyUnaryOp(operand: Value, op: TokenType) EvalError!Value {
                 if (operand.i32 == std.math.minInt(i32)) return error.NumericOverflow;
                 break :blk Value{ .i32 = -operand.i32 };
             }
-            if (operand == .u64) {
-                const magnitude = operand.u64;
-                const signed_min_magnitude: u64 = @as(u64, std.math.maxInt(i64)) + 1;
-                if (magnitude > signed_min_magnitude) return error.NumericOverflow;
-                if (magnitude == signed_min_magnitude) {
-                    break :blk Value{ .i64 = std.math.minInt(i64) };
-                }
-                const narrowed = std.math.cast(i64, magnitude) orelse return error.NumericOverflow;
-                break :blk Value{ .i64 = -narrowed };
-            }
+            if (operand == .u8) break :blk Value{ .i64 = -@as(i64, operand.u8) };
+            if (operand == .u16) break :blk Value{ .i64 = -@as(i64, operand.u16) };
+            if (operand == .u32) break :blk Value{ .i64 = -@as(i64, operand.u32) };
+            if (operand == .u64) break :blk Value{ .i64 = try negateUnsignedIntoI64(operand.u64) };
             if (operand == .f64) break :blk Value{ .f64 = -operand.f64 };
             return error.TypeMismatch;
         },
         else => error.TypeMismatch,
     };
+}
+
+fn negateUnsignedIntoI64(magnitude: u64) EvalError!i64 {
+    const signed_min_magnitude: u64 = @as(u64, std.math.maxInt(i64)) + 1;
+    if (magnitude > signed_min_magnitude) return error.NumericOverflow;
+    if (magnitude == signed_min_magnitude) return std.math.minInt(i64);
+    const narrowed = std.math.cast(i64, magnitude) orelse return error.NumericOverflow;
+    return -narrowed;
 }
 
 /// Apply a built-in scalar function.
@@ -1504,6 +1506,29 @@ test "unary minus overflow returns error" {
         .minus,
     );
     try testing.expectError(error.NumericOverflow, result);
+}
+
+test "unary minus promotes u8/u16/u32 to i64" {
+    const from_u8 = try applyUnaryOp(
+        .{ .u8 = 7 },
+        .minus,
+    );
+    try testing.expect(from_u8 == .i64);
+    try testing.expectEqual(@as(i64, -7), from_u8.i64);
+
+    const from_u16 = try applyUnaryOp(
+        .{ .u16 = 511 },
+        .minus,
+    );
+    try testing.expect(from_u16 == .i64);
+    try testing.expectEqual(@as(i64, -511), from_u16.i64);
+
+    const from_u32 = try applyUnaryOp(
+        .{ .u32 = 70_000 },
+        .minus,
+    );
+    try testing.expect(from_u32 == .i64);
+    try testing.expectEqual(@as(i64, -70_000), from_u32.i64);
 }
 
 test "unary minus supports signed i64 minimum literal through expression path" {
