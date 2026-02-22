@@ -31,6 +31,7 @@ comptime {
     _ = @import("expressions/update_test.zig");
     _ = @import("expressions/addition_test.zig");
     _ = @import("expressions/computed_select_test.zig");
+    _ = @import("expressions/division_test.zig");
     _ = @import("expressions/having_test.zig");
     _ = @import("expressions/in_test.zig");
     _ = @import("expressions/multiplication_test.zig");
