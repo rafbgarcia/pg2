@@ -8,14 +8,20 @@ Queries should degrade performance under memory pressure before failing, using p
 2. Fail only on hard-stop conditions (disk failures, corruption, impossible resource limits).
 3. Spill behavior must be deterministic in simulation.
 
-## Phase 1: Temp/Spill Storage Foundation
+## Phase 1: Temp/Spill Storage Foundation ✅
 ### Scope
-- Add temp storage manager and page allocator.
-- Add spill telemetry counters to `ExecStats` (temp pages allocated/reclaimed, temp bytes read/written). These raw counters are the source of truth consumed by Workfront 04's metrics contract.
+- `src/storage/temp.zig`: `TempPageAllocator` (per-query-slot monotonic page-id allocator with O(1) bulk reset), `TempPage` on-disk format (magic `0x5432`, 14-byte header, 8154-byte max payload), `TempStorageManager` (direct `Storage` I/O coordinator with stats tracking).
+- `PageType.temp = 5` added to the on-disk page type enum.
+- Per-slot disjoint temp page-id regions starting at `20_000_000`, sized by `BootstrapConfig.temp_pages_per_query_slot` (default 1024 pages = 8 MB).
+- Temp pages bypass buffer pool and WAL — query-scoped, ephemeral, no durability.
+- `ExecContext` carries `storage` and `query_slot_index` so operators can construct `TempStorageManager` on demand.
+- Spill telemetry counters on `ExecStats` (`temp_pages_allocated`, `temp_pages_reclaimed`, `temp_bytes_written`, `temp_bytes_read`) with saturating accumulation across multi-statement execution. These raw counters are the source of truth consumed by Workfront 04's metrics contract.
+- `INSPECT spill` line in session output exposes all four counters.
 
 ### Gate
-- Unit tests for allocation, reclaim, and fault handling.
-- Simulation replay determinism for spill operations.
+- Unit tests for allocation, reclaim, fault handling, page format validation (`src/storage/temp.zig` inline tests).
+- Integration tests: buffer pool bypass, per-slot isolation, checksum corruption detection, crash-drops-temp-data, stats accumulation, region exhaustion, INSPECT output (`test/internals/spill/temp_storage_surface_test.zig`).
+- Simulation replay determinism for spill operations and fault injection (`test/internals/spill/temp_spill_determinism_test.zig`).
 
 ## Phase 2: Scan/Materialization Degrade Path
 ### Scope
