@@ -33,6 +33,7 @@ comptime {
     _ = @import("expressions/computed_select_test.zig");
     _ = @import("expressions/having_test.zig");
     _ = @import("expressions/in_test.zig");
+    _ = @import("expressions/multiplication_test.zig");
     _ = @import("expressions/parameters_test.zig");
     _ = @import("expressions/sort_test.zig");
     _ = @import("expressions/subtraction_test.zig");
