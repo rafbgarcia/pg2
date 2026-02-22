@@ -242,8 +242,7 @@ pub fn executeInsertWithDiagnosticAndParameters(
     first_assignment_node: NodeIndex,
     parameter_bindings: []const ParameterBinding,
     diagnostic: ?*MutationDiagnostic,
-    statement_timestamp_micros: ?i64,
-    now_resolver: ?*const filter_mod.NowResolver,
+    eval_ctx: *const filter_mod.EvalContext,
 ) MutationError!RowId {
     std.debug.assert(model_id < catalog.model_count);
     const model = &catalog.models[model_id];
@@ -267,8 +266,7 @@ pub fn executeInsertWithDiagnosticAndParameters(
         &assigned_columns,
         diagnostic,
         &string_arena,
-        statement_timestamp_micros,
-        now_resolver,
+        eval_ctx,
     );
     applyColumnDefaultsForInsert(
         catalog,
@@ -396,6 +394,7 @@ pub fn executeUpdate(
     first_assignment_node: NodeIndex,
     allocator: Allocator,
 ) MutationError!u32 {
+    const empty_ctx = filter_mod.EvalContext{};
     return executeUpdateWithDiagnosticAndReturningAndParameters(
         catalog,
         pool,
@@ -414,8 +413,7 @@ pub fn executeUpdate(
         &.{},
         null,
         null,
-        null,
-        null,
+        &empty_ctx,
     );
 }
 
@@ -436,6 +434,7 @@ pub fn executeUpdateWithDiagnostic(
     allocator: Allocator,
     diagnostic: ?*MutationDiagnostic,
 ) MutationError!u32 {
+    const empty_ctx = filter_mod.EvalContext{};
     return executeUpdateWithDiagnosticAndReturningAndParameters(
         catalog,
         pool,
@@ -454,8 +453,7 @@ pub fn executeUpdateWithDiagnostic(
         &.{},
         null,
         diagnostic,
-        null,
-        null,
+        &empty_ctx,
     );
 }
 
@@ -478,6 +476,7 @@ pub fn executeUpdateWithDiagnosticAndReturning(
     returning_capture: ?*ReturningCapture,
     diagnostic: ?*MutationDiagnostic,
 ) MutationError!u32 {
+    const empty_ctx = filter_mod.EvalContext{};
     return executeUpdateWithDiagnosticAndReturningAndParameters(
         catalog,
         pool,
@@ -496,8 +495,7 @@ pub fn executeUpdateWithDiagnosticAndReturning(
         parameter_bindings,
         returning_capture,
         diagnostic,
-        null,
-        null,
+        &empty_ctx,
     );
 }
 
@@ -519,8 +517,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
     parameter_bindings: []const ParameterBinding,
     returning_capture: ?*ReturningCapture,
     diagnostic: ?*MutationDiagnostic,
-    statement_timestamp_micros: ?i64,
-    now_resolver: ?*const filter_mod.NowResolver,
+    eval_ctx: *const filter_mod.EvalContext,
 ) MutationError!u32 {
     std.debug.assert(model_id < catalog.model_count);
     const model = &catalog.models[model_id];
@@ -528,6 +525,20 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
     _ = allocator;
     var string_decode_bytes: [max_row_buf_size]u8 = undefined;
     var string_arena = scan_mod.StringArena.init(string_decode_bytes[0..]);
+
+    // Build a local EvalContext with parameter resolver from bindings.
+    const parameter_ctx = ParameterBindingContext{
+        .bindings = parameter_bindings,
+    };
+    const parameter_resolver = ParameterResolver{
+        .ctx = &parameter_ctx,
+        .resolve = resolveParameterBinding,
+    };
+    var local_eval_ctx = filter_mod.EvalContext{
+        .statement_timestamp_micros = eval_ctx.statement_timestamp_micros,
+        .parameter_resolver = &parameter_resolver,
+        .string_arena = &string_arena,
+    };
 
     var updated_count: u32 = 0;
     const first_page = model.heap_first_page_id;
@@ -567,14 +578,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
 
             // Apply predicate filter.
             if (predicate_node != null_node) {
-                const parameter_ctx = ParameterBindingContext{
-                    .bindings = parameter_bindings,
-                };
-                const parameter_resolver = ParameterResolver{
-                    .ctx = &parameter_ctx,
-                    .resolve = resolveParameterBinding,
-                };
-                const matches = filter_mod.evaluatePredicateWithResolversArenaAndTimestamp(
+                const matches = filter_mod.evaluatePredicateFull(
                     tree,
                     tokens,
                     source,
@@ -582,10 +586,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                     row.values[0..row.column_count],
                     schema,
                     null,
-                    &parameter_resolver,
-                    &string_arena,
-                    statement_timestamp_micros,
-                    now_resolver,
+                    &local_eval_ctx,
                 ) catch continue;
                 if (!matches) continue;
             }
@@ -604,8 +605,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                 new_values[0..row.column_count],
                 diagnostic,
                 &string_arena,
-                statement_timestamp_micros,
-                now_resolver,
+                eval_ctx,
             ) catch |e| return e;
 
             try enforceOutgoingReferentialIntegrity(
@@ -669,6 +669,7 @@ pub fn executeDelete(
     predicate_node: NodeIndex,
     allocator: Allocator,
 ) MutationError!u32 {
+    const empty_ctx = filter_mod.EvalContext{};
     return executeDeleteWithReturningAndParameters(
         catalog,
         pool,
@@ -685,8 +686,7 @@ pub fn executeDelete(
         allocator,
         &.{},
         null,
-        null,
-        null,
+        &empty_ctx,
     );
 }
 
@@ -707,6 +707,7 @@ pub fn executeDeleteWithReturning(
     parameter_bindings: []const ParameterBinding,
     returning_capture: ?*ReturningCapture,
 ) MutationError!u32 {
+    const empty_ctx = filter_mod.EvalContext{};
     return executeDeleteWithReturningAndParameters(
         catalog,
         pool,
@@ -723,8 +724,7 @@ pub fn executeDeleteWithReturning(
         allocator,
         parameter_bindings,
         returning_capture,
-        null,
-        null,
+        &empty_ctx,
     );
 }
 
@@ -744,13 +744,26 @@ pub fn executeDeleteWithReturningAndParameters(
     allocator: Allocator,
     parameter_bindings: []const ParameterBinding,
     returning_capture: ?*ReturningCapture,
-    statement_timestamp_micros: ?i64,
-    now_resolver: ?*const filter_mod.NowResolver,
+    eval_ctx: *const filter_mod.EvalContext,
 ) MutationError!u32 {
     std.debug.assert(model_id < catalog.model_count);
     _ = allocator;
     var string_decode_bytes: [max_row_buf_size]u8 = undefined;
     var string_arena = scan_mod.StringArena.init(string_decode_bytes[0..]);
+
+    // Build a local EvalContext with parameter resolver from bindings.
+    const parameter_ctx = ParameterBindingContext{
+        .bindings = parameter_bindings,
+    };
+    const parameter_resolver = ParameterResolver{
+        .ctx = &parameter_ctx,
+        .resolve = resolveParameterBinding,
+    };
+    var local_eval_ctx = filter_mod.EvalContext{
+        .statement_timestamp_micros = eval_ctx.statement_timestamp_micros,
+        .parameter_resolver = &parameter_resolver,
+        .string_arena = &string_arena,
+    };
 
     const model = &catalog.models[model_id];
     const schema = &model.row_schema;
@@ -793,14 +806,7 @@ pub fn executeDeleteWithReturningAndParameters(
 
             // Apply predicate filter.
             if (predicate_node != null_node) {
-                const parameter_ctx = ParameterBindingContext{
-                    .bindings = parameter_bindings,
-                };
-                const parameter_resolver = ParameterResolver{
-                    .ctx = &parameter_ctx,
-                    .resolve = resolveParameterBinding,
-                };
-                const matches = filter_mod.evaluatePredicateWithResolversArenaAndTimestamp(
+                const matches = filter_mod.evaluatePredicateFull(
                     tree,
                     tokens,
                     source,
@@ -808,10 +814,7 @@ pub fn executeDeleteWithReturningAndParameters(
                     row.values[0..row.column_count],
                     schema,
                     null,
-                    &parameter_resolver,
-                    &string_arena,
-                    statement_timestamp_micros,
-                    now_resolver,
+                    &local_eval_ctx,
                 ) catch continue;
                 if (!matches) continue;
             }
@@ -1908,19 +1911,25 @@ pub fn buildRowFromAssignments(
     out_assigned: []bool,
     diagnostic: ?*MutationDiagnostic,
     string_arena: *scan_mod.StringArena,
-    statement_timestamp_micros: ?i64,
-    now_resolver: ?*const filter_mod.NowResolver,
+    eval_ctx: *const filter_mod.EvalContext,
 ) MutationError!void {
     std.debug.assert(out_values.len >= schema.column_count);
     std.debug.assert(out_assigned.len >= schema.column_count);
 
     var current = first_assignment;
+    // Build a local EvalContext that uses the mutation's own parameter
+    // bindings but inherits the statement timestamp from the caller.
     const parameter_ctx = ParameterBindingContext{
         .bindings = parameter_bindings,
     };
     const parameter_resolver = ParameterResolver{
         .ctx = &parameter_ctx,
         .resolve = resolveParameterBinding,
+    };
+    var local_eval_ctx = filter_mod.EvalContext{
+        .statement_timestamp_micros = eval_ctx.statement_timestamp_micros,
+        .parameter_resolver = &parameter_resolver,
+        .string_arena = string_arena,
     };
     while (current != null_node) {
         const node = tree.getNode(current);
@@ -1939,7 +1948,7 @@ pub fn buildRowFromAssignments(
         };
 
         const expr_node = node.data.unary;
-        const val = filter_mod.evaluateExpressionWithResolversArenaAndTimestamp(
+        const val = filter_mod.evaluateExpressionFull(
             tree,
             tokens,
             source,
@@ -1947,10 +1956,7 @@ pub fn buildRowFromAssignments(
             &.{},
             schema,
             null,
-            &parameter_resolver,
-            string_arena,
-            statement_timestamp_micros,
-            now_resolver,
+            &local_eval_ctx,
         ) catch |e| {
             const mapped = mapFilterError(e);
             if (mapped == error.NumericOverflow) {
@@ -2013,8 +2019,7 @@ fn applyAssignments(
     values: []Value,
     diagnostic: ?*MutationDiagnostic,
     string_arena: *scan_mod.StringArena,
-    statement_timestamp_micros: ?i64,
-    now_resolver: ?*const filter_mod.NowResolver,
+    eval_ctx: *const filter_mod.EvalContext,
 ) MutationError!void {
     std.debug.assert(values.len >= schema.column_count);
 
@@ -2025,6 +2030,11 @@ fn applyAssignments(
     const parameter_resolver = ParameterResolver{
         .ctx = &parameter_ctx,
         .resolve = resolveParameterBinding,
+    };
+    var local_eval_ctx = filter_mod.EvalContext{
+        .statement_timestamp_micros = eval_ctx.statement_timestamp_micros,
+        .parameter_resolver = &parameter_resolver,
+        .string_arena = string_arena,
     };
     while (current != null_node) {
         const node = tree.getNode(current);
@@ -2044,7 +2054,7 @@ fn applyAssignments(
 
         // Evaluate expression with current row values for context.
         const expr_node = node.data.unary;
-        const val = filter_mod.evaluateExpressionWithResolversArenaAndTimestamp(
+        const val = filter_mod.evaluateExpressionFull(
             tree,
             tokens,
             source,
@@ -2052,10 +2062,7 @@ fn applyAssignments(
             values,
             schema,
             null,
-            &parameter_resolver,
-            string_arena,
-            statement_timestamp_micros,
-            now_resolver,
+            &local_eval_ctx,
         ) catch |e| {
             const mapped = mapFilterError(e);
             if (mapped == error.NumericOverflow) {

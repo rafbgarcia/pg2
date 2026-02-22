@@ -1,4 +1,11 @@
-//! Feature coverage for now() builtin deterministic statement semantics.
+//! Feature coverage for current_timestamp deterministic statement semantics.
+//!
+//! current_timestamp returns the statement-level timestamp: every reference
+//! within a single statement yields the same microsecond value, matching
+//! PostgreSQL's transaction-timestamp behavior.
+//!
+//! Unlike now() in PostgreSQL, current_timestamp is a keyword (not a function
+//! call), so it does not use parentheses.
 const std = @import("std");
 const feature = @import("../../test_env_test.zig");
 
@@ -14,33 +21,33 @@ fn parseTimestampPair(row_line: []const u8) !struct { created_at: i64, updated_a
     };
 }
 
-test "feature now is statement-stable per callsite and independent across callsites" {
+test "feature current_timestamp returns identical value for all references in a statement" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 
     const executor = &env.executor;
     try executor.applyDefinitions(
-        \\NowSemantics {
+        \\CurrentTsSemantics {
         \\  field(id, i64, notNull, primaryKey)
         \\  field(created_at, timestamp, nullable)
         \\  field(updated_at, timestamp, nullable)
         \\}
     );
 
-    _ = try executor.run("NowSemantics |> insert(id = 1, created_at = null, updated_at = null) {}");
-    _ = try executor.run("NowSemantics |> insert(id = 2, created_at = null, updated_at = null) {}");
-    _ = try executor.run("NowSemantics |> insert(id = 3, created_at = null, updated_at = null) {}");
+    _ = try executor.run("CurrentTsSemantics |> insert(id = 1, created_at = null, updated_at = null) {}");
+    _ = try executor.run("CurrentTsSemantics |> insert(id = 2, created_at = null, updated_at = null) {}");
+    _ = try executor.run("CurrentTsSemantics |> insert(id = 3, created_at = null, updated_at = null) {}");
 
     var result = try executor.run(
-        "NowSemantics |> update(created_at = now(), updated_at = now()) {}",
+        "CurrentTsSemantics |> update(created_at = current_timestamp, updated_at = current_timestamp) {}",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=3 deleted_rows=0\n",
         result,
     );
 
-    result = try executor.run("NowSemantics |> sort(id asc) { id created_at updated_at }");
+    result = try executor.run("CurrentTsSemantics |> sort(id asc) { id created_at updated_at }");
 
     var lines = std.mem.splitScalar(u8, result, '\n');
     _ = lines.next() orelse return error.TestExpectedEqual;
@@ -51,41 +58,26 @@ test "feature now is statement-stable per callsite and independent across callsi
     const pair_1 = try parseTimestampPair(row_1);
     const pair_2 = try parseTimestampPair(row_2);
     const pair_3 = try parseTimestampPair(row_3);
+
+    // All rows get the same created_at (same statement, same reference).
     try std.testing.expectEqual(pair_1.created_at, pair_2.created_at);
     try std.testing.expectEqual(pair_1.created_at, pair_3.created_at);
+
+    // All rows get the same updated_at (same statement, same reference).
     try std.testing.expectEqual(pair_1.updated_at, pair_2.updated_at);
     try std.testing.expectEqual(pair_1.updated_at, pair_3.updated_at);
-    try std.testing.expect(pair_1.updated_at > pair_1.created_at);
 
+    // Both references in the same statement yield the same timestamp
+    // (PostgreSQL semantics: statement-level clock, not per-reference).
+    try std.testing.expectEqual(pair_1.created_at, pair_1.updated_at);
+
+    // current_timestamp < current_timestamp is always false (both sides
+    // are the same value), so no rows should match the predicate.
     result = try executor.run(
-        "NowSemantics |> where(now() < now()) |> sort(id asc) { id }",
+        "CurrentTsSemantics |> where(current_timestamp < current_timestamp) |> sort(id asc) { id }",
     );
     try std.testing.expectEqualStrings(
-        "OK returned_rows=3 inserted_rows=0 updated_rows=0 deleted_rows=0\n1\n2\n3\n",
-        result,
-    );
-}
-
-test "feature now fails closed on invalid arity" {
-    var env: feature.FeatureEnv = undefined;
-    try env.init();
-    defer env.deinit();
-
-    const executor = &env.executor;
-    try executor.applyDefinitions(
-        \\NowArity {
-        \\  field(id, i64, notNull, primaryKey)
-        \\  field(created_at, timestamp, nullable)
-        \\}
-    );
-
-    _ = try executor.run("NowArity |> insert(id = 1, created_at = null) {}");
-
-    const result = try executor.run(
-        "NowArity |> where(id == 1) |> update(created_at = now(1)) {}",
-    );
-    try std.testing.expectEqualStrings(
-        "ERR query: update failed; class=fatal; code=TypeMismatch\n",
+        "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
         result,
     );
 }

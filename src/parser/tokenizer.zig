@@ -80,6 +80,9 @@ pub const TokenType = enum(u8) {
     kw_string,
     kw_timestamp,
 
+    // Keywords — builtin constants
+    kw_current_timestamp,
+
     // Aggregate names
     agg_count,
     agg_sum,
@@ -88,7 +91,6 @@ pub const TokenType = enum(u8) {
     agg_max,
 
     // Built-in scalar functions
-    fn_now,
     fn_lower,
     fn_upper,
     fn_trim,
@@ -452,8 +454,9 @@ fn classifyWord(text: []const u8, starts_upper: bool) TokenType {
         .{ .word = "avg", .tok = .agg_avg },
         .{ .word = "min", .tok = .agg_min },
         .{ .word = "max", .tok = .agg_max },
+        // Built-in constants
+        .{ .word = "current_timestamp", .tok = .kw_current_timestamp },
         // Built-in functions
-        .{ .word = "now", .tok = .fn_now },
         .{ .word = "lower", .tok = .fn_lower },
         .{ .word = "upper", .tok = .fn_upper },
         .{ .word = "trim", .tok = .fn_trim },

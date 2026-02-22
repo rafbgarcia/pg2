@@ -67,12 +67,15 @@ pub const ParameterResolver = struct {
     ) EvalError!Value,
 };
 
-pub const NowResolver = struct {
-    ctx: *anyopaque,
-    resolve: *const fn (
-        ctx: *anyopaque,
-        token_index: u16,
-    ) EvalError!i64,
+/// Bundles all ambient evaluation state needed during expression evaluation.
+///
+/// This struct consolidates what were previously individual parameters threaded
+/// through ~30+ call sites. Each field is optional so callers only populate what
+/// they need; missing capabilities surface as explicit errors (e.g. ClockUnavailable).
+pub const EvalContext = struct {
+    statement_timestamp_micros: ?i64 = null,
+    parameter_resolver: ?*const ParameterResolver = null,
+    string_arena: ?*scan_mod.StringArena = null,
 };
 
 /// Work items for iterative post-order traversal.
@@ -97,7 +100,8 @@ pub fn evaluateExpression(
     row_values: []const Value,
     schema: *const RowSchema,
 ) EvalError!Value {
-    return evaluateExpressionWithResolversAndArena(
+    const empty_ctx = EvalContext{};
+    return evaluateExpressionFull(
         tree,
         tokens,
         source,
@@ -105,8 +109,7 @@ pub fn evaluateExpression(
         row_values,
         schema,
         null,
-        null,
-        null,
+        &empty_ctx,
     );
 }
 
@@ -119,7 +122,8 @@ pub fn evaluateExpressionWithResolver(
     schema: *const RowSchema,
     resolver: ?*const AggregateResolver,
 ) EvalError!Value {
-    return evaluateExpressionWithResolversAndArena(
+    const empty_ctx = EvalContext{};
+    return evaluateExpressionFull(
         tree,
         tokens,
         source,
@@ -127,12 +131,11 @@ pub fn evaluateExpressionWithResolver(
         row_values,
         schema,
         resolver,
-        null,
-        null,
+        &empty_ctx,
     );
 }
 
-pub fn evaluateExpressionWithResolvers(
+pub fn evaluateExpressionFull(
     tree: *const Ast,
     tokens: *const TokenizeResult,
     source: []const u8,
@@ -140,59 +143,7 @@ pub fn evaluateExpressionWithResolvers(
     row_values: []const Value,
     schema: *const RowSchema,
     aggregate_resolver: ?*const AggregateResolver,
-    parameter_resolver: ?*const ParameterResolver,
-) EvalError!Value {
-    return evaluateExpressionWithResolversAndArena(
-        tree,
-        tokens,
-        source,
-        node_index,
-        row_values,
-        schema,
-        aggregate_resolver,
-        parameter_resolver,
-        null,
-    );
-}
-
-pub fn evaluateExpressionWithResolversAndArena(
-    tree: *const Ast,
-    tokens: *const TokenizeResult,
-    source: []const u8,
-    node_index: NodeIndex,
-    row_values: []const Value,
-    schema: *const RowSchema,
-    aggregate_resolver: ?*const AggregateResolver,
-    parameter_resolver: ?*const ParameterResolver,
-    string_arena: ?*scan_mod.StringArena,
-) EvalError!Value {
-    return evaluateExpressionWithResolversArenaAndTimestamp(
-        tree,
-        tokens,
-        source,
-        node_index,
-        row_values,
-        schema,
-        aggregate_resolver,
-        parameter_resolver,
-        string_arena,
-        null,
-        null,
-    );
-}
-
-pub fn evaluateExpressionWithResolversArenaAndTimestamp(
-    tree: *const Ast,
-    tokens: *const TokenizeResult,
-    source: []const u8,
-    node_index: NodeIndex,
-    row_values: []const Value,
-    schema: *const RowSchema,
-    aggregate_resolver: ?*const AggregateResolver,
-    parameter_resolver: ?*const ParameterResolver,
-    string_arena: ?*scan_mod.StringArena,
-    statement_timestamp_micros: ?i64,
-    now_resolver: ?*const NowResolver,
+    eval_ctx: *const EvalContext,
 ) EvalError!Value {
     var eval_stack: [max_eval_stack]Value = undefined;
     var eval_count: u16 = 0;
@@ -216,7 +167,10 @@ pub fn evaluateExpressionWithResolversArenaAndTimestamp(
                 &work_count,
             ),
             .apply_literal => |tok_idx| {
-                const val = try parseLiteralValue(tokens, source, tok_idx);
+                const val = if (tokens.tokens[tok_idx].token_type == .kw_current_timestamp) blk: {
+                    const ts = eval_ctx.statement_timestamp_micros orelse return error.ClockUnavailable;
+                    break :blk Value{ .timestamp = ts };
+                } else try parseLiteralValue(tokens, source, tok_idx);
                 try evalPush(&eval_stack, &eval_count, val);
             },
             .apply_column_ref => |tok_idx| {
@@ -226,7 +180,7 @@ pub fn evaluateExpressionWithResolversArenaAndTimestamp(
                 try evalPush(&eval_stack, &eval_count, row_values[col]);
             },
             .apply_parameter => |tok_idx| {
-                const r = parameter_resolver orelse return error.UndefinedParameter;
+                const r = eval_ctx.parameter_resolver orelse return error.UndefinedParameter;
                 const val = try r.resolve(
                     r.ctx,
                     tokens,
@@ -262,11 +216,8 @@ pub fn evaluateExpressionWithResolversArenaAndTimestamp(
                 }
                 const result = try applyBuiltinFunction(
                     fn_type,
-                    info.token_index,
                     args[0..count],
-                    string_arena,
-                    statement_timestamp_micros,
-                    now_resolver,
+                    eval_ctx,
                 );
                 try evalPush(&eval_stack, &eval_count, result);
             },
@@ -314,7 +265,8 @@ pub fn evaluatePredicate(
     row_values: []const Value,
     schema: *const RowSchema,
 ) EvalError!bool {
-    return evaluatePredicateWithResolversAndArena(
+    const empty_ctx = EvalContext{};
+    return evaluatePredicateFull(
         tree,
         tokens,
         source,
@@ -322,8 +274,7 @@ pub fn evaluatePredicate(
         row_values,
         schema,
         null,
-        null,
-        null,
+        &empty_ctx,
     );
 }
 
@@ -336,7 +287,8 @@ pub fn evaluatePredicateWithResolver(
     schema: *const RowSchema,
     resolver: ?*const AggregateResolver,
 ) EvalError!bool {
-    return evaluatePredicateWithResolversAndArena(
+    const empty_ctx = EvalContext{};
+    return evaluatePredicateFull(
         tree,
         tokens,
         source,
@@ -344,12 +296,11 @@ pub fn evaluatePredicateWithResolver(
         row_values,
         schema,
         resolver,
-        null,
-        null,
+        &empty_ctx,
     );
 }
 
-pub fn evaluatePredicateWithResolvers(
+pub fn evaluatePredicateFull(
     tree: *const Ast,
     tokens: *const TokenizeResult,
     source: []const u8,
@@ -357,9 +308,9 @@ pub fn evaluatePredicateWithResolvers(
     row_values: []const Value,
     schema: *const RowSchema,
     aggregate_resolver: ?*const AggregateResolver,
-    parameter_resolver: ?*const ParameterResolver,
+    eval_ctx: *const EvalContext,
 ) EvalError!bool {
-    return evaluatePredicateWithResolversAndArena(
+    const val = try evaluateExpressionFull(
         tree,
         tokens,
         source,
@@ -367,62 +318,7 @@ pub fn evaluatePredicateWithResolvers(
         row_values,
         schema,
         aggregate_resolver,
-        parameter_resolver,
-        null,
-    );
-}
-
-pub fn evaluatePredicateWithResolversAndArena(
-    tree: *const Ast,
-    tokens: *const TokenizeResult,
-    source: []const u8,
-    node_index: NodeIndex,
-    row_values: []const Value,
-    schema: *const RowSchema,
-    aggregate_resolver: ?*const AggregateResolver,
-    parameter_resolver: ?*const ParameterResolver,
-    string_arena: ?*scan_mod.StringArena,
-) EvalError!bool {
-    return evaluatePredicateWithResolversArenaAndTimestamp(
-        tree,
-        tokens,
-        source,
-        node_index,
-        row_values,
-        schema,
-        aggregate_resolver,
-        parameter_resolver,
-        string_arena,
-        null,
-        null,
-    );
-}
-
-pub fn evaluatePredicateWithResolversArenaAndTimestamp(
-    tree: *const Ast,
-    tokens: *const TokenizeResult,
-    source: []const u8,
-    node_index: NodeIndex,
-    row_values: []const Value,
-    schema: *const RowSchema,
-    aggregate_resolver: ?*const AggregateResolver,
-    parameter_resolver: ?*const ParameterResolver,
-    string_arena: ?*scan_mod.StringArena,
-    statement_timestamp_micros: ?i64,
-    now_resolver: ?*const NowResolver,
-) EvalError!bool {
-    const val = try evaluateExpressionWithResolversArenaAndTimestamp(
-        tree,
-        tokens,
-        source,
-        node_index,
-        row_values,
-        schema,
-        aggregate_resolver,
-        parameter_resolver,
-        string_arena,
-        statement_timestamp_micros,
-        now_resolver,
+        eval_ctx,
     );
     if (val == .null_value) return error.NullInPredicate;
     if (val != .bool) return error.TypeMismatch;
@@ -1036,11 +932,8 @@ fn negateUnsignedIntoI64(magnitude: u64) EvalError!i64 {
 /// Apply a built-in scalar function.
 pub fn applyBuiltinFunction(
     fn_type: TokenType,
-    fn_token_index: u16,
     args: []const Value,
-    string_arena: ?*scan_mod.StringArena,
-    statement_timestamp_micros: ?i64,
-    now_resolver: ?*const NowResolver,
+    eval_ctx: *const EvalContext,
 ) EvalError!Value {
     return switch (fn_type) {
         .fn_abs => blk: {
@@ -1107,7 +1000,7 @@ pub fn applyBuiltinFunction(
             if (v != .string) return error.TypeMismatch;
             if (!std.unicode.utf8ValidateSlice(v.string)) return error.TypeMismatch;
             break :blk Value{
-                .string = try asciiLowerString(v.string, string_arena),
+                .string = try asciiLowerString(v.string, eval_ctx.string_arena),
             };
         },
         .fn_upper => blk: {
@@ -1117,7 +1010,7 @@ pub fn applyBuiltinFunction(
             if (v != .string) return error.TypeMismatch;
             if (!std.unicode.utf8ValidateSlice(v.string)) return error.TypeMismatch;
             break :blk Value{
-                .string = try asciiUpperString(v.string, string_arena),
+                .string = try asciiUpperString(v.string, eval_ctx.string_arena),
             };
         },
         .fn_trim => blk: {
@@ -1127,16 +1020,8 @@ pub fn applyBuiltinFunction(
             if (v != .string) return error.TypeMismatch;
             if (!std.unicode.utf8ValidateSlice(v.string)) return error.TypeMismatch;
             break :blk Value{
-                .string = try trimAsciiSpaces(v.string, string_arena),
+                .string = try trimAsciiSpaces(v.string, eval_ctx.string_arena),
             };
-        },
-        .fn_now => blk: {
-            if (args.len != 0) return error.TypeMismatch;
-            const ts = if (now_resolver) |resolver|
-                try resolver.resolve(resolver.ctx, fn_token_index)
-            else
-                statement_timestamp_micros orelse return error.ClockUnavailable;
-            break :blk Value{ .timestamp = ts };
         },
         else => error.UnknownFunction,
     };
@@ -1468,7 +1353,8 @@ test "parameter reference evaluation uses explicit binding resolver" {
         .resolve = resolveParameterFromBindings,
     };
 
-    const result = try evaluateExpressionWithResolvers(
+    const ctx = EvalContext{ .parameter_resolver = &resolver };
+    const result = try evaluateExpressionFull(
         &tree,
         &tokens,
         source,
@@ -1476,7 +1362,7 @@ test "parameter reference evaluation uses explicit binding resolver" {
         &.{},
         &schema,
         null,
-        &resolver,
+        &ctx,
     );
     try testing.expectEqual(@as(i64, 42), result.i64);
 }
@@ -1500,116 +1386,152 @@ test "parameter reference fails closed when binding is undefined" {
 }
 
 test "function call — abs" {
-    const result = try applyBuiltinFunction(.fn_abs, 0, &[_]Value{
+    const ctx = EvalContext{};
+    const result = try applyBuiltinFunction(.fn_abs, &[_]Value{
         .{ .i64 = -5 },
-    }, null, null, null);
+    }, &ctx);
     try testing.expectEqual(@as(i64, 5), result.i64);
 }
 
 test "function call — sqrt" {
-    const result = try applyBuiltinFunction(.fn_sqrt, 0, &[_]Value{
+    const ctx = EvalContext{};
+    const result = try applyBuiltinFunction(.fn_sqrt, &[_]Value{
         .{ .f64 = 9.0 },
-    }, null, null, null);
+    }, &ctx);
     try testing.expectEqual(@as(f64, 3.0), result.f64);
 }
 
 test "function call — sqrt fails closed on negative input" {
-    const result = applyBuiltinFunction(.fn_sqrt, 0, &[_]Value{
+    const ctx = EvalContext{};
+    const result = applyBuiltinFunction(.fn_sqrt, &[_]Value{
         .{ .f64 = -1.0 },
-    }, null, null, null);
+    }, &ctx);
     try testing.expectError(error.NumericDomain, result);
 }
 
 test "function call — length" {
-    const result = try applyBuiltinFunction(.fn_length, 0, &[_]Value{
+    const ctx = EvalContext{};
+    const result = try applyBuiltinFunction(.fn_length, &[_]Value{
         .{ .string = "hello" },
-    }, null, null, null);
+    }, &ctx);
     try testing.expectEqual(@as(i64, 5), result.i64);
 }
 
 test "function call — round applies nearest-even tie handling" {
-    const positive_tie = try applyBuiltinFunction(.fn_round, 0, &[_]Value{
+    const ctx = EvalContext{};
+    const positive_tie = try applyBuiltinFunction(.fn_round, &[_]Value{
         .{ .f64 = 2.5 },
-    }, null, null, null);
+    }, &ctx);
     try testing.expectEqual(@as(f64, 2.0), positive_tie.f64);
 
-    const negative_tie = try applyBuiltinFunction(.fn_round, 0, &[_]Value{
+    const negative_tie = try applyBuiltinFunction(.fn_round, &[_]Value{
         .{ .f64 = -2.5 },
-    }, null, null, null);
+    }, &ctx);
     try testing.expectEqual(@as(f64, -2.0), negative_tie.f64);
 }
 
 test "function call — coalesce" {
-    const result = try applyBuiltinFunction(.fn_coalesce, 0, &[_]Value{
+    const ctx = EvalContext{};
+    const result = try applyBuiltinFunction(.fn_coalesce, &[_]Value{
         .{ .null_value = {} },
         .{ .i64 = 42 },
-    }, null, null, null);
+    }, &ctx);
     try testing.expectEqual(@as(i64, 42), result.i64);
 }
 
 test "function call — abs fails closed on arity mismatch" {
-    const result = applyBuiltinFunction(.fn_abs, 0, &[_]Value{
+    const ctx = EvalContext{};
+    const result = applyBuiltinFunction(.fn_abs, &[_]Value{
         .{ .i64 = 1 },
         .{ .i64 = 2 },
-    }, null, null, null);
+    }, &ctx);
     try testing.expectError(error.TypeMismatch, result);
 }
 
 test "function call — sqrt fails closed on arity mismatch" {
-    const result = applyBuiltinFunction(.fn_sqrt, 0, &[_]Value{
+    const ctx = EvalContext{};
+    const result = applyBuiltinFunction(.fn_sqrt, &[_]Value{
         .{ .i64 = 9 },
         .{ .i64 = 1 },
-    }, null, null, null);
+    }, &ctx);
     try testing.expectError(error.TypeMismatch, result);
 }
 
 test "function call — round fails closed on arity mismatch" {
-    const result = applyBuiltinFunction(.fn_round, 0, &[_]Value{
+    const ctx = EvalContext{};
+    const result = applyBuiltinFunction(.fn_round, &[_]Value{
         .{ .f64 = 1.5 },
         .{ .f64 = 2.0 },
-    }, null, null, null);
+    }, &ctx);
     try testing.expectError(error.TypeMismatch, result);
 }
 
 test "function call — length fails closed on arity mismatch" {
-    const result = applyBuiltinFunction(.fn_length, 0, &[_]Value{
+    const ctx = EvalContext{};
+    const result = applyBuiltinFunction(.fn_length, &[_]Value{
         .{ .string = "x" },
         .{ .string = "y" },
-    }, null, null, null);
+    }, &ctx);
     try testing.expectError(error.TypeMismatch, result);
 }
 
 test "function call — coalesce fails closed on empty args" {
-    const result = applyBuiltinFunction(.fn_coalesce, 0, &[_]Value{}, null, null, null);
+    const ctx = EvalContext{};
+    const result = applyBuiltinFunction(.fn_coalesce, &[_]Value{}, &ctx);
     try testing.expectError(error.TypeMismatch, result);
 }
 
-test "function call — now returns injected microsecond timestamp" {
-    const result = try applyBuiltinFunction(.fn_now, 0, &[_]Value{}, null, 1700000000123456, null);
+test "current_timestamp returns injected microsecond timestamp" {
+    var tree = Ast{};
+    const source = "current_timestamp";
+    const tokens = tokenizer_mod.tokenize(source);
+    const node = try makeAstLiteral(&tree, 0);
+    const schema = RowSchema{};
+
+    const ctx = EvalContext{ .statement_timestamp_micros = 1700000000123456 };
+    const result = try evaluateExpressionFull(
+        &tree,
+        &tokens,
+        source,
+        node,
+        &.{},
+        &schema,
+        null,
+        &ctx,
+    );
     try testing.expect(result == .timestamp);
     try testing.expectEqual(@as(i64, 1700000000123456), result.timestamp);
 }
 
-test "function call — now fails closed without injected timestamp" {
-    const result = applyBuiltinFunction(.fn_now, 0, &[_]Value{}, null, null, null);
-    try testing.expectError(error.ClockUnavailable, result);
-}
+test "current_timestamp fails closed without injected timestamp" {
+    var tree = Ast{};
+    const source = "current_timestamp";
+    const tokens = tokenizer_mod.tokenize(source);
+    const node = try makeAstLiteral(&tree, 0);
+    const schema = RowSchema{};
 
-test "function call — now fails closed on arity mismatch" {
-    const result = applyBuiltinFunction(.fn_now, 0, &[_]Value{.{ .i64 = 1 }}, null, 1700000000123456, null);
-    try testing.expectError(error.TypeMismatch, result);
+    const ctx = EvalContext{};
+    const result = evaluateExpressionFull(
+        &tree,
+        &tokens,
+        source,
+        node,
+        &.{},
+        &schema,
+        null,
+        &ctx,
+    );
+    try testing.expectError(error.ClockUnavailable, result);
 }
 
 test "function call — lower applies ASCII-only folding" {
     var arena_bytes: [128]u8 = undefined;
     var arena = scan_mod.StringArena.init(arena_bytes[0..]);
+    const ctx = EvalContext{ .string_arena = &arena };
     const result = try applyBuiltinFunction(
         .fn_lower,
-        0,
         &[_]Value{.{ .string = "HELLO \xC3\x84\xC3\x96\xC3\x9C" }},
-        &arena,
-        null,
-        null,
+        &ctx,
     );
     try testing.expectEqualStrings(
         "hello \xC3\x84\xC3\x96\xC3\x9C",
@@ -1620,13 +1542,11 @@ test "function call — lower applies ASCII-only folding" {
 test "function call — upper applies ASCII-only folding" {
     var arena_bytes: [128]u8 = undefined;
     var arena = scan_mod.StringArena.init(arena_bytes[0..]);
+    const ctx = EvalContext{ .string_arena = &arena };
     const result = try applyBuiltinFunction(
         .fn_upper,
-        0,
         &[_]Value{.{ .string = "hello \xC3\xA4\xC3\xB6\xC3\xBC" }},
-        &arena,
-        null,
-        null,
+        &ctx,
     );
     try testing.expectEqualStrings(
         "HELLO \xC3\xA4\xC3\xB6\xC3\xBC",
@@ -1637,38 +1557,39 @@ test "function call — upper applies ASCII-only folding" {
 test "function call — trim removes ASCII spaces only" {
     var arena_bytes: [128]u8 = undefined;
     var arena = scan_mod.StringArena.init(arena_bytes[0..]);
+    const ctx = EvalContext{ .string_arena = &arena };
     const result = try applyBuiltinFunction(
         .fn_trim,
-        0,
         &[_]Value{.{ .string = "  hello\t " }},
-        &arena,
-        null,
-        null,
+        &ctx,
     );
     try testing.expectEqualStrings("hello\t", result.string);
 }
 
 test "function call — lower fails closed on arity mismatch" {
-    const result = applyBuiltinFunction(.fn_lower, 0, &[_]Value{
+    const ctx = EvalContext{};
+    const result = applyBuiltinFunction(.fn_lower, &[_]Value{
         .{ .string = "x" },
         .{ .string = "y" },
-    }, null, null, null);
+    }, &ctx);
     try testing.expectError(error.TypeMismatch, result);
 }
 
 test "function call — upper fails closed on arity mismatch" {
-    const result = applyBuiltinFunction(.fn_upper, 0, &[_]Value{
+    const ctx = EvalContext{};
+    const result = applyBuiltinFunction(.fn_upper, &[_]Value{
         .{ .string = "x" },
         .{ .string = "y" },
-    }, null, null, null);
+    }, &ctx);
     try testing.expectError(error.TypeMismatch, result);
 }
 
 test "function call — trim fails closed on arity mismatch" {
-    const result = applyBuiltinFunction(.fn_trim, 0, &[_]Value{
+    const ctx = EvalContext{};
+    const result = applyBuiltinFunction(.fn_trim, &[_]Value{
         .{ .string = "x" },
         .{ .string = "y" },
-    }, null, null, null);
+    }, &ctx);
     try testing.expectError(error.TypeMismatch, result);
 }
 
@@ -1946,9 +1867,10 @@ test "unary minus rejects values below signed i64 minimum" {
 }
 
 test "abs overflow returns error" {
-    const result = applyBuiltinFunction(.fn_abs, 0, &[_]Value{
+    const ctx = EvalContext{};
+    const result = applyBuiltinFunction(.fn_abs, &[_]Value{
         .{ .i64 = std.math.minInt(i64) },
-    }, null, null, null);
+    }, &ctx);
     try testing.expectError(error.NumericOverflow, result);
 }
 

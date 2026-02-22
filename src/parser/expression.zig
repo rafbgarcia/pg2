@@ -538,7 +538,6 @@ fn popOperator(
 
 fn isFunctionToken(tok_type: TokenType) bool {
     return switch (tok_type) {
-        .fn_now,
         .fn_lower,
         .fn_upper,
         .fn_trim,
@@ -573,6 +572,7 @@ fn isLiteral(tok_type: TokenType) bool {
         .true_literal,
         .false_literal,
         .null_literal,
+        .kw_current_timestamp,
         => true,
         else => false,
     };

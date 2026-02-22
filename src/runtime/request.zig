@@ -43,7 +43,7 @@ fn makeExecContext(
     runtime: *BootstrappedRuntime,
     request: ExecuteRequest,
 ) exec_mod.ExecContext {
-    const statement_timestamp_micros = monotonicWallMicros(runtime);
+    const statement_timestamp_micros: i64 = @intCast(@max(@as(i64, 0), std.time.microTimestamp()));
     return .{
         .catalog = request.catalog,
         .pool = &runtime.pool,
@@ -56,10 +56,6 @@ fn makeExecContext(
         .tokens = request.tokens,
         .source = request.source,
         .statement_timestamp_micros = statement_timestamp_micros,
-        .now_source = .{
-            .ctx = runtime,
-            .next_micros = monotonicWallMicros,
-        },
         .parameter_bindings = request.parameter_bindings,
         .allocator = runtime.static_allocator.allocator(),
         .result_rows = request.pool_conn.query_buffers.result_rows,
@@ -67,10 +63,6 @@ fn makeExecContext(
         .scratch_rows_b = request.pool_conn.query_buffers.scratch_rows_b,
         .string_arena_bytes = request.pool_conn.query_buffers.string_arena_bytes,
     };
-}
-
-fn monotonicWallMicros(_: *anyopaque) i64 {
-    return @intCast(@max(@as(i64, 0), std.time.microTimestamp()));
 }
 
 test "executeWithPoolConn uses pool lease and caller controls release" {

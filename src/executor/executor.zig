@@ -45,10 +45,6 @@ const UndoLog = undo_mod.UndoLog;
 const ResultRow = scan_mod.ResultRow;
 const compareValues = row_mod.compareValues;
 pub const ParameterBinding = filter_mod.ParameterBinding;
-pub const NowSource = struct {
-    ctx: *anyopaque,
-    next_micros: *const fn (ctx: *anyopaque) i64,
-};
 const max_sort_keys = capacity_mod.max_sort_keys;
 const max_group_aggregate_exprs = capacity_mod.max_group_aggregate_exprs;
 const sort_key_desc_mask: u16 = 0x0001;
@@ -207,29 +203,12 @@ pub const ExecContext = struct {
     tokens: *const TokenizeResult,
     source: []const u8,
     statement_timestamp_micros: ?i64,
-    now_source: ?NowSource,
     parameter_bindings: []const ParameterBinding,
-    now_resolver: ?*const filter_mod.NowResolver = null,
     allocator: Allocator,
     result_rows: []ResultRow,
     scratch_rows_a: []ResultRow,
     scratch_rows_b: []ResultRow,
     string_arena_bytes: []u8,
-};
-
-const max_now_call_sites = 32;
-
-const NowCacheEntry = struct {
-    token_index: u16 = 0,
-    value: i64 = 0,
-};
-
-const StatementNowCache = struct {
-    source: ?NowSource,
-    fallback_timestamp_micros: ?i64,
-    high_water_micros: ?i64 = null,
-    entries: [max_now_call_sites]NowCacheEntry = [_]NowCacheEntry{.{}} ** max_now_call_sites,
-    count: u16 = 0,
 };
 
 /// Operator kind extracted from the AST.
@@ -248,23 +227,12 @@ const OpDescriptor = struct {
 /// Query-level errors are stored in result.error_message. Only
 /// OutOfMemory escapes as a Zig error (system-level, not query-level).
 pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
-    var now_cache = StatementNowCache{
-        .source = ctx.now_source,
-        .fallback_timestamp_micros = ctx.statement_timestamp_micros,
-    };
-    const now_resolver = filter_mod.NowResolver{
-        .ctx = &now_cache,
-        .resolve = &resolveStatementNowMicros,
-    };
-    var runtime_ctx = ctx.*;
-    runtime_ctx.now_resolver = &now_resolver;
-
     var result = QueryResult.init(ctx.result_rows);
     errdefer result.deinit();
-    var string_arena = scan_mod.StringArena.init(runtime_ctx.string_arena_bytes);
+    var string_arena = scan_mod.StringArena.init(ctx.string_arena_bytes);
     string_arena.reset();
 
-    const first_stmt = findFirstStatement(runtime_ctx.ast) orelse {
+    const first_stmt = findFirstStatement(ctx.ast) orelse {
         setError(&result, "no statements found in query");
         return result;
     };
@@ -275,7 +243,7 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
     while (stmt != null_node) : (statement_index += 1) {
         resetQueryResultForStatement(&result);
         executeSingleStatement(
-            &runtime_ctx,
+            ctx,
             &result,
             stmt,
             statement_index,
@@ -288,7 +256,7 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
             return result;
         }
 
-        const node = runtime_ctx.ast.getNode(stmt);
+        const node = ctx.ast.getNode(stmt);
         stmt = node.next;
     }
     result.stats = total_stats;
@@ -413,33 +381,6 @@ fn setStatementError(result: *QueryResult, statement_index: u16, message: []cons
         .{ statement_index, message },
     ) catch message;
     setError(result, formatted);
-}
-
-fn resolveStatementNowMicros(
-    raw_ctx: *anyopaque,
-    token_index: u16,
-) filter_mod.EvalError!i64 {
-    const cache: *StatementNowCache = @ptrCast(@alignCast(raw_ctx));
-
-    // Check if this call site was already resolved.
-    for (cache.entries[0..cache.count]) |entry| {
-        if (entry.token_index == token_index) return entry.value;
-    }
-
-    // Resolve a fresh timestamp for this call site.
-    var candidate = if (cache.source) |source|
-        source.next_micros(source.ctx)
-    else
-        cache.fallback_timestamp_micros orelse return error.ClockUnavailable;
-    if (cache.high_water_micros) |last| {
-        if (candidate <= last) candidate = last + 1;
-    }
-
-    if (cache.count >= max_now_call_sites) return error.TypeMismatch;
-    cache.entries[cache.count] = .{ .token_index = token_index, .value = candidate };
-    cache.count += 1;
-    cache.high_water_micros = candidate;
-    return candidate;
 }
 
 /// Execute the read path: table scan, then apply operators in sequence.
@@ -649,8 +590,8 @@ fn applyFlatColumnProjection(
                     projected[out_idx] = result.rows[row_index].values[descriptor.column_index];
                 },
                 .expression => {
-                    const parameter_resolver = parameterResolverForContext(ctx);
-                    const value = filter_mod.evaluateExpressionWithResolversArenaAndTimestamp(
+                    var exec_eval = evalContextForExec(ctx, string_arena);
+                    const value = filter_mod.evaluateExpressionFull(
                         ctx.ast,
                         ctx.tokens,
                         ctx.source,
@@ -658,10 +599,7 @@ fn applyFlatColumnProjection(
                         result.rows[row_index].values[0..result.rows[row_index].column_count],
                         source_schema,
                         null,
-                        &parameter_resolver,
-                        string_arena,
-                        ctx.statement_timestamp_micros,
-                        ctx.now_resolver,
+                        &exec_eval.eval_ctx,
                     ) catch {
                         setError(result, "select computed expression evaluation failed");
                         return false;
@@ -952,7 +890,7 @@ fn applyWhereFilter(
     if (predicate == null_node) return;
 
     const original_count = result.row_count;
-    const parameter_resolver = parameterResolverForContext(ctx);
+    var exec_eval = evalContextForExec(ctx, string_arena);
     var write_idx: u16 = 0;
     var read_idx: u16 = 0;
     while (read_idx < result.row_count) : (read_idx += 1) {
@@ -965,7 +903,7 @@ fn applyWhereFilter(
                 row.values[0..row.column_count],
                 schema,
                 read_idx,
-                string_arena,
+                &exec_eval.eval_ctx,
             ) catch |err| switch (err) {
                 error.UndefinedParameter => {
                     setError(result, "undefined parameter in where predicate");
@@ -978,7 +916,7 @@ fn applyWhereFilter(
                 else => false,
             }
         else
-            filter_mod.evaluatePredicateWithResolversArenaAndTimestamp(
+            filter_mod.evaluatePredicateFull(
                 ctx.ast,
                 ctx.tokens,
                 ctx.source,
@@ -986,10 +924,7 @@ fn applyWhereFilter(
                 row.values[0..row.column_count],
                 schema,
                 null,
-                &parameter_resolver,
-                string_arena,
-                ctx.statement_timestamp_micros,
-                ctx.now_resolver,
+                &exec_eval.eval_ctx,
             ) catch |err| switch (err) {
                 error.UndefinedParameter => {
                     setError(result, "undefined parameter in where predicate");
@@ -1015,6 +950,34 @@ fn applyWhereFilter(
     }
     result.row_count = write_idx;
     std.debug.assert(result.row_count <= original_count);
+}
+
+/// Bundles a ParameterResolver and EvalContext derived from an ExecContext.
+///
+/// Both values live on the caller's stack frame. The EvalContext's
+/// parameter_resolver pointer targets the co-located resolver, so the
+/// returned struct must not be moved after construction.
+const ExecEvalContext = struct {
+    parameter_resolver: filter_mod.ParameterResolver,
+    eval_ctx: filter_mod.EvalContext,
+};
+
+fn evalContextForExec(
+    ctx: *const ExecContext,
+    string_arena: ?*scan_mod.StringArena,
+) ExecEvalContext {
+    var result: ExecEvalContext = .{
+        .parameter_resolver = .{
+            .ctx = ctx,
+            .resolve = resolveParameterBinding,
+        },
+        .eval_ctx = .{
+            .statement_timestamp_micros = ctx.statement_timestamp_micros,
+            .string_arena = string_arena,
+        },
+    };
+    result.eval_ctx.parameter_resolver = &result.parameter_resolver;
+    return result;
 }
 
 fn parameterResolverForContext(
@@ -1053,8 +1016,8 @@ fn applyLimit(
     const expr = node.data.unary;
     if (expr == null_node) return;
 
-    const parameter_resolver = parameterResolverForContext(ctx);
-    const val = filter_mod.evaluateExpressionWithResolversArenaAndTimestamp(
+    var exec_eval = evalContextForExec(ctx, string_arena);
+    const val = filter_mod.evaluateExpressionFull(
         ctx.ast,
         ctx.tokens,
         ctx.source,
@@ -1062,10 +1025,7 @@ fn applyLimit(
         &.{},
         &RowSchema{},
         null,
-        &parameter_resolver,
-        string_arena,
-        ctx.statement_timestamp_micros,
-        ctx.now_resolver,
+        &exec_eval.eval_ctx,
     ) catch return;
 
     const limit = numericToRowCount(val) orelse return;
@@ -1088,8 +1048,8 @@ fn applyOffset(
     const expr = node.data.unary;
     if (expr == null_node) return;
 
-    const parameter_resolver = parameterResolverForContext(ctx);
-    const val = filter_mod.evaluateExpressionWithResolversArenaAndTimestamp(
+    var exec_eval = evalContextForExec(ctx, string_arena);
+    const val = filter_mod.evaluateExpressionFull(
         ctx.ast,
         ctx.tokens,
         ctx.source,
@@ -1097,10 +1057,7 @@ fn applyOffset(
         &.{},
         &RowSchema{},
         null,
-        &parameter_resolver,
-        string_arena,
-        ctx.statement_timestamp_micros,
-        ctx.now_resolver,
+        &exec_eval.eval_ctx,
     ) catch return;
 
     const offset = numericToRowCount(val) orelse return;
@@ -1536,8 +1493,8 @@ fn accumulateGroupAggregates(
         const descriptor = group_runtime.aggregate_descriptors[slot];
         if (descriptor.kind == .count_star) continue;
 
-        const parameter_resolver = parameterResolverForContext(ctx);
-        const arg_value = filter_mod.evaluateExpressionWithResolversArenaAndTimestamp(
+        var exec_eval = evalContextForExec(ctx, string_arena);
+        const arg_value = filter_mod.evaluateExpressionFull(
             ctx.ast,
             ctx.tokens,
             ctx.source,
@@ -1545,10 +1502,7 @@ fn accumulateGroupAggregates(
             row_values,
             schema,
             null,
-            &parameter_resolver,
-            string_arena,
-            ctx.statement_timestamp_micros,
-            ctx.now_resolver,
+            &exec_eval.eval_ctx,
         ) catch {
             setError(result, "aggregate evaluation failed");
             return false;
@@ -1888,6 +1842,7 @@ fn evaluateSortKeyValue(
     key: SortKeyDescriptor,
     string_arena: *scan_mod.StringArena,
 ) filter_mod.EvalError!Value {
+    var exec_eval = evalContextForExec(ctx, string_arena);
     return switch (key.kind) {
         .column => row.values[key.column_index],
         .expression => if (group_runtime.active)
@@ -1898,11 +1853,10 @@ fn evaluateSortKeyValue(
                 row.values[0..row.column_count],
                 schema,
                 row_index,
-                string_arena,
+                &exec_eval.eval_ctx,
             )
-        else blk: {
-            const parameter_resolver = parameterResolverForContext(ctx);
-            break :blk filter_mod.evaluateExpressionWithResolversArenaAndTimestamp(
+        else
+            filter_mod.evaluateExpressionFull(
                 ctx.ast,
                 ctx.tokens,
                 ctx.source,
@@ -1910,12 +1864,8 @@ fn evaluateSortKeyValue(
                 row.values[0..row.column_count],
                 schema,
                 null,
-                &parameter_resolver,
-                string_arena,
-                ctx.statement_timestamp_micros,
-                ctx.now_resolver,
-            );
-        },
+                &exec_eval.eval_ctx,
+            ),
     };
 }
 
@@ -1932,7 +1882,7 @@ fn evaluateGroupedPredicate(
     row_values: []const Value,
     schema: *const RowSchema,
     row_index: u16,
-    string_arena: *scan_mod.StringArena,
+    eval_ctx: *const filter_mod.EvalContext,
 ) filter_mod.EvalError!bool {
     const agg_ctx = GroupAggregateContext{
         .ctx = ctx,
@@ -1943,8 +1893,7 @@ fn evaluateGroupedPredicate(
         .ctx = &agg_ctx,
         .resolve = resolveGroupedAggregate,
     };
-    const parameter_resolver = parameterResolverForContext(ctx);
-    return filter_mod.evaluatePredicateWithResolversArenaAndTimestamp(
+    return filter_mod.evaluatePredicateFull(
         ctx.ast,
         ctx.tokens,
         ctx.source,
@@ -1952,10 +1901,7 @@ fn evaluateGroupedPredicate(
         row_values,
         schema,
         &resolver,
-        &parameter_resolver,
-        string_arena,
-        ctx.statement_timestamp_micros,
-        ctx.now_resolver,
+        eval_ctx,
     );
 }
 
@@ -1966,7 +1912,7 @@ fn evaluateGroupedExpression(
     row_values: []const Value,
     schema: *const RowSchema,
     row_index: u16,
-    string_arena: *scan_mod.StringArena,
+    eval_ctx: *const filter_mod.EvalContext,
 ) filter_mod.EvalError!Value {
     const agg_ctx = GroupAggregateContext{
         .ctx = ctx,
@@ -1977,8 +1923,7 @@ fn evaluateGroupedExpression(
         .ctx = &agg_ctx,
         .resolve = resolveGroupedAggregate,
     };
-    const parameter_resolver = parameterResolverForContext(ctx);
-    return filter_mod.evaluateExpressionWithResolversArenaAndTimestamp(
+    return filter_mod.evaluateExpressionFull(
         ctx.ast,
         ctx.tokens,
         ctx.source,
@@ -1986,10 +1931,7 @@ fn evaluateGroupedExpression(
         row_values,
         schema,
         &resolver,
-        &parameter_resolver,
-        string_arena,
-        ctx.statement_timestamp_micros,
-        ctx.now_resolver,
+        eval_ctx,
     );
 }
 
@@ -2231,6 +2173,7 @@ fn executeMutation(
     const mut_op = ops[mut_idx];
     const has_projection = hasNonEmptySelectionSet(ctx.ast, pipeline_node);
     var diagnostic = mutation_mod.MutationDiagnostic{};
+    var exec_eval = evalContextForExec(ctx, string_arena);
 
     switch (mut_op.kind) {
         .insert_op => {
@@ -2247,8 +2190,7 @@ fn executeMutation(
                 node.data.unary,
                 ctx.parameter_bindings,
                 &diagnostic,
-                ctx.statement_timestamp_micros,
-                ctx.now_resolver,
+                &exec_eval.eval_ctx,
             ) catch |err| {
                 setMutationBoundaryError(result, ctx, .insert_op, err, &diagnostic);
                 return;
@@ -2298,8 +2240,7 @@ fn executeMutation(
                 ctx.parameter_bindings,
                 capture,
                 &diagnostic,
-                ctx.statement_timestamp_micros,
-                ctx.now_resolver,
+                &exec_eval.eval_ctx,
             ) catch |err| {
                 setMutationBoundaryError(result, ctx, .update_op, err, &diagnostic);
                 return;
@@ -2335,8 +2276,7 @@ fn executeMutation(
                 ctx.allocator,
                 ctx.parameter_bindings,
                 capture,
-                ctx.statement_timestamp_micros,
-                ctx.now_resolver,
+                &exec_eval.eval_ctx,
             ) catch |err| {
                 setBoundaryError(
                     result,
@@ -2393,13 +2333,13 @@ fn materializeRowsMatchingPredicate(
 
     if (predicate_node != null_node) {
         const schema = &model.row_schema;
-        const parameter_resolver = parameterResolverForContext(ctx);
+        var exec_eval = evalContextForExec(ctx, string_arena);
         const original_count = out.row_count;
         var write_idx: u16 = 0;
         var read_idx: u16 = 0;
         while (read_idx < out.row_count) : (read_idx += 1) {
             const row = &out.rows[read_idx];
-            const matches = filter_mod.evaluatePredicateWithResolversArenaAndTimestamp(
+            const matches = filter_mod.evaluatePredicateFull(
                 ctx.ast,
                 ctx.tokens,
                 ctx.source,
@@ -2407,10 +2347,7 @@ fn materializeRowsMatchingPredicate(
                 row.values[0..row.column_count],
                 schema,
                 null,
-                &parameter_resolver,
-                string_arena,
-                ctx.statement_timestamp_micros,
-                ctx.now_resolver,
+                &exec_eval.eval_ctx,
             ) catch |err| switch (err) {
                 error.UndefinedParameter => {
                     setError(out, "undefined parameter in predicate");

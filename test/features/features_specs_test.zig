@@ -41,7 +41,7 @@ comptime {
     _ = @import("expressions/stdlib/coalesce_test.zig");
     _ = @import("expressions/stdlib/length_test.zig");
     _ = @import("expressions/stdlib/lower_test.zig");
-    _ = @import("expressions/stdlib/now_test.zig");
+    _ = @import("expressions/stdlib/current_timestamp_test.zig");
     _ = @import("expressions/stdlib/round_test.zig");
     _ = @import("expressions/stdlib/sqrt_test.zig");
     _ = @import("expressions/stdlib/trim_test.zig");

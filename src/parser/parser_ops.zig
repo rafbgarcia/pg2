@@ -306,7 +306,6 @@ pub fn isAggOrFn(tok_type: TokenType) bool {
         .agg_avg,
         .agg_min,
         .agg_max,
-        .fn_now,
         .fn_lower,
         .fn_upper,
         .fn_trim,
