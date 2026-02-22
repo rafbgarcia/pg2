@@ -257,71 +257,155 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
     var string_arena = scan_mod.StringArena.init(runtime_ctx.string_arena_bytes);
     string_arena.reset();
 
-    // Find pipeline from AST root.
-    const pipeline_idx = findPipeline(runtime_ctx.ast) orelse {
-        setError(&result, "no pipeline found in query");
+    const first_stmt = findFirstStatement(runtime_ctx.ast) orelse {
+        setError(&result, "no statements found in query");
         return result;
     };
-    const pipeline = runtime_ctx.ast.getNode(pipeline_idx);
+
+    var total_stats = ExecStats{};
+    var statement_index: u16 = 0;
+    var stmt = first_stmt;
+    while (stmt != null_node) : (statement_index += 1) {
+        resetQueryResultForStatement(&result);
+        executeSingleStatement(
+            &runtime_ctx,
+            &result,
+            stmt,
+            statement_index,
+            &string_arena,
+        );
+        accumulateStatementStats(&total_stats, &result.stats);
+
+        if (result.has_error) {
+            result.stats = total_stats;
+            return result;
+        }
+
+        const node = runtime_ctx.ast.getNode(stmt);
+        stmt = node.next;
+    }
+    result.stats = total_stats;
+
+    std.debug.assert(result.row_count <= scan_mod.max_result_rows);
+    return result;
+}
+
+fn resetQueryResultForStatement(result: *QueryResult) void {
+    result.row_count = 0;
+    result.stats = .{};
+    result.has_error = false;
+    @memset(result.error_message[0..], 0);
+}
+
+fn accumulateStatementStats(total: *ExecStats, current: *const ExecStats) void {
+    total.rows_scanned +|= current.rows_scanned;
+    total.rows_matched +|= current.rows_matched;
+    total.rows_returned +|= current.rows_returned;
+    total.rows_inserted +|= current.rows_inserted;
+    total.rows_updated +|= current.rows_updated;
+    total.rows_deleted +|= current.rows_deleted;
+    total.pages_read +|= current.pages_read;
+    total.pages_written +|= current.pages_written;
+    total.plan = current.plan;
+}
+
+fn executeSingleStatement(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    statement_node: NodeIndex,
+    statement_index: u16,
+    string_arena: *scan_mod.StringArena,
+) void {
+    const statement = ctx.ast.getNode(statement_node);
+    switch (statement.tag) {
+        .pipeline => executePipelineStatement(
+            ctx,
+            result,
+            statement_node,
+            string_arena,
+        ),
+        .let_binding => setStatementError(
+            result,
+            statement_index,
+            "let bindings are not executable yet",
+        ),
+        else => setStatementError(
+            result,
+            statement_index,
+            "unsupported statement type",
+        ),
+    }
+}
+
+fn executePipelineStatement(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    pipeline_idx: NodeIndex,
+    string_arena: *scan_mod.StringArena,
+) void {
+    const pipeline = ctx.ast.getNode(pipeline_idx);
     if (pipeline.tag != .pipeline) {
-        setError(&result, "expected pipeline node");
-        return result;
+        setError(result, "expected pipeline node");
+        return;
     }
 
-    // Resolve source model.
-    const source_node = runtime_ctx.ast.getNode(pipeline.data.binary.lhs);
+    const source_node = ctx.ast.getNode(pipeline.data.binary.lhs);
     if (source_node.tag != .pipe_source) {
-        setError(&result, "expected pipe_source node");
-        return result;
+        setError(result, "expected pipe_source node");
+        return;
     }
-    const model_name = runtime_ctx.tokens.getText(
+    const model_name = ctx.tokens.getText(
         source_node.data.token,
-        runtime_ctx.source,
+        ctx.source,
     );
-    const model_id = runtime_ctx.catalog.findModel(model_name) orelse {
-        setError(&result, "model not found");
-        return result;
+    const model_id = ctx.catalog.findModel(model_name) orelse {
+        setError(result, "model not found");
+        return;
     };
 
-    // Build operator list from linked list.
     var ops: [max_operators]OpDescriptor = undefined;
     var op_count: u16 = 0;
     buildOperatorList(
-        runtime_ctx.ast,
+        ctx.ast,
         pipeline.data.binary.rhs,
         &ops,
         &op_count,
     );
     capturePlanStats(&result.stats.plan, model_name, &ops, op_count);
 
-    // Check for mutations.
     if (findMutationOp(&ops, op_count)) |mut_idx| {
         executeMutation(
-            &runtime_ctx,
-            &result,
+            ctx,
+            result,
             pipeline_idx,
             model_id,
             &ops,
             op_count,
             mut_idx,
-            &string_arena,
+            string_arena,
         );
-        return result;
+        return;
     }
 
-    // Read path: scan → apply operators → project.
     executeReadPipeline(
-        &runtime_ctx,
-        &result,
+        ctx,
+        result,
         pipeline_idx,
         model_id,
         &ops,
         op_count,
-        &string_arena,
+        string_arena,
     );
+}
 
-    std.debug.assert(result.row_count <= scan_mod.max_result_rows);
-    return result;
+fn setStatementError(result: *QueryResult, statement_index: u16, message: []const u8) void {
+    var buf: [512]u8 = undefined;
+    const formatted = std.fmt.bufPrint(
+        buf[0..],
+        "statement_index={d} {s}",
+        .{ statement_index, message },
+    ) catch message;
+    setError(result, formatted);
 }
 
 fn resolveStatementNowMicros(
@@ -2443,6 +2527,15 @@ fn tokenColumn(tokens: *const TokenizeResult, source: []const u8, token_idx: u16
     }
     const col = start - line_start + 1;
     return @intCast(@min(col, std.math.maxInt(u16)));
+}
+
+fn findFirstStatement(tree: *const Ast) ?NodeIndex {
+    if (tree.root == null_node) return null;
+    const root = tree.getNode(tree.root);
+    if (root.tag != .root) return null;
+    const first_stmt = root.data.unary;
+    if (first_stmt == null_node) return null;
+    return first_stmt;
 }
 
 /// Find the pipeline node from the AST root.

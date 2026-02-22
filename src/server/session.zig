@@ -451,7 +451,7 @@ fn buildTreeProjection(
     source: []const u8,
     catalog: *const Catalog,
 ) ?TreeProjection {
-    const pipeline = getTopPipeline(ast) orelse return null;
+    const pipeline = getFinalPipeline(ast) orelse return null;
     const pipeline_node = ast.getNode(pipeline);
     if (pipeline_node.tag != .pipeline) return null;
     const source_node = ast.getNode(pipeline_node.data.binary.lhs);
@@ -550,19 +550,25 @@ fn countProtocolRootRows(
     return root_count;
 }
 
-fn getTopPipeline(ast: *const Ast) ?NodeIndex {
+fn getFinalPipeline(ast: *const Ast) ?NodeIndex {
     if (ast.root == null_node) return null;
     const root = ast.getNode(ast.root);
     if (root.tag != .root) return null;
-    const first_stmt = root.data.unary;
-    if (first_stmt == null_node) return null;
-    const first = ast.getNode(first_stmt);
-    if (first.tag == .pipeline) return first_stmt;
-    if (first.tag == .let_binding and first.data.unary != null_node) {
-        const bound = ast.getNode(first.data.unary);
-        if (bound.tag == .pipeline) return first.data.unary;
+    var stmt = root.data.unary;
+    var last_pipeline: NodeIndex = null_node;
+    while (stmt != null_node) {
+        const current = ast.getNode(stmt);
+        if (current.tag == .pipeline) last_pipeline = stmt;
+        if (current.tag == .let_binding and current.data.unary != null_node) {
+            const bound = ast.getNode(current.data.unary);
+            if (bound.tag == .pipeline) {
+                last_pipeline = current.data.unary;
+            }
+        }
+        stmt = current.next;
     }
-    return null;
+    if (last_pipeline == null_node) return null;
+    return last_pipeline;
 }
 
 fn getNestedSelection(ast: *const Ast, nested_node: NodeIndex) ?NodeIndex {
@@ -1019,6 +1025,46 @@ test "session request path serializes query results" {
     try std.testing.expect(!result.is_query_error);
     try std.testing.expectEqualStrings(
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,Alice,true\n",
+        response_buf[0..result.bytes_written],
+    );
+}
+
+test "session marks mutation requests with had_mutation=true" {
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    const backing_memory = try std.testing.allocator.alloc(
+        u8,
+        256 * 1024 * 1024,
+    );
+    defer std.testing.allocator.free(backing_memory);
+
+    var runtime = try BootstrappedRuntime.init(
+        backing_memory,
+        disk.storage(),
+        .{ .max_query_slots = 1 },
+    );
+
+    var catalog = Catalog{};
+    try initUserModel(&catalog, &runtime);
+
+    var session = Session.init(&runtime, &catalog);
+    var pool = ConnectionPool.init(&runtime);
+    var response_buf: [1024]u8 = undefined;
+
+    var conn = try pool.checkout();
+    const result = try session.handleRequest(
+        &pool,
+        &conn,
+        "User |> insert(id = 1, name = \"Alice\", active = true) {}",
+        response_buf[0..],
+    );
+    try pool.checkin(&conn);
+
+    try std.testing.expect(!result.is_query_error);
+    try std.testing.expect(result.had_mutation);
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
         response_buf[0..result.bytes_written],
     );
 }

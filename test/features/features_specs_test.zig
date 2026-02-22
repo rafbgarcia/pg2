@@ -49,4 +49,7 @@ comptime {
     _ = @import("expressions/subtraction_test.zig");
     _ = @import("expressions/unary_minus_test.zig");
     _ = @import("expressions/where_test.zig");
+    _ = @import("variables_and_multi_statement/multi_statement_read_chain_test.zig");
+    _ = @import("variables_and_multi_statement/multi_statement_mutation_chain_test.zig");
+    _ = @import("variables_and_multi_statement/multi_statement_atomic_rollback_test.zig");
 }

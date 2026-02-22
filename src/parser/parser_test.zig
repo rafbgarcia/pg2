@@ -78,6 +78,25 @@ test "parse let binding" {
     try testing.expect(!result.has_error);
 }
 
+test "parse multiple statements links statement list in root order" {
+    const source =
+        \\User { id }
+        \\User |> where(id == 1) { id }
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(!result.has_error);
+
+    const root = result.ast.getNode(result.ast.root);
+    try testing.expectEqual(NodeTag.root, root.tag);
+    const first_stmt = root.data.unary;
+    try testing.expect(first_stmt != null_node);
+    const second_stmt = result.ast.getNode(first_stmt).next;
+    try testing.expect(second_stmt != null_node);
+    try testing.expectEqual(NodeTag.pipeline, result.ast.getNode(first_stmt).tag);
+    try testing.expectEqual(NodeTag.pipeline, result.ast.getNode(second_stmt).tag);
+}
+
 test "parse mutation insert" {
     const source =
         \\User |> insert(email = "a@b.com", name = "Alice") { id email }
