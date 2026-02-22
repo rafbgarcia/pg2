@@ -226,6 +226,7 @@ pub fn executeInsertWithDiagnostic(
         &.{},
         diagnostic,
         null,
+        null,
     );
 }
 
@@ -242,6 +243,7 @@ pub fn executeInsertWithDiagnosticAndParameters(
     parameter_bindings: []const ParameterBinding,
     diagnostic: ?*MutationDiagnostic,
     statement_timestamp_micros: ?i64,
+    now_resolver: ?*const filter_mod.NowResolver,
 ) MutationError!RowId {
     std.debug.assert(model_id < catalog.model_count);
     const model = &catalog.models[model_id];
@@ -266,6 +268,7 @@ pub fn executeInsertWithDiagnosticAndParameters(
         diagnostic,
         &string_arena,
         statement_timestamp_micros,
+        now_resolver,
     );
     applyColumnDefaultsForInsert(
         catalog,
@@ -412,6 +415,7 @@ pub fn executeUpdate(
         null,
         null,
         null,
+        null,
     );
 }
 
@@ -450,6 +454,7 @@ pub fn executeUpdateWithDiagnostic(
         &.{},
         null,
         diagnostic,
+        null,
         null,
     );
 }
@@ -492,6 +497,7 @@ pub fn executeUpdateWithDiagnosticAndReturning(
         returning_capture,
         diagnostic,
         null,
+        null,
     );
 }
 
@@ -514,6 +520,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
     returning_capture: ?*ReturningCapture,
     diagnostic: ?*MutationDiagnostic,
     statement_timestamp_micros: ?i64,
+    now_resolver: ?*const filter_mod.NowResolver,
 ) MutationError!u32 {
     std.debug.assert(model_id < catalog.model_count);
     const model = &catalog.models[model_id];
@@ -578,6 +585,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                     &parameter_resolver,
                     &string_arena,
                     statement_timestamp_micros,
+                    now_resolver,
                 ) catch continue;
                 if (!matches) continue;
             }
@@ -597,6 +605,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                 diagnostic,
                 &string_arena,
                 statement_timestamp_micros,
+                now_resolver,
             ) catch |e| return e;
 
             try enforceOutgoingReferentialIntegrity(
@@ -677,6 +686,7 @@ pub fn executeDelete(
         &.{},
         null,
         null,
+        null,
     );
 }
 
@@ -714,6 +724,7 @@ pub fn executeDeleteWithReturning(
         parameter_bindings,
         returning_capture,
         null,
+        null,
     );
 }
 
@@ -734,6 +745,7 @@ pub fn executeDeleteWithReturningAndParameters(
     parameter_bindings: []const ParameterBinding,
     returning_capture: ?*ReturningCapture,
     statement_timestamp_micros: ?i64,
+    now_resolver: ?*const filter_mod.NowResolver,
 ) MutationError!u32 {
     std.debug.assert(model_id < catalog.model_count);
     _ = allocator;
@@ -799,6 +811,7 @@ pub fn executeDeleteWithReturningAndParameters(
                     &parameter_resolver,
                     &string_arena,
                     statement_timestamp_micros,
+                    now_resolver,
                 ) catch continue;
                 if (!matches) continue;
             }
@@ -1896,6 +1909,7 @@ pub fn buildRowFromAssignments(
     diagnostic: ?*MutationDiagnostic,
     string_arena: *scan_mod.StringArena,
     statement_timestamp_micros: ?i64,
+    now_resolver: ?*const filter_mod.NowResolver,
 ) MutationError!void {
     std.debug.assert(out_values.len >= schema.column_count);
     std.debug.assert(out_assigned.len >= schema.column_count);
@@ -1936,6 +1950,7 @@ pub fn buildRowFromAssignments(
             &parameter_resolver,
             string_arena,
             statement_timestamp_micros,
+            now_resolver,
         ) catch |e| {
             const mapped = mapFilterError(e);
             if (mapped == error.NumericOverflow) {
@@ -1999,6 +2014,7 @@ fn applyAssignments(
     diagnostic: ?*MutationDiagnostic,
     string_arena: *scan_mod.StringArena,
     statement_timestamp_micros: ?i64,
+    now_resolver: ?*const filter_mod.NowResolver,
 ) MutationError!void {
     std.debug.assert(values.len >= schema.column_count);
 
@@ -2039,6 +2055,7 @@ fn applyAssignments(
             &parameter_resolver,
             string_arena,
             statement_timestamp_micros,
+            now_resolver,
         ) catch |e| {
             const mapped = mapFilterError(e);
             if (mapped == error.NumericOverflow) {

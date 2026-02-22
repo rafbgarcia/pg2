@@ -27,6 +27,7 @@ const NodeIndex = ast_mod.NodeIndex;
 const NodeTag = ast_mod.NodeTag;
 const null_node = ast_mod.null_node;
 const TokenizeResult = tokenizer_mod.TokenizeResult;
+const max_tokens = tokenizer_mod.max_tokens;
 const RowId = heap_storage_mod.RowId;
 const Value = row_mod.Value;
 const RowSchema = row_mod.RowSchema;
@@ -44,6 +45,10 @@ const UndoLog = undo_mod.UndoLog;
 const ResultRow = scan_mod.ResultRow;
 const compareValues = row_mod.compareValues;
 pub const ParameterBinding = filter_mod.ParameterBinding;
+pub const NowSource = struct {
+    ctx: *anyopaque,
+    next_micros: *const fn (ctx: *anyopaque) i64,
+};
 const max_sort_keys = capacity_mod.max_sort_keys;
 const max_group_aggregate_exprs = capacity_mod.max_group_aggregate_exprs;
 const sort_key_desc_mask: u16 = 0x0001;
@@ -201,13 +206,23 @@ pub const ExecContext = struct {
     ast: *const Ast,
     tokens: *const TokenizeResult,
     source: []const u8,
-    statement_timestamp_micros: i64,
+    statement_timestamp_micros: ?i64,
+    now_source: ?NowSource,
     parameter_bindings: []const ParameterBinding,
+    now_resolver: ?*const filter_mod.NowResolver = null,
     allocator: Allocator,
     result_rows: []ResultRow,
     scratch_rows_a: []ResultRow,
     scratch_rows_b: []ResultRow,
     string_arena_bytes: []u8,
+};
+
+const StatementNowCache = struct {
+    source: ?NowSource,
+    fallback_timestamp_micros: ?i64,
+    high_water_micros: ?i64 = null,
+    resolved: [max_tokens]bool = [_]bool{false} ** max_tokens,
+    values: [max_tokens]i64 = [_]i64{0} ** max_tokens,
 };
 
 /// Operator kind extracted from the AST.
@@ -226,33 +241,44 @@ const OpDescriptor = struct {
 /// Query-level errors are stored in result.error_message. Only
 /// OutOfMemory escapes as a Zig error (system-level, not query-level).
 pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
+    var now_cache = StatementNowCache{
+        .source = ctx.now_source,
+        .fallback_timestamp_micros = ctx.statement_timestamp_micros,
+    };
+    const now_resolver = filter_mod.NowResolver{
+        .ctx = &now_cache,
+        .resolve = &resolveStatementNowMicros,
+    };
+    var runtime_ctx = ctx.*;
+    runtime_ctx.now_resolver = &now_resolver;
+
     var result = QueryResult.init(ctx.result_rows);
     errdefer result.deinit();
-    var string_arena = scan_mod.StringArena.init(ctx.string_arena_bytes);
+    var string_arena = scan_mod.StringArena.init(runtime_ctx.string_arena_bytes);
     string_arena.reset();
 
     // Find pipeline from AST root.
-    const pipeline_idx = findPipeline(ctx.ast) orelse {
+    const pipeline_idx = findPipeline(runtime_ctx.ast) orelse {
         setError(&result, "no pipeline found in query");
         return result;
     };
-    const pipeline = ctx.ast.getNode(pipeline_idx);
+    const pipeline = runtime_ctx.ast.getNode(pipeline_idx);
     if (pipeline.tag != .pipeline) {
         setError(&result, "expected pipeline node");
         return result;
     }
 
     // Resolve source model.
-    const source_node = ctx.ast.getNode(pipeline.data.binary.lhs);
+    const source_node = runtime_ctx.ast.getNode(pipeline.data.binary.lhs);
     if (source_node.tag != .pipe_source) {
         setError(&result, "expected pipe_source node");
         return result;
     }
-    const model_name = ctx.tokens.getText(
+    const model_name = runtime_ctx.tokens.getText(
         source_node.data.token,
-        ctx.source,
+        runtime_ctx.source,
     );
-    const model_id = ctx.catalog.findModel(model_name) orelse {
+    const model_id = runtime_ctx.catalog.findModel(model_name) orelse {
         setError(&result, "model not found");
         return result;
     };
@@ -261,7 +287,7 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
     var ops: [max_operators]OpDescriptor = undefined;
     var op_count: u16 = 0;
     buildOperatorList(
-        ctx.ast,
+        runtime_ctx.ast,
         pipeline.data.binary.rhs,
         &ops,
         &op_count,
@@ -271,7 +297,7 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
     // Check for mutations.
     if (findMutationOp(&ops, op_count)) |mut_idx| {
         executeMutation(
-            ctx,
+            &runtime_ctx,
             &result,
             pipeline_idx,
             model_id,
@@ -285,7 +311,7 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
 
     // Read path: scan → apply operators → project.
     executeReadPipeline(
-        ctx,
+        &runtime_ctx,
         &result,
         pipeline_idx,
         model_id,
@@ -296,6 +322,28 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
 
     std.debug.assert(result.row_count <= scan_mod.max_result_rows);
     return result;
+}
+
+fn resolveStatementNowMicros(
+    raw_ctx: *anyopaque,
+    token_index: u16,
+) filter_mod.EvalError!i64 {
+    if (token_index >= max_tokens) return error.TypeMismatch;
+    const cache: *StatementNowCache = @ptrCast(@alignCast(raw_ctx));
+    if (cache.resolved[token_index]) return cache.values[token_index];
+
+    var candidate = if (cache.source) |source|
+        source.next_micros(source.ctx)
+    else
+        cache.fallback_timestamp_micros orelse return error.ClockUnavailable;
+    if (cache.high_water_micros) |last| {
+        if (candidate <= last) candidate = last + 1;
+    }
+
+    cache.resolved[token_index] = true;
+    cache.values[token_index] = candidate;
+    cache.high_water_micros = candidate;
+    return candidate;
 }
 
 /// Execute the read path: table scan, then apply operators in sequence.
@@ -517,6 +565,7 @@ fn applyFlatColumnProjection(
                         &parameter_resolver,
                         string_arena,
                         ctx.statement_timestamp_micros,
+                        ctx.now_resolver,
                     ) catch {
                         setError(result, "select computed expression evaluation failed");
                         return false;
@@ -844,6 +893,7 @@ fn applyWhereFilter(
                 &parameter_resolver,
                 string_arena,
                 ctx.statement_timestamp_micros,
+                ctx.now_resolver,
             ) catch |err| switch (err) {
                 error.UndefinedParameter => {
                     setError(result, "undefined parameter in where predicate");
@@ -919,6 +969,7 @@ fn applyLimit(
         &parameter_resolver,
         string_arena,
         ctx.statement_timestamp_micros,
+        ctx.now_resolver,
     ) catch return;
 
     const limit = numericToRowCount(val) orelse return;
@@ -953,6 +1004,7 @@ fn applyOffset(
         &parameter_resolver,
         string_arena,
         ctx.statement_timestamp_micros,
+        ctx.now_resolver,
     ) catch return;
 
     const offset = numericToRowCount(val) orelse return;
@@ -1400,6 +1452,7 @@ fn accumulateGroupAggregates(
             &parameter_resolver,
             string_arena,
             ctx.statement_timestamp_micros,
+            ctx.now_resolver,
         ) catch {
             setError(result, "aggregate evaluation failed");
             return false;
@@ -1764,6 +1817,7 @@ fn evaluateSortKeyValue(
                 &parameter_resolver,
                 string_arena,
                 ctx.statement_timestamp_micros,
+                ctx.now_resolver,
             );
         },
     };
@@ -1805,6 +1859,7 @@ fn evaluateGroupedPredicate(
         &parameter_resolver,
         string_arena,
         ctx.statement_timestamp_micros,
+        ctx.now_resolver,
     );
 }
 
@@ -1838,6 +1893,7 @@ fn evaluateGroupedExpression(
         &parameter_resolver,
         string_arena,
         ctx.statement_timestamp_micros,
+        ctx.now_resolver,
     );
 }
 
@@ -2096,6 +2152,7 @@ fn executeMutation(
                 ctx.parameter_bindings,
                 &diagnostic,
                 ctx.statement_timestamp_micros,
+                ctx.now_resolver,
             ) catch |err| {
                 setMutationBoundaryError(result, ctx, .insert_op, err, &diagnostic);
                 return;
@@ -2146,6 +2203,7 @@ fn executeMutation(
                 capture,
                 &diagnostic,
                 ctx.statement_timestamp_micros,
+                ctx.now_resolver,
             ) catch |err| {
                 setMutationBoundaryError(result, ctx, .update_op, err, &diagnostic);
                 return;
@@ -2182,6 +2240,7 @@ fn executeMutation(
                 ctx.parameter_bindings,
                 capture,
                 ctx.statement_timestamp_micros,
+                ctx.now_resolver,
             ) catch |err| {
                 setBoundaryError(
                     result,
@@ -2255,6 +2314,7 @@ fn materializeRowsMatchingPredicate(
                 &parameter_resolver,
                 string_arena,
                 ctx.statement_timestamp_micros,
+                ctx.now_resolver,
             ) catch |err| switch (err) {
                 error.UndefinedParameter => {
                     setError(out, "undefined parameter in predicate");
@@ -2625,6 +2685,7 @@ const ExecTestEnv = struct {
             .tokens = tokens,
             .source = source,
             .statement_timestamp_micros = 0,
+            .now_source = null,
             .parameter_bindings = &.{},
             .allocator = testing.allocator,
             .result_rows = self.result_rows,
