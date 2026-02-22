@@ -1,1 +1,3 @@
 - Should we remove `withoutReferentialIntegrity` and make it the default?
+- Plugin system (e.g. text enconding, postgis)
+- float, decimal, numeric - currently only f64
