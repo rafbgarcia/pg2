@@ -39,7 +39,7 @@ After extraction `mutation.zig` retains `executeInsert/Update/Delete` orchestrat
 - `zig build test` passes with zero test modifications.
 - No new public API — extracted modules are `@import`ed only by `mutation.zig`.
 
-## Phase 3: B-Tree — Page and Split Extraction
+## Phase 3: B-Tree — Page and Split Extraction ✅
 ### Scope
 Extract page-level and split logic out of `src/storage/btree.zig` (1238 prod lines, 5 concerns):
 

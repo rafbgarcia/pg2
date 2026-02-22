@@ -24,12 +24,22 @@ const page_mod = @import("page.zig");
 const heap_mod = @import("heap.zig");
 const buffer_pool_mod = @import("buffer_pool.zig");
 const wal_mod = @import("wal.zig");
+const btree_page_mod = @import("btree_page.zig");
+const btree_split_mod = @import("btree_split.zig");
 
 const Page = page_mod.Page;
 const content_size = page_mod.content_size;
 const RowId = heap_mod.RowId;
 const BufferPool = buffer_pool_mod.BufferPool;
 const Wal = wal_mod.Wal;
+
+// --- Delegated from btree_page module ---
+pub const LeafNode = btree_page_mod.LeafNode;
+pub const InternalNode = btree_page_mod.InternalNode;
+const readU16 = btree_page_mod.readU16;
+const writeU16 = btree_page_mod.writeU16;
+const readU64 = btree_page_mod.readU64;
+const writeU64 = btree_page_mod.writeU64;
 
 pub const BTreeError = error{
     PageFull,
@@ -50,353 +60,6 @@ pub const BTreeError = error{
 };
 
 // ============================================================================
-// Leaf Node
-// ============================================================================
-
-/// Operations on a B+ tree leaf page.
-///
-/// Layout within content area (8168 bytes):
-///
-/// ```
-/// ┌───────────────────────────────────────────────────┐
-/// │ LeafHeader (18 bytes)                             │
-/// │   cell_count: u16, free_start: u16, free_end: u16 │
-/// │   right_sibling: u64                              │
-/// │   format_magic: u16, format_version: u8           │
-/// ├───────────────────────────────────────────────────┤
-/// │ Cell Pointer Array → (2 bytes each, grows right)  │
-/// ├───────────── free space ──────────────────────────┤
-/// │            ← Cell Data (grows left from end)       │
-/// │  Each cell: [key_len:u16][key][page_id:u64][slot:u16] │
-/// └───────────────────────────────────────────────────┘
-/// ```
-pub const LeafNode = struct {
-    const header_size: u16 = 18;
-    const cell_ptr_size: u16 = 2;
-    const format_magic: u16 = 0x4C32; // "L2"
-    const format_version: u8 = 1;
-    /// No sibling. Uses maxInt to avoid collision with valid page IDs.
-    pub const no_sibling: u64 = std.math.maxInt(u64);
-
-    /// Initialize a page as an empty leaf node.
-    pub fn init(page: *Page) void {
-        page.header.page_type = .btree_leaf;
-        @memset(&page.content, 0);
-        writeU16(&page.content, 0, 0); // cell_count
-        writeU16(&page.content, 2, header_size); // free_start
-        writeU16(&page.content, 4, content_size); // free_end
-        writeU64(&page.content, 6, no_sibling); // right_sibling
-        writeU16(&page.content, 14, format_magic);
-        page.content[16] = format_version;
-        page.content[17] = 0;
-    }
-
-    pub fn cellCount(content: *const [content_size]u8) u16 {
-        return readU16(content, 0);
-    }
-
-    pub fn freeSpace(content: *const [content_size]u8) u16 {
-        const free_start = readU16(content, 2);
-        const free_end = readU16(content, 4);
-        if (free_end <= free_start) return 0;
-        return free_end - free_start;
-    }
-
-    pub fn rightSibling(content: *const [content_size]u8) u64 {
-        return readU64(content, 6);
-    }
-
-    pub fn setRightSibling(content: *[content_size]u8, sibling: u64) void {
-        writeU64(content, 6, sibling);
-    }
-
-    /// Returns the offset within the content area where cell `index` data starts.
-    fn cellOffset(content: *const [content_size]u8, index: u16) u16 {
-        const ptr_pos = header_size + @as(usize, index) * cell_ptr_size;
-        return readU16(content, ptr_pos);
-    }
-
-    /// Returns the key stored in cell `index`.
-    pub fn getKey(content: *const [content_size]u8, index: u16) []const u8 {
-        const offset = cellOffset(content, index);
-        const key_len = readU16(content, offset);
-        return content[offset + 2 ..][0..key_len];
-    }
-
-    /// Returns the RowId stored in cell `index`.
-    pub fn getRowId(content: *const [content_size]u8, index: u16) RowId {
-        const offset = cellOffset(content, index);
-        const key_len = readU16(content, offset);
-        const rid_offset = offset + 2 + key_len;
-        return .{
-            .page_id = readU64(content, rid_offset),
-            .slot = readU16(content, rid_offset + 8),
-        };
-    }
-
-    /// Binary search for `key`. Returns the index where the key is or should be inserted.
-    /// If found, returns .{ .index = i, .found = true }.
-    pub fn search(content: *const [content_size]u8, key: []const u8) struct { index: u16, found: bool } {
-        const count = cellCount(content);
-        if (count == 0) return .{ .index = 0, .found = false };
-
-        var lo: u16 = 0;
-        var hi: u16 = count;
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            const mid_key = getKey(content, mid);
-            const ord = std.mem.order(u8, mid_key, key);
-            switch (ord) {
-                .lt => lo = mid + 1,
-                .gt => hi = mid,
-                .eq => return .{ .index = mid, .found = true },
-            }
-        }
-        return .{ .index = lo, .found = false };
-    }
-
-    /// Insert a key/RowId pair into the leaf page. Maintains sorted order.
-    /// Returns error.PageFull if not enough space, error.DuplicateKey if key exists.
-    pub fn insert(content: *[content_size]u8, key: []const u8, row_id: RowId) BTreeError!void {
-        const result = search(content, key);
-        if (result.found) return error.DuplicateKey;
-
-        // Cell data = key_len(2) + key + page_id(8) + slot(2). Ensure no u16 overflow.
-        if (key.len > std.math.maxInt(u16) - 12) return error.PageFull;
-        const key_len: u16 = @intCast(key.len);
-        // Cell data: key_len(2) + key + page_id(8) + slot(2) = 12 + key_len
-        const cell_data_size: u16 = 2 + key_len + 8 + 2;
-        const needed: u16 = cell_ptr_size + cell_data_size;
-
-        const free_start = readU16(content, 2);
-        const free_end = readU16(content, 4);
-        if (free_end - free_start < needed) return error.PageFull;
-
-        const count = cellCount(content);
-        const insert_pos = result.index;
-
-        // Allocate cell data from the end.
-        const new_free_end = free_end - cell_data_size;
-        const cell_off = new_free_end;
-
-        // Write cell data.
-        writeU16(content, cell_off, key_len);
-        @memcpy(content[cell_off + 2 ..][0..key_len], key);
-        writeU64(content, cell_off + 2 + key_len, row_id.page_id);
-        writeU16(content, cell_off + 2 + key_len + 8, row_id.slot);
-
-        // Shift cell pointers right to make room at insert_pos.
-        // Move pointers [insert_pos..count] to [insert_pos+1..count+1]
-        var i: u16 = count;
-        while (i > insert_pos) {
-            i -= 1;
-            const old_ptr = readU16(content, header_size + @as(usize, i) * cell_ptr_size);
-            writeU16(content, header_size + @as(usize, i + 1) * cell_ptr_size, old_ptr);
-        }
-
-        // Write new cell pointer.
-        writeU16(content, header_size + @as(usize, insert_pos) * cell_ptr_size, cell_off);
-
-        // Update header.
-        writeU16(content, 0, count + 1); // cell_count
-        writeU16(content, 2, free_start + cell_ptr_size); // free_start
-        writeU16(content, 4, new_free_end); // free_end
-    }
-
-    /// Delete a key from the leaf. Returns error.KeyNotFound if not present.
-    pub fn delete(content: *[content_size]u8, key: []const u8) BTreeError!void {
-        const result = search(content, key);
-        if (!result.found) return error.KeyNotFound;
-
-        const count = cellCount(content);
-        const del_pos = result.index;
-
-        // Shift cell pointers left to fill the gap.
-        var i: u16 = del_pos;
-        while (i + 1 < count) : (i += 1) {
-            const next_ptr = readU16(content, header_size + @as(usize, i + 1) * cell_ptr_size);
-            writeU16(content, header_size + @as(usize, i) * cell_ptr_size, next_ptr);
-        }
-
-        // Update header. Note: free_end doesn't reclaim space (no compaction).
-        const free_start = readU16(content, 2);
-        writeU16(content, 0, count - 1); // cell_count
-        writeU16(content, 2, free_start - cell_ptr_size); // free_start
-    }
-};
-
-// ============================================================================
-// Internal Node
-// ============================================================================
-
-/// Operations on a B+ tree internal page.
-///
-/// Layout within content area (8168 bytes):
-///
-/// ```
-/// ┌───────────────────────────────────────────────────┐
-/// │ InternalHeader (20 bytes)                         │
-/// │   cell_count: u16, free_start: u16, free_end: u16 │
-/// │   left_child: u64                                  │
-/// │   format_magic: u16, format_version: u8           │
-/// ├───────────────────────────────────────────────────┤
-/// │ Cell Pointer Array → (2 bytes each, grows right)  │
-/// ├───────────── free space ──────────────────────────┤
-/// │            ← Cell Data (grows left from end)       │
-/// │  Each cell: [key_len:u16][key][right_child:u64]   │
-/// └───────────────────────────────────────────────────┘
-/// ```
-pub const InternalNode = struct {
-    const header_size: u16 = 20;
-    const cell_ptr_size: u16 = 2;
-    const format_magic: u16 = 0x4932; // "I2"
-    const format_version: u8 = 1;
-
-    /// Initialize a page as an empty internal node.
-    pub fn init(page: *Page) void {
-        page.header.page_type = .btree_internal;
-        @memset(&page.content, 0);
-        writeU16(&page.content, 0, 0); // cell_count
-        writeU16(&page.content, 2, header_size); // free_start
-        writeU16(&page.content, 4, content_size); // free_end
-        writeU64(&page.content, 6, 0); // left_child
-        writeU16(&page.content, 14, format_magic);
-        page.content[16] = format_version;
-        page.content[17] = 0;
-        writeU16(&page.content, 18, 0);
-    }
-
-    pub fn cellCount(content: *const [content_size]u8) u16 {
-        return readU16(content, 0);
-    }
-
-    pub fn freeSpace(content: *const [content_size]u8) u16 {
-        const free_start = readU16(content, 2);
-        const free_end = readU16(content, 4);
-        if (free_end <= free_start) return 0;
-        return free_end - free_start;
-    }
-
-    pub fn leftChild(content: *const [content_size]u8) u64 {
-        return readU64(content, 6);
-    }
-
-    pub fn setLeftChild(content: *[content_size]u8, child: u64) void {
-        writeU64(content, 6, child);
-    }
-
-    fn cellOffset(content: *const [content_size]u8, index: u16) u16 {
-        const ptr_pos = header_size + @as(usize, index) * cell_ptr_size;
-        return readU16(content, ptr_pos);
-    }
-
-    /// Returns the key stored in cell `index`.
-    pub fn getKey(content: *const [content_size]u8, index: u16) []const u8 {
-        const offset = cellOffset(content, index);
-        const key_len = readU16(content, offset);
-        return content[offset + 2 ..][0..key_len];
-    }
-
-    /// Returns the right child page_id of cell `index`.
-    pub fn getRightChild(content: *const [content_size]u8, index: u16) u64 {
-        const offset = cellOffset(content, index);
-        const key_len = readU16(content, offset);
-        return readU64(content, offset + 2 + key_len);
-    }
-
-    /// Find which child to follow for a given key.
-    /// Returns the page_id of the child that may contain `key`.
-    pub fn findChild(content: *const [content_size]u8, key: []const u8) u64 {
-        const count = cellCount(content);
-        // Binary search for the first key > search key.
-        var lo: u16 = 0;
-        var hi: u16 = count;
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            const mid_key = getKey(content, mid);
-            const ord = std.mem.order(u8, mid_key, key);
-            switch (ord) {
-                .lt => lo = mid + 1,
-                .eq => lo = mid + 1, // go right on equal (key is in right subtree)
-                .gt => hi = mid,
-            }
-        }
-        // lo = index of first key > search key.
-        // If lo == 0, go to left_child. Otherwise go to right_child of (lo-1).
-        if (lo == 0) return leftChild(content);
-        return getRightChild(content, lo - 1);
-    }
-
-    /// Find the index of the child pointer that was followed for a given key.
-    /// Returns 0 for left_child, or cell_index + 1 for right_child of that cell.
-    /// This is used during splits to know where to insert the promoted key.
-    pub fn findChildIndex(content: *const [content_size]u8, key: []const u8) u16 {
-        const count = cellCount(content);
-        var lo: u16 = 0;
-        var hi: u16 = count;
-        while (lo < hi) {
-            const mid = lo + (hi - lo) / 2;
-            const mid_key = getKey(content, mid);
-            const ord = std.mem.order(u8, mid_key, key);
-            switch (ord) {
-                .lt => lo = mid + 1,
-                .eq => lo = mid + 1,
-                .gt => hi = mid,
-            }
-        }
-        return lo;
-    }
-
-    /// Insert a key + right_child pointer. Maintains sorted order.
-    /// The new key separates the existing child (at insert_pos) from the new right_child.
-    pub fn insert(content: *[content_size]u8, key: []const u8, right_child: u64) BTreeError!void {
-        // Cell data = key_len(2) + key + right_child(8). Ensure no u16 overflow.
-        if (key.len > std.math.maxInt(u16) - 10) return error.PageFull;
-        const key_len: u16 = @intCast(key.len);
-        // Cell data: key_len(2) + key + right_child(8)
-        const cell_data_size: u16 = 2 + key_len + 8;
-        const needed: u16 = cell_ptr_size + cell_data_size;
-
-        const free_start = readU16(content, 2);
-        const free_end = readU16(content, 4);
-        if (free_end - free_start < needed) return error.PageFull;
-
-        const count = cellCount(content);
-
-        // Find insert position (sorted order).
-        var insert_pos: u16 = 0;
-        while (insert_pos < count) : (insert_pos += 1) {
-            const existing = getKey(content, insert_pos);
-            if (std.mem.order(u8, key, existing) == .lt) break;
-        }
-
-        // Allocate cell data from the end.
-        const new_free_end = free_end - cell_data_size;
-
-        // Write cell data.
-        writeU16(content, new_free_end, key_len);
-        @memcpy(content[new_free_end + 2 ..][0..key_len], key);
-        writeU64(content, new_free_end + 2 + key_len, right_child);
-
-        // Shift cell pointers right.
-        var i: u16 = count;
-        while (i > insert_pos) {
-            i -= 1;
-            const old_ptr = readU16(content, header_size + @as(usize, i) * cell_ptr_size);
-            writeU16(content, header_size + @as(usize, i + 1) * cell_ptr_size, old_ptr);
-        }
-
-        // Write new cell pointer.
-        writeU16(content, header_size + @as(usize, insert_pos) * cell_ptr_size, new_free_end);
-
-        // Update header.
-        writeU16(content, 0, count + 1);
-        writeU16(content, 2, free_start + cell_ptr_size);
-        writeU16(content, 4, new_free_end);
-    }
-};
-
-// ============================================================================
 // B+ Tree
 // ============================================================================
 
@@ -406,12 +69,9 @@ const max_btree_depth = 16;
 /// Max sibling-page hops while advancing a range scan iterator.
 /// This guards against malformed cyclic sibling chains.
 const max_leaf_sibling_hops = 1024;
-/// Fixed split scratch capacities derived from page-size bounds.
-const max_leaf_split_entries = (content_size - LeafNode.header_size) / 14 + 1;
-const max_internal_split_entries = (content_size - InternalNode.header_size) / 12 + 1;
 
 /// A path entry tracks the page_id and the child index followed at each level.
-const PathEntry = struct {
+pub const PathEntry = struct {
     page_id: u64,
     /// The child index we descended into. For internal nodes: 0 = left_child,
     /// N = right_child of cell N-1.
@@ -423,6 +83,12 @@ pub const BTree = struct {
     next_page_id: u64,
     pool: *BufferPool,
     wal: ?*Wal,
+
+    // Split operations — delegated to btree_split module
+    const splitAndInsert = btree_split_mod.splitAndInsert;
+    const insertIntoParent = btree_split_mod.insertIntoParent;
+    const splitInternal = btree_split_mod.splitInternal;
+    const splitRoot = btree_split_mod.splitRoot;
 
     /// Create a new B+ tree, allocating an empty root leaf page.
     pub fn init(pool: *BufferPool, wal: ?*Wal, start_page_id: u64) BTreeError!BTree {
@@ -438,7 +104,7 @@ pub const BTree = struct {
         };
     }
 
-    fn allocPage(self: *BTree) u64 {
+    pub fn allocPage(self: *BTree) u64 {
         const id = self.next_page_id;
         self.next_page_id += 1;
         return id;
@@ -672,274 +338,6 @@ pub const BTree = struct {
             }
         }
     }
-
-    // --- Split logic ---
-
-    fn splitAndInsert(self: *BTree, leaf_id: u64, key: []const u8, row_id: RowId, path: []const PathEntry) BTreeError!void {
-        // Collect all existing cells + the new one, then redistribute.
-        // Keys point into page content, so we must copy them into a contiguous
-        // buffer BEFORE re-initializing the page.
-        const leaf_page = self.pool.pin(leaf_id) catch |e| return mapPoolError(e);
-        if (!validateLeafStructure(&leaf_page.content)) {
-            self.pool.unpin(leaf_id, false);
-            return error.Corruption;
-        }
-        const old_count = LeafNode.cellCount(&leaf_page.content);
-        const total: usize = @as(usize, old_count) + 1;
-
-        const key_plan = planSplitKeyMerge(
-            *const [content_size]u8,
-            &leaf_page.content,
-            old_count,
-            key,
-            LeafNode.getKey,
-        );
-
-        // Allocate entries array and key data buffer.
-        if (total > max_leaf_split_entries) return error.Corruption;
-        if (key_plan.total_key_bytes > content_size) return error.Corruption;
-        var entries: [max_leaf_split_entries]TempLeafEntry = undefined;
-        var key_buf: [content_size]u8 = undefined;
-        var owned_old_keys: [max_leaf_split_entries - 1][]const u8 = undefined;
-        const buf_offset = copyOwnedExistingKeys(
-            *const [content_size]u8,
-            &leaf_page.content,
-            old_count,
-            &key_buf,
-            owned_old_keys[0..old_count],
-            LeafNode.getKey,
-        );
-        const owned_new_key = key_buf[buf_offset..][0..key.len];
-        @memcpy(owned_new_key, key);
-
-        for (0..total) |entry_idx| {
-            if (entry_idx == key_plan.insert_pos) {
-                entries[entry_idx] = .{ .key = owned_new_key, .row_id = row_id };
-                continue;
-            }
-            const old_idx: usize = if (entry_idx < key_plan.insert_pos) entry_idx else entry_idx - 1;
-            entries[entry_idx] = .{
-                .key = owned_old_keys[old_idx],
-                .row_id = LeafNode.getRowId(&leaf_page.content, @intCast(old_idx)),
-            };
-        }
-
-        const old_right_sibling = LeafNode.rightSibling(&leaf_page.content);
-        self.pool.unpin(leaf_id, false);
-
-        // Split at midpoint.
-        const mid = total / 2;
-
-        // Allocate new right page.
-        const right_id = self.allocPage();
-        const right_page = self.pool.pin(right_id) catch |e| return mapPoolError(e);
-        LeafNode.init(right_page);
-
-        // Re-pin left page and reinitialize it.
-        const left_page = self.pool.pin(leaf_id) catch |e| {
-            self.pool.unpin(right_id, false);
-            return mapPoolError(e);
-        };
-        errdefer {
-            self.pool.unpin(leaf_id, false);
-            self.pool.unpin(right_id, false);
-        }
-
-        // Log WAL for the split.
-        if (self.wal) |wal| {
-            const lsn = wal.append(0, .btree_split_leaf, leaf_id, key) catch |e|
-                return mapWalAppendError(e);
-            left_page.header.lsn = lsn;
-            right_page.header.lsn = lsn;
-        }
-
-        LeafNode.init(left_page);
-
-        // Fill left page with [0..mid).
-        for (0..mid) |i| {
-            LeafNode.insert(&left_page.content, entries[i].key, entries[i].row_id) catch |err| {
-                std.log.err("btree leaf split redistribution failed on left page: leaf_id={d} right_id={d} insert_idx={d} err={s}", .{ leaf_id, right_id, i, @errorName(err) });
-                return error.Corruption;
-            };
-        }
-
-        // Fill right page with [mid..total).
-        for (mid..total) |i| {
-            LeafNode.insert(&right_page.content, entries[i].key, entries[i].row_id) catch |err| {
-                std.log.err("btree leaf split redistribution failed on right page: leaf_id={d} right_id={d} insert_idx={d} err={s}", .{ leaf_id, right_id, i, @errorName(err) });
-                return error.Corruption;
-            };
-        }
-
-        // Set sibling pointers: left -> right -> old_right_sibling.
-        LeafNode.setRightSibling(&left_page.content, right_id);
-        LeafNode.setRightSibling(&right_page.content, old_right_sibling);
-
-        self.pool.unpin(leaf_id, true);
-        self.pool.unpin(right_id, true);
-
-        // Promote separator key (first key of right page) to parent.
-        // entries[mid].key is already in our owned key_buf, safe to use.
-        try self.insertIntoParent(leaf_id, entries[mid].key, right_id, path);
-    }
-
-    fn insertIntoParent(self: *BTree, left_id: u64, key: []const u8, right_id: u64, path: []const PathEntry) BTreeError!void {
-        if (path.len == 0) {
-            // Splitting the root — create a new root.
-            try self.splitRoot(left_id, key, right_id);
-            return;
-        }
-
-        const parent_entry = path[path.len - 1];
-        const parent_id = parent_entry.page_id;
-        const parent_page = self.pool.pin(parent_id) catch |e| return mapPoolError(e);
-
-        if (self.wal) |wal| {
-            const lsn = wal.append(0, .btree_split_internal, parent_id, key) catch |e|
-                return mapWalAppendError(e);
-            parent_page.header.lsn = lsn;
-        }
-
-        const result = InternalNode.insert(&parent_page.content, key, right_id);
-        if (result) |_| {
-            self.pool.unpin(parent_id, true);
-            return;
-        } else |err| switch (err) {
-            error.PageFull => {
-                self.pool.unpin(parent_id, false);
-                try self.splitInternal(parent_id, key, right_id, path[0 .. path.len - 1]);
-            },
-            else => {
-                self.pool.unpin(parent_id, false);
-                return err;
-            },
-        }
-    }
-
-    fn splitInternal(self: *BTree, node_id: u64, new_key: []const u8, new_right_child: u64, path: []const PathEntry) BTreeError!void {
-        const node_page = self.pool.pin(node_id) catch |e| return mapPoolError(e);
-        if (!validateInternalStructure(&node_page.content)) {
-            self.pool.unpin(node_id, false);
-            return error.Corruption;
-        }
-        const old_count = InternalNode.cellCount(&node_page.content);
-        const old_left_child = InternalNode.leftChild(&node_page.content);
-
-        const total: usize = @as(usize, old_count) + 1;
-        if (total > max_internal_split_entries) return error.Corruption;
-        const key_plan = planSplitKeyMerge(
-            *const [content_size]u8,
-            &node_page.content,
-            old_count,
-            new_key,
-            InternalNode.getKey,
-        );
-        if (key_plan.total_key_bytes > content_size) return error.Corruption;
-
-        var entries: [max_internal_split_entries]TempInternalEntry = undefined;
-        var key_buf: [content_size]u8 = undefined;
-        var owned_old_keys: [max_internal_split_entries - 1][]const u8 = undefined;
-        const buf_offset = copyOwnedExistingKeys(
-            *const [content_size]u8,
-            &node_page.content,
-            old_count,
-            &key_buf,
-            owned_old_keys[0..old_count],
-            InternalNode.getKey,
-        );
-        const owned_new_key = key_buf[buf_offset..][0..new_key.len];
-        @memcpy(owned_new_key, new_key);
-
-        for (0..total) |entry_idx| {
-            if (entry_idx == key_plan.insert_pos) {
-                entries[entry_idx] = .{ .key = owned_new_key, .right_child = new_right_child };
-                continue;
-            }
-            const old_idx: usize = if (entry_idx < key_plan.insert_pos) entry_idx else entry_idx - 1;
-            entries[entry_idx] = .{
-                .key = owned_old_keys[old_idx],
-                .right_child = InternalNode.getRightChild(&node_page.content, @intCast(old_idx)),
-            };
-        }
-
-        self.pool.unpin(node_id, false);
-
-        // Split: left gets [0..mid), promoted key is entries[mid], right gets [mid+1..total).
-        const mid = total / 2;
-
-        const new_right_id = self.allocPage();
-        const right_page = self.pool.pin(new_right_id) catch |e| return mapPoolError(e);
-        InternalNode.init(right_page);
-
-        const left_page = self.pool.pin(node_id) catch |e| {
-            self.pool.unpin(new_right_id, false);
-            return mapPoolError(e);
-        };
-        errdefer {
-            self.pool.unpin(node_id, false);
-            self.pool.unpin(new_right_id, false);
-        }
-
-        if (self.wal) |wal| {
-            const lsn = wal.append(0, .btree_split_internal, node_id, new_key) catch |e|
-                return mapWalAppendError(e);
-            left_page.header.lsn = lsn;
-            right_page.header.lsn = lsn;
-        }
-
-        InternalNode.init(left_page);
-        InternalNode.setLeftChild(&left_page.content, old_left_child);
-
-        // Fill left with [0..mid).
-        for (0..mid) |i| {
-            InternalNode.insert(&left_page.content, entries[i].key, entries[i].right_child) catch |err| {
-                std.log.err("btree internal split redistribution failed on left page: node_id={d} new_right_id={d} insert_idx={d} err={s}", .{ node_id, new_right_id, i, @errorName(err) });
-                return error.Corruption;
-            };
-        }
-
-        // Promoted key is entries[mid]. Right child's left_child = entries[mid].right_child.
-        InternalNode.setLeftChild(&right_page.content, entries[mid].right_child);
-
-        // Fill right with [mid+1..total).
-        for (mid + 1..total) |i| {
-            InternalNode.insert(&right_page.content, entries[i].key, entries[i].right_child) catch |err| {
-                std.log.err("btree internal split redistribution failed on right page: node_id={d} new_right_id={d} insert_idx={d} err={s}", .{ node_id, new_right_id, i, @errorName(err) });
-                return error.Corruption;
-            };
-        }
-
-        self.pool.unpin(node_id, true);
-        self.pool.unpin(new_right_id, true);
-
-        // entries[mid].key is in our owned key_buf, safe to use.
-        try self.insertIntoParent(node_id, entries[mid].key, new_right_id, path);
-    }
-
-    fn splitRoot(self: *BTree, left_id: u64, key: []const u8, right_id: u64) BTreeError!void {
-        const new_root_id = self.allocPage();
-        const root_page = self.pool.pin(new_root_id) catch |e| return mapPoolError(e);
-        errdefer self.pool.unpin(new_root_id, false);
-        InternalNode.init(root_page);
-
-        if (self.wal) |wal| {
-            const lsn = wal.append(0, .btree_new_root, new_root_id, key) catch |e|
-                return mapWalAppendError(e);
-            root_page.header.lsn = lsn;
-        }
-
-        InternalNode.setLeftChild(&root_page.content, left_id);
-        InternalNode.insert(&root_page.content, key, right_id) catch |err| {
-            std.log.err("btree root split insertion failed: new_root_id={d} left_id={d} right_id={d} key_len={d} err={s}", .{ new_root_id, left_id, right_id, key.len, @errorName(err) });
-            return switch (err) {
-                error.PageFull, error.DuplicateKey => error.Corruption,
-                else => err,
-            };
-        };
-
-        self.pool.unpin(new_root_id, true);
-        self.root_page_id = new_root_id;
-    }
 };
 
 // ============================================================================
@@ -1034,94 +432,10 @@ pub const RangeScanIterator = struct {
 };
 
 // ============================================================================
-// Temp entry types for splits
+// Validation helpers
 // ============================================================================
 
-const TempLeafEntry = struct {
-    key: []const u8,
-    row_id: RowId,
-};
-
-const TempInternalEntry = struct {
-    key: []const u8,
-    right_child: u64,
-};
-
-const SplitKeyPlan = struct {
-    insert_pos: usize,
-    total_key_bytes: usize,
-};
-
-fn planSplitKeyMerge(
-    comptime ContentPtr: type,
-    content: ContentPtr,
-    old_count: u16,
-    new_key: []const u8,
-    comptime getKeyFn: fn (ContentPtr, u16) []const u8,
-) SplitKeyPlan {
-    var insert_pos: usize = @as(usize, old_count);
-    var total_key_bytes: usize = new_key.len;
-    for (0..old_count) |idx_usize| {
-        const idx: u16 = @intCast(idx_usize);
-        const existing_key = getKeyFn(content, idx);
-        total_key_bytes += existing_key.len;
-        if (insert_pos == @as(usize, old_count) and std.mem.order(u8, new_key, existing_key) == .lt) {
-            insert_pos = idx_usize;
-        }
-    }
-    return .{
-        .insert_pos = insert_pos,
-        .total_key_bytes = total_key_bytes,
-    };
-}
-
-fn copyOwnedExistingKeys(
-    comptime ContentPtr: type,
-    content: ContentPtr,
-    old_count: u16,
-    key_buf: *[content_size]u8,
-    owned_keys: [][]const u8,
-    comptime getKeyFn: fn (ContentPtr, u16) []const u8,
-) usize {
-    std.debug.assert(owned_keys.len >= old_count);
-
-    var buf_offset: usize = 0;
-    for (0..old_count) |idx_usize| {
-        const idx: u16 = @intCast(idx_usize);
-        const existing_key = getKeyFn(content, idx);
-        const owned = key_buf[buf_offset..][0..existing_key.len];
-        @memcpy(owned, existing_key);
-        owned_keys[idx_usize] = owned;
-        buf_offset += existing_key.len;
-    }
-    return buf_offset;
-}
-
-// ============================================================================
-// Byte read/write helpers (little-endian)
-// ============================================================================
-
-fn readU16(content: *const [content_size]u8, offset: anytype) u16 {
-    const off: usize = @intCast(offset);
-    return std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, content[off..][0..2]).*);
-}
-
-fn writeU16(content: *[content_size]u8, offset: anytype, value: u16) void {
-    const off: usize = @intCast(offset);
-    @memcpy(content[off..][0..2], std.mem.asBytes(&std.mem.nativeToLittle(u16, value)));
-}
-
-fn readU64(content: *const [content_size]u8, offset: anytype) u64 {
-    const off: usize = @intCast(offset);
-    return std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, content[off..][0..8]).*);
-}
-
-fn writeU64(content: *[content_size]u8, offset: anytype, value: u64) void {
-    const off: usize = @intCast(offset);
-    @memcpy(content[off..][0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, value)));
-}
-
-fn validateLeafStructure(content: *const [content_size]u8) bool {
+pub fn validateLeafStructure(content: *const [content_size]u8) bool {
     if (readU16(content, 14) != LeafNode.format_magic) return false;
     if (content[16] != LeafNode.format_version) return false;
     const count = LeafNode.cellCount(content);
@@ -1155,7 +469,7 @@ fn validateLeafStructure(content: *const [content_size]u8) bool {
     return true;
 }
 
-fn validateInternalStructure(content: *const [content_size]u8) bool {
+pub fn validateInternalStructure(content: *const [content_size]u8) bool {
     if (readU16(content, 14) != InternalNode.format_magic) return false;
     if (content[16] != InternalNode.format_version) return false;
     const count = InternalNode.cellCount(content);
@@ -1201,7 +515,7 @@ fn addMany(parts: []const usize) ?usize {
 // Map buffer pool errors to BTreeError
 // ============================================================================
 
-fn mapPoolError(err: buffer_pool_mod.BufferPoolError) BTreeError {
+pub fn mapPoolError(err: buffer_pool_mod.BufferPoolError) BTreeError {
     return switch (err) {
         error.AllFramesPinned => error.AllFramesPinned,
         error.OutOfMemory => error.OutOfMemory,
@@ -1213,7 +527,7 @@ fn mapPoolError(err: buffer_pool_mod.BufferPoolError) BTreeError {
     };
 }
 
-fn mapWalAppendError(err: wal_mod.WalError) BTreeError {
+pub fn mapWalAppendError(err: wal_mod.WalError) BTreeError {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.PayloadTooLarge => error.WalWriteError,
