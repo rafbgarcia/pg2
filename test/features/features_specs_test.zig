@@ -37,6 +37,9 @@ comptime {
     _ = @import("expressions/parameters_test.zig");
     _ = @import("expressions/precedence_parentheses_test.zig");
     _ = @import("expressions/sort_test.zig");
+    _ = @import("expressions/stdlib/lower_test.zig");
+    _ = @import("expressions/stdlib/trim_test.zig");
+    _ = @import("expressions/stdlib/upper_test.zig");
     _ = @import("expressions/subtraction_test.zig");
     _ = @import("expressions/unary_minus_test.zig");
     _ = @import("expressions/where_test.zig");

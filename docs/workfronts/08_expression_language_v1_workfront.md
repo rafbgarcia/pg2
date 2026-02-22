@@ -111,9 +111,9 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - Time behavior uses injected clock path, not system clock.
 
 ### Tasks
-- [ ] `E13` Implement `lower` behavior.
-- [ ] `E14` Implement `upper` behavior.
-- [ ] `E15` Implement `trim` behavior.
+- [x] `E13` Implement `lower` behavior.
+- [x] `E14` Implement `upper` behavior.
+- [x] `E15` Implement `trim` behavior.
 - [ ] `E16` Validate `length`, `coalesce`, `abs`, `sqrt`, `round` arity and type rules with exhaustive tests.
 - [ ] `E17` Replace placeholder `now()` with injected clock semantics.
   - Add deterministic test clock wiring and tests.
@@ -204,6 +204,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 
 ## Implementation Log
 - 2026-02-22: Completed `T05` by adding `test/features/expressions/precedence_parentheses_test.zig` with dedicated feature coverage for precedence and explicit grouping across arithmetic/comparison/boolean expressions. The suite validates default precedence (`*` over `+`, `&&` over `||`) versus parenthesized grouping deltas in `where(...)`, verifies grouping impact on `sort(expr)` key ordering, and adds computed `select` coverage showing grouped vs ungrouped arithmetic outcomes side-by-side. Imported in `test/features/features_specs_test.zig` and validated via targeted feature execution plus `zig build test`.
+- 2026-02-22: Completed `E13`, `E14`, and `E15` by replacing placeholder string builtins in `src/executor/filter.zig` with SQLite-style semantics: `lower`/`upper` now perform ASCII-only case transforms (non-ASCII UTF-8 bytes are preserved), and `trim` removes ASCII spaces from both string ends. Added UTF-8 validation fail-closed behavior for these string builtins, wired evaluator string-result materialization through `scan.StringArena` to avoid dangling string slices in executor/mutation paths, and added evaluator coverage for ASCII-only behavior and trim-space semantics. Added dedicated feature files `test/features/expressions/stdlib/lower_test.zig`, `test/features/expressions/stdlib/upper_test.zig`, and `test/features/expressions/stdlib/trim_test.zig` (explicitly exposing the ASCII-only limitation on non-ASCII letters), imported them in `test/features/features_specs_test.zig`, and validated with `zig build test`.
 - 2026-02-22: Follow-up hardening after `T04`: normalized unary minus semantics for all unsigned integer operands in evaluator (`u8`, `u16`, `u32`, `u64`) to produce signed `i64` results (with overflow guard for `u64` values above signed range). Added evaluator regression coverage for unsigned promotion and extended feature coverage in `test/features/expressions/unary_minus_test.zig` to assert end-to-end behavior for each unsigned width.
 - 2026-02-22: Completed `T04` by adding `test/features/expressions/unary_minus_test.zig` with dedicated feature coverage for unary negation forms (`-a`, `-(expr)`) distinct from binary subtraction. Added representative numeric behavior (`i64`, `u64` source into signed target, `f64`), fail-closed type mismatch, constrained-integer out-of-range diagnostics for negative results assigned to unsigned targets, explicit null propagation behavior for unary negation on nullable operands, cross-context parity in `where` and `sort(expr)`, and mixed numeric coercion into `f64` assignment targets. Imported in `test/features/features_specs_test.zig` and validated via `zig build test`.
 - 2026-02-22: Completed `T03` by adding `test/features/expressions/division_test.zig` with dedicated feature coverage for representative division behavior (`i64`, `u64`, `f64`) including integer truncation semantics, fail-closed mutation diagnostics for type mismatch, explicit divide-by-zero failures (`DivisionByZero`), and null arithmetic operand diagnostics. Added parity coverage for `where` and `sort(expr)` using division keys plus mixed numeric coercion (`i64 / f64`) into `f64` assignment targets. Imported in `test/features/features_specs_test.zig` and validated via `zig build test`.

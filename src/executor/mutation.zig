@@ -243,6 +243,8 @@ pub fn executeInsertWithDiagnosticAndParameters(
     const model = &catalog.models[model_id];
     const schema = &model.row_schema;
     std.debug.assert(schema.column_count > 0);
+    var string_decode_bytes: [max_row_buf_size]u8 = undefined;
+    var string_arena = scan_mod.StringArena.init(string_decode_bytes[0..]);
 
     // Build values from assignments.
     var values: [max_assignments]Value =
@@ -258,6 +260,7 @@ pub fn executeInsertWithDiagnosticAndParameters(
         &values,
         &assigned_columns,
         diagnostic,
+        &string_arena,
     );
     applyColumnDefaultsForInsert(
         catalog,
@@ -555,7 +558,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                     .ctx = &parameter_ctx,
                     .resolve = resolveParameterBinding,
                 };
-                const matches = filter_mod.evaluatePredicateWithResolvers(
+                const matches = filter_mod.evaluatePredicateWithResolversAndArena(
                     tree,
                     tokens,
                     source,
@@ -564,6 +567,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                     schema,
                     null,
                     &parameter_resolver,
+                    &string_arena,
                 ) catch continue;
                 if (!matches) continue;
             }
@@ -581,6 +585,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                 parameter_bindings,
                 new_values[0..row.column_count],
                 diagnostic,
+                &string_arena,
             ) catch |e| return e;
 
             try enforceOutgoingReferentialIntegrity(
@@ -769,7 +774,7 @@ pub fn executeDeleteWithReturningAndParameters(
                     .ctx = &parameter_ctx,
                     .resolve = resolveParameterBinding,
                 };
-                const matches = filter_mod.evaluatePredicateWithResolvers(
+                const matches = filter_mod.evaluatePredicateWithResolversAndArena(
                     tree,
                     tokens,
                     source,
@@ -778,6 +783,7 @@ pub fn executeDeleteWithReturningAndParameters(
                     schema,
                     null,
                     &parameter_resolver,
+                    &string_arena,
                 ) catch continue;
                 if (!matches) continue;
             }
@@ -1873,6 +1879,7 @@ pub fn buildRowFromAssignments(
     out_values: []Value,
     out_assigned: []bool,
     diagnostic: ?*MutationDiagnostic,
+    string_arena: *scan_mod.StringArena,
 ) MutationError!void {
     std.debug.assert(out_values.len >= schema.column_count);
     std.debug.assert(out_assigned.len >= schema.column_count);
@@ -1902,7 +1909,7 @@ pub fn buildRowFromAssignments(
         };
 
         const expr_node = node.data.unary;
-        const val = filter_mod.evaluateExpressionWithResolvers(
+        const val = filter_mod.evaluateExpressionWithResolversAndArena(
             tree,
             tokens,
             source,
@@ -1911,6 +1918,7 @@ pub fn buildRowFromAssignments(
             schema,
             null,
             &parameter_resolver,
+            string_arena,
         ) catch |e| {
             const mapped = mapFilterError(e);
             if (mapped == error.NumericOverflow) {
@@ -1972,6 +1980,7 @@ fn applyAssignments(
     parameter_bindings: []const ParameterBinding,
     values: []Value,
     diagnostic: ?*MutationDiagnostic,
+    string_arena: *scan_mod.StringArena,
 ) MutationError!void {
     std.debug.assert(values.len >= schema.column_count);
 
@@ -2001,7 +2010,7 @@ fn applyAssignments(
 
         // Evaluate expression with current row values for context.
         const expr_node = node.data.unary;
-        const val = filter_mod.evaluateExpressionWithResolvers(
+        const val = filter_mod.evaluateExpressionWithResolversAndArena(
             tree,
             tokens,
             source,
@@ -2010,6 +2019,7 @@ fn applyAssignments(
             schema,
             null,
             &parameter_resolver,
+            string_arena,
         ) catch |e| {
             const mapped = mapFilterError(e);
             if (mapped == error.NumericOverflow) {

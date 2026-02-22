@@ -10,6 +10,7 @@ const ast_mod = @import("../parser/ast.zig");
 const expression_mod = @import("../parser/expression.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
 const row_mod = @import("../storage/row.zig");
+const scan_mod = @import("scan.zig");
 
 const Ast = ast_mod.Ast;
 const NodeIndex = ast_mod.NodeIndex;
@@ -86,13 +87,14 @@ pub fn evaluateExpression(
     row_values: []const Value,
     schema: *const RowSchema,
 ) EvalError!Value {
-    return evaluateExpressionWithResolvers(
+    return evaluateExpressionWithResolversAndArena(
         tree,
         tokens,
         source,
         node_index,
         row_values,
         schema,
+        null,
         null,
         null,
     );
@@ -107,7 +109,7 @@ pub fn evaluateExpressionWithResolver(
     schema: *const RowSchema,
     resolver: ?*const AggregateResolver,
 ) EvalError!Value {
-    return evaluateExpressionWithResolvers(
+    return evaluateExpressionWithResolversAndArena(
         tree,
         tokens,
         source,
@@ -115,6 +117,7 @@ pub fn evaluateExpressionWithResolver(
         row_values,
         schema,
         resolver,
+        null,
         null,
     );
 }
@@ -128,6 +131,30 @@ pub fn evaluateExpressionWithResolvers(
     schema: *const RowSchema,
     aggregate_resolver: ?*const AggregateResolver,
     parameter_resolver: ?*const ParameterResolver,
+) EvalError!Value {
+    return evaluateExpressionWithResolversAndArena(
+        tree,
+        tokens,
+        source,
+        node_index,
+        row_values,
+        schema,
+        aggregate_resolver,
+        parameter_resolver,
+        null,
+    );
+}
+
+pub fn evaluateExpressionWithResolversAndArena(
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    node_index: NodeIndex,
+    row_values: []const Value,
+    schema: *const RowSchema,
+    aggregate_resolver: ?*const AggregateResolver,
+    parameter_resolver: ?*const ParameterResolver,
+    string_arena: ?*scan_mod.StringArena,
 ) EvalError!Value {
     var eval_stack: [max_eval_stack]Value = undefined;
     var eval_count: u16 = 0;
@@ -198,6 +225,7 @@ pub fn evaluateExpressionWithResolvers(
                 const result = try applyBuiltinFunction(
                     fn_type,
                     args[0..count],
+                    string_arena,
                 );
                 try evalPush(&eval_stack, &eval_count, result);
             },
@@ -245,13 +273,14 @@ pub fn evaluatePredicate(
     row_values: []const Value,
     schema: *const RowSchema,
 ) EvalError!bool {
-    return evaluatePredicateWithResolvers(
+    return evaluatePredicateWithResolversAndArena(
         tree,
         tokens,
         source,
         node_index,
         row_values,
         schema,
+        null,
         null,
         null,
     );
@@ -266,7 +295,7 @@ pub fn evaluatePredicateWithResolver(
     schema: *const RowSchema,
     resolver: ?*const AggregateResolver,
 ) EvalError!bool {
-    return evaluatePredicateWithResolvers(
+    return evaluatePredicateWithResolversAndArena(
         tree,
         tokens,
         source,
@@ -274,6 +303,7 @@ pub fn evaluatePredicateWithResolver(
         row_values,
         schema,
         resolver,
+        null,
         null,
     );
 }
@@ -288,7 +318,7 @@ pub fn evaluatePredicateWithResolvers(
     aggregate_resolver: ?*const AggregateResolver,
     parameter_resolver: ?*const ParameterResolver,
 ) EvalError!bool {
-    const val = try evaluateExpressionWithResolvers(
+    return evaluatePredicateWithResolversAndArena(
         tree,
         tokens,
         source,
@@ -297,6 +327,31 @@ pub fn evaluatePredicateWithResolvers(
         schema,
         aggregate_resolver,
         parameter_resolver,
+        null,
+    );
+}
+
+pub fn evaluatePredicateWithResolversAndArena(
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    node_index: NodeIndex,
+    row_values: []const Value,
+    schema: *const RowSchema,
+    aggregate_resolver: ?*const AggregateResolver,
+    parameter_resolver: ?*const ParameterResolver,
+    string_arena: ?*scan_mod.StringArena,
+) EvalError!bool {
+    const val = try evaluateExpressionWithResolversAndArena(
+        tree,
+        tokens,
+        source,
+        node_index,
+        row_values,
+        schema,
+        aggregate_resolver,
+        parameter_resolver,
+        string_arena,
     );
     if (val == .null_value) return error.NullInPredicate;
     if (val != .bool) return error.TypeMismatch;
@@ -911,6 +966,7 @@ fn negateUnsignedIntoI64(magnitude: u64) EvalError!i64 {
 pub fn applyBuiltinFunction(
     fn_type: TokenType,
     args: []const Value,
+    string_arena: ?*scan_mod.StringArena,
 ) EvalError!Value {
     return switch (fn_type) {
         .fn_abs => blk: {
@@ -968,18 +1024,102 @@ pub fn applyBuiltinFunction(
             }
             break :blk Value{ .null_value = {} };
         },
-        .fn_lower, .fn_upper, .fn_trim => blk: {
-            // String functions return the input string unchanged for M4.
-            // Full implementation requires mutable string buffers.
+        .fn_lower => blk: {
             if (args.len < 1) return error.TypeMismatch;
             const v = args[0];
             if (v == .null_value) break :blk Value{ .null_value = {} };
             if (v != .string) return error.TypeMismatch;
-            break :blk v;
+            if (!std.unicode.utf8ValidateSlice(v.string)) return error.TypeMismatch;
+            break :blk Value{
+                .string = try asciiLowerString(v.string, string_arena),
+            };
+        },
+        .fn_upper => blk: {
+            if (args.len < 1) return error.TypeMismatch;
+            const v = args[0];
+            if (v == .null_value) break :blk Value{ .null_value = {} };
+            if (v != .string) return error.TypeMismatch;
+            if (!std.unicode.utf8ValidateSlice(v.string)) return error.TypeMismatch;
+            break :blk Value{
+                .string = try asciiUpperString(v.string, string_arena),
+            };
+        },
+        .fn_trim => blk: {
+            if (args.len != 1) return error.TypeMismatch;
+            const v = args[0];
+            if (v == .null_value) break :blk Value{ .null_value = {} };
+            if (v != .string) return error.TypeMismatch;
+            if (!std.unicode.utf8ValidateSlice(v.string)) return error.TypeMismatch;
+            break :blk Value{
+                .string = try trimAsciiSpaces(v.string, string_arena),
+            };
         },
         .fn_now => Value{ .timestamp = 0 },
         else => error.UnknownFunction,
     };
+}
+
+fn copyToArena(
+    input: []const u8,
+    string_arena: ?*scan_mod.StringArena,
+) EvalError![]const u8 {
+    if (input.len == 0) return "";
+    if (input.len > max_string_result_bytes) return error.NumericOverflow;
+    const arena = string_arena orelse return error.TypeMismatch;
+    const start = arena.startString();
+    arena.appendChunk(input) catch return error.NumericOverflow;
+    return arena.finishString(start);
+}
+
+fn asciiLowerString(
+    input: []const u8,
+    string_arena: ?*scan_mod.StringArena,
+) EvalError![]const u8 {
+    var changed = false;
+    for (input) |byte| {
+        if (byte >= 'A' and byte <= 'Z') {
+            changed = true;
+            break;
+        }
+    }
+    if (!changed) return input;
+
+    if (input.len > max_string_result_bytes) return error.NumericOverflow;
+    var lowered: [max_string_result_bytes]u8 = undefined;
+    for (input, 0..) |byte, i| lowered[i] = std.ascii.toLower(byte);
+    return copyToArena(lowered[0..input.len], string_arena);
+}
+
+fn asciiUpperString(
+    input: []const u8,
+    string_arena: ?*scan_mod.StringArena,
+) EvalError![]const u8 {
+    var changed = false;
+    for (input) |byte| {
+        if (byte >= 'a' and byte <= 'z') {
+            changed = true;
+            break;
+        }
+    }
+    if (!changed) return input;
+
+    if (input.len > max_string_result_bytes) return error.NumericOverflow;
+    var uppered: [max_string_result_bytes]u8 = undefined;
+    for (input, 0..) |byte, i| uppered[i] = std.ascii.toUpper(byte);
+    return copyToArena(uppered[0..input.len], string_arena);
+}
+
+fn trimAsciiSpaces(
+    input: []const u8,
+    string_arena: ?*scan_mod.StringArena,
+) EvalError![]const u8 {
+    var start: usize = 0;
+    var end: usize = input.len;
+    while (start < end and input[start] == ' ') : (start += 1) {}
+    while (end > start and input[end - 1] == ' ') : (end -= 1) {}
+
+    if (start == 0 and end == input.len) return input;
+    return copyToArena(input[start..end], string_arena);
 }
 
 // --- Tests ---
@@ -1267,21 +1407,21 @@ test "parameter reference fails closed when binding is undefined" {
 test "function call — abs" {
     const result = try applyBuiltinFunction(.fn_abs, &[_]Value{
         .{ .i64 = -5 },
-    });
+    }, null);
     try testing.expectEqual(@as(i64, 5), result.i64);
 }
 
 test "function call — sqrt" {
     const result = try applyBuiltinFunction(.fn_sqrt, &[_]Value{
         .{ .f64 = 9.0 },
-    });
+    }, null);
     try testing.expectEqual(@as(f64, 3.0), result.f64);
 }
 
 test "function call — length" {
     const result = try applyBuiltinFunction(.fn_length, &[_]Value{
         .{ .string = "hello" },
-    });
+    }, null);
     try testing.expectEqual(@as(i64, 5), result.i64);
 }
 
@@ -1289,8 +1429,47 @@ test "function call — coalesce" {
     const result = try applyBuiltinFunction(.fn_coalesce, &[_]Value{
         .{ .null_value = {} },
         .{ .i64 = 42 },
-    });
+    }, null);
     try testing.expectEqual(@as(i64, 42), result.i64);
+}
+
+test "function call — lower applies ASCII-only folding" {
+    var arena_bytes: [128]u8 = undefined;
+    var arena = scan_mod.StringArena.init(arena_bytes[0..]);
+    const result = try applyBuiltinFunction(
+        .fn_lower,
+        &[_]Value{.{ .string = "HELLO \xC3\x84\xC3\x96\xC3\x9C" }},
+        &arena,
+    );
+    try testing.expectEqualStrings(
+        "hello \xC3\x84\xC3\x96\xC3\x9C",
+        result.string,
+    );
+}
+
+test "function call — upper applies ASCII-only folding" {
+    var arena_bytes: [128]u8 = undefined;
+    var arena = scan_mod.StringArena.init(arena_bytes[0..]);
+    const result = try applyBuiltinFunction(
+        .fn_upper,
+        &[_]Value{.{ .string = "hello \xC3\xA4\xC3\xB6\xC3\xBC" }},
+        &arena,
+    );
+    try testing.expectEqualStrings(
+        "HELLO \xC3\xA4\xC3\xB6\xC3\xBC",
+        result.string,
+    );
+}
+
+test "function call — trim removes ASCII spaces only" {
+    var arena_bytes: [128]u8 = undefined;
+    var arena = scan_mod.StringArena.init(arena_bytes[0..]);
+    const result = try applyBuiltinFunction(
+        .fn_trim,
+        &[_]Value{.{ .string = "  hello\t " }},
+        &arena,
+    );
+    try testing.expectEqualStrings("hello\t", result.string);
 }
 
 test "membership function returns true for contained value" {
@@ -1569,7 +1748,7 @@ test "unary minus rejects values below signed i64 minimum" {
 test "abs overflow returns error" {
     const result = applyBuiltinFunction(.fn_abs, &[_]Value{
         .{ .i64 = std.math.minInt(i64) },
-    });
+    }, null);
     try testing.expectError(error.NumericOverflow, result);
 }
 

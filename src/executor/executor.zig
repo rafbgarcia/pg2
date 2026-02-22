@@ -338,6 +338,7 @@ fn executeReadPipeline(
         ops,
         op_count,
         &caps,
+        string_arena,
     )) {
         return;
     }
@@ -358,6 +359,7 @@ fn executeReadPipeline(
         result,
         pipeline_node,
         model_id,
+        string_arena,
     )) {
         return;
     }
@@ -380,6 +382,7 @@ fn applyFlatColumnProjection(
     result: *QueryResult,
     pipeline_node: NodeIndex,
     model_id: ModelId,
+    string_arena: *scan_mod.StringArena,
 ) bool {
     const selection = getPipelineSelection(ctx.ast, pipeline_node) orelse
         return true;
@@ -502,7 +505,7 @@ fn applyFlatColumnProjection(
                 },
                 .expression => {
                     const parameter_resolver = parameterResolverForContext(ctx);
-                    const value = filter_mod.evaluateExpressionWithResolvers(
+                    const value = filter_mod.evaluateExpressionWithResolversAndArena(
                         ctx.ast,
                         ctx.tokens,
                         ctx.source,
@@ -511,6 +514,7 @@ fn applyFlatColumnProjection(
                         source_schema,
                         null,
                         &parameter_resolver,
+                        string_arena,
                     ) catch {
                         setError(result, "select computed expression evaluation failed");
                         return false;
@@ -563,6 +567,7 @@ fn applyReadOperators(
     ops: *const [max_operators]OpDescriptor,
     op_count: u16,
     caps: *const capacity_mod.OperatorCapacities,
+    string_arena: *scan_mod.StringArena,
 ) bool {
     var group_runtime = GroupRuntime{};
     const schema = &ctx.catalog.models[model_id].row_schema;
@@ -576,6 +581,7 @@ fn applyReadOperators(
                 op.node,
                 schema,
                 &group_runtime,
+                string_arena,
             ),
             .having_filter => applyWhereFilter(
                 ctx,
@@ -583,6 +589,7 @@ fn applyReadOperators(
                 op.node,
                 schema,
                 &group_runtime,
+                string_arena,
             ),
             .group_op => {
                 if (!applyGroup(
@@ -595,10 +602,11 @@ fn applyReadOperators(
                     i,
                     caps,
                     &group_runtime,
+                    string_arena,
                 )) return false;
             },
-            .limit_op => applyLimit(ctx, result, op.node),
-            .offset_op => applyOffset(ctx, result, op.node, &group_runtime),
+            .limit_op => applyLimit(ctx, result, op.node, string_arena),
+            .offset_op => applyOffset(ctx, result, op.node, &group_runtime, string_arena),
             .sort_op => {
                 if (!applySort(
                     ctx,
@@ -607,6 +615,7 @@ fn applyReadOperators(
                     schema,
                     caps,
                     &group_runtime,
+                    string_arena,
                 )) return false;
             },
             .inspect_op => {},
@@ -729,6 +738,7 @@ fn applySingleNestedSelectionJoin(
         &nested_ops,
         nested_op_count,
         caps,
+        string_arena,
     )) {
         if (right_result.getError()) |msg| setError(result, msg);
         return false;
@@ -788,6 +798,7 @@ fn applyWhereFilter(
     where_node: NodeIndex,
     schema: *const RowSchema,
     group_runtime: *GroupRuntime,
+    string_arena: *scan_mod.StringArena,
 ) void {
     const node = ctx.ast.getNode(where_node);
     const predicate = node.data.unary;
@@ -807,6 +818,7 @@ fn applyWhereFilter(
                 row.values[0..row.column_count],
                 schema,
                 read_idx,
+                string_arena,
             ) catch |err| switch (err) {
                 error.UndefinedParameter => {
                     setError(result, "undefined parameter in where predicate");
@@ -815,7 +827,7 @@ fn applyWhereFilter(
                 else => false,
             }
         else
-            filter_mod.evaluatePredicateWithResolvers(
+            filter_mod.evaluatePredicateWithResolversAndArena(
                 ctx.ast,
                 ctx.tokens,
                 ctx.source,
@@ -824,6 +836,7 @@ fn applyWhereFilter(
                 schema,
                 null,
                 &parameter_resolver,
+                string_arena,
             ) catch |err| switch (err) {
                 error.UndefinedParameter => {
                     setError(result, "undefined parameter in where predicate");
@@ -877,13 +890,14 @@ fn applyLimit(
     ctx: *const ExecContext,
     result: *QueryResult,
     limit_node: NodeIndex,
+    string_arena: *scan_mod.StringArena,
 ) void {
     const node = ctx.ast.getNode(limit_node);
     const expr = node.data.unary;
     if (expr == null_node) return;
 
     const parameter_resolver = parameterResolverForContext(ctx);
-    const val = filter_mod.evaluateExpressionWithResolvers(
+    const val = filter_mod.evaluateExpressionWithResolversAndArena(
         ctx.ast,
         ctx.tokens,
         ctx.source,
@@ -892,6 +906,7 @@ fn applyLimit(
         &RowSchema{},
         null,
         &parameter_resolver,
+        string_arena,
     ) catch return;
 
     const limit = numericToRowCount(val) orelse return;
@@ -908,13 +923,14 @@ fn applyOffset(
     result: *QueryResult,
     offset_node: NodeIndex,
     group_runtime: *GroupRuntime,
+    string_arena: *scan_mod.StringArena,
 ) void {
     const node = ctx.ast.getNode(offset_node);
     const expr = node.data.unary;
     if (expr == null_node) return;
 
     const parameter_resolver = parameterResolverForContext(ctx);
-    const val = filter_mod.evaluateExpressionWithResolvers(
+    const val = filter_mod.evaluateExpressionWithResolversAndArena(
         ctx.ast,
         ctx.tokens,
         ctx.source,
@@ -923,6 +939,7 @@ fn applyOffset(
         &RowSchema{},
         null,
         &parameter_resolver,
+        string_arena,
     ) catch return;
 
     const offset = numericToRowCount(val) orelse return;
@@ -964,6 +981,7 @@ fn applySort(
     schema: *const RowSchema,
     caps: *const capacity_mod.OperatorCapacities,
     group_runtime: *GroupRuntime,
+    string_arena: *scan_mod.StringArena,
 ) bool {
     result.stats.plan.sort_strategy = .in_place_insertion;
     const node = ctx.ast.getNode(sort_node);
@@ -999,6 +1017,7 @@ fn applySort(
         schema,
         sort_keys[0..key_count],
         group_runtime,
+        string_arena,
     ) catch {
         setError(result, "sort key evaluation failed");
         return false;
@@ -1016,6 +1035,7 @@ fn applyGroup(
     group_op_index: u16,
     caps: *const capacity_mod.OperatorCapacities,
     group_runtime: *GroupRuntime,
+    string_arena: *scan_mod.StringArena,
 ) bool {
     result.stats.plan.group_strategy = .in_memory_linear;
     const node = ctx.ast.getNode(group_node);
@@ -1076,6 +1096,7 @@ fn applyGroup(
                 group_runtime,
                 group_index,
                 candidate.values[0..candidate.column_count],
+                string_arena,
             )) {
                 return false;
             }
@@ -1094,6 +1115,7 @@ fn applyGroup(
                 group_runtime,
                 write_idx,
                 candidate.values[0..candidate.column_count],
+                string_arena,
             )) {
                 return false;
             }
@@ -1346,6 +1368,7 @@ fn accumulateGroupAggregates(
     group_runtime: *GroupRuntime,
     group_index: u16,
     row_values: []const Value,
+    string_arena: *scan_mod.StringArena,
 ) bool {
     var slot: u16 = 0;
     while (slot < group_runtime.aggregate_count) : (slot += 1) {
@@ -1353,7 +1376,7 @@ fn accumulateGroupAggregates(
         if (descriptor.kind == .count_star) continue;
 
         const parameter_resolver = parameterResolverForContext(ctx);
-        const arg_value = filter_mod.evaluateExpressionWithResolvers(
+        const arg_value = filter_mod.evaluateExpressionWithResolversAndArena(
             ctx.ast,
             ctx.tokens,
             ctx.source,
@@ -1362,6 +1385,7 @@ fn accumulateGroupAggregates(
             schema,
             null,
             &parameter_resolver,
+            string_arena,
         ) catch {
             setError(result, "aggregate evaluation failed");
             return false;
@@ -1614,6 +1638,7 @@ fn sortRowsInPlace(
     schema: *const RowSchema,
     sort_keys: []const SortKeyDescriptor,
     group_runtime: *GroupRuntime,
+    string_arena: *scan_mod.StringArena,
 ) SortEvalError!void {
     if (result.row_count <= 1) return;
 
@@ -1631,6 +1656,7 @@ fn sortRowsInPlace(
                 &result.rows[prev_idx],
                 &result.rows[j],
                 sort_keys,
+                string_arena,
             ) catch return error.EvalFailed;
             if (order != .gt) break;
             const temp = result.rows[prev_idx];
@@ -1656,6 +1682,7 @@ fn compareRowsBySortKeys(
     lhs_row: *const ResultRow,
     rhs_row: *const ResultRow,
     sort_keys: []const SortKeyDescriptor,
+    string_arena: *scan_mod.StringArena,
 ) SortEvalError!std.math.Order {
     for (sort_keys) |key| {
         const lhs_value = evaluateSortKeyValue(
@@ -1665,6 +1692,7 @@ fn compareRowsBySortKeys(
             lhs_row_index,
             lhs_row,
             key,
+            string_arena,
         ) catch return error.EvalFailed;
         const rhs_value = evaluateSortKeyValue(
             ctx,
@@ -1673,6 +1701,7 @@ fn compareRowsBySortKeys(
             rhs_row_index,
             rhs_row,
             key,
+            string_arena,
         ) catch return error.EvalFailed;
         var order = compareValues(lhs_value, rhs_value);
         if (key.descending) {
@@ -1694,6 +1723,7 @@ fn evaluateSortKeyValue(
     row_index: u16,
     row: *const ResultRow,
     key: SortKeyDescriptor,
+    string_arena: *scan_mod.StringArena,
 ) filter_mod.EvalError!Value {
     return switch (key.kind) {
         .column => row.values[key.column_index],
@@ -1705,11 +1735,11 @@ fn evaluateSortKeyValue(
                 row.values[0..row.column_count],
                 schema,
                 row_index,
+                string_arena,
             )
-        else
-            blk: {
-                const parameter_resolver = parameterResolverForContext(ctx);
-                break :blk filter_mod.evaluateExpressionWithResolvers(
+        else blk: {
+            const parameter_resolver = parameterResolverForContext(ctx);
+            break :blk filter_mod.evaluateExpressionWithResolversAndArena(
                 ctx.ast,
                 ctx.tokens,
                 ctx.source,
@@ -1718,8 +1748,9 @@ fn evaluateSortKeyValue(
                 schema,
                 null,
                 &parameter_resolver,
+                string_arena,
             );
-            },
+        },
     };
 }
 
@@ -1736,6 +1767,7 @@ fn evaluateGroupedPredicate(
     row_values: []const Value,
     schema: *const RowSchema,
     row_index: u16,
+    string_arena: *scan_mod.StringArena,
 ) filter_mod.EvalError!bool {
     const agg_ctx = GroupAggregateContext{
         .ctx = ctx,
@@ -1747,7 +1779,7 @@ fn evaluateGroupedPredicate(
         .resolve = resolveGroupedAggregate,
     };
     const parameter_resolver = parameterResolverForContext(ctx);
-    return filter_mod.evaluatePredicateWithResolvers(
+    return filter_mod.evaluatePredicateWithResolversAndArena(
         ctx.ast,
         ctx.tokens,
         ctx.source,
@@ -1756,6 +1788,7 @@ fn evaluateGroupedPredicate(
         schema,
         &resolver,
         &parameter_resolver,
+        string_arena,
     );
 }
 
@@ -1766,6 +1799,7 @@ fn evaluateGroupedExpression(
     row_values: []const Value,
     schema: *const RowSchema,
     row_index: u16,
+    string_arena: *scan_mod.StringArena,
 ) filter_mod.EvalError!Value {
     const agg_ctx = GroupAggregateContext{
         .ctx = ctx,
@@ -1777,7 +1811,7 @@ fn evaluateGroupedExpression(
         .resolve = resolveGroupedAggregate,
     };
     const parameter_resolver = parameterResolverForContext(ctx);
-    return filter_mod.evaluateExpressionWithResolvers(
+    return filter_mod.evaluateExpressionWithResolversAndArena(
         ctx.ast,
         ctx.tokens,
         ctx.source,
@@ -1786,6 +1820,7 @@ fn evaluateGroupedExpression(
         schema,
         &resolver,
         &parameter_resolver,
+        string_arena,
     );
 }
 
@@ -2144,7 +2179,7 @@ fn executeMutation(
     }
 
     if (has_projection and !result.has_error) {
-        _ = applyFlatColumnProjection(ctx, result, pipeline_node, model_id);
+        _ = applyFlatColumnProjection(ctx, result, pipeline_node, model_id, string_arena);
     }
 }
 
@@ -2189,7 +2224,7 @@ fn materializeRowsMatchingPredicate(
         var read_idx: u16 = 0;
         while (read_idx < out.row_count) : (read_idx += 1) {
             const row = &out.rows[read_idx];
-            const matches = filter_mod.evaluatePredicateWithResolvers(
+            const matches = filter_mod.evaluatePredicateWithResolversAndArena(
                 ctx.ast,
                 ctx.tokens,
                 ctx.source,
@@ -2198,6 +2233,7 @@ fn materializeRowsMatchingPredicate(
                 schema,
                 null,
                 &parameter_resolver,
+                string_arena,
             ) catch |err| switch (err) {
                 error.UndefinedParameter => {
                     setError(out, "undefined parameter in predicate");
