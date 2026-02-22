@@ -1483,7 +1483,7 @@ test "function call — coalesce fails closed on empty args" {
 
 test "current_timestamp returns injected microsecond timestamp" {
     var tree = Ast{};
-    const source = "current_timestamp";
+    const source = "CurrentTimestamp";
     const tokens = tokenizer_mod.tokenize(source);
     const node = try makeAstLiteral(&tree, 0);
     const schema = RowSchema{};
@@ -1505,7 +1505,7 @@ test "current_timestamp returns injected microsecond timestamp" {
 
 test "current_timestamp fails closed without injected timestamp" {
     var tree = Ast{};
-    const source = "current_timestamp";
+    const source = "CurrentTimestamp";
     const tokens = tokenizer_mod.tokenize(source);
     const node = try makeAstLiteral(&tree, 0);
     const schema = RowSchema{};

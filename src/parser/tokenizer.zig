@@ -455,7 +455,7 @@ fn classifyWord(text: []const u8, starts_upper: bool) TokenType {
         .{ .word = "min", .tok = .agg_min },
         .{ .word = "max", .tok = .agg_max },
         // Built-in constants
-        .{ .word = "current_timestamp", .tok = .kw_current_timestamp },
+        .{ .word = "CurrentTimestamp", .tok = .kw_current_timestamp },
         // Built-in functions
         .{ .word = "lower", .tok = .fn_lower },
         .{ .word = "upper", .tok = .fn_upper },

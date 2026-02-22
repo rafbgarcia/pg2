@@ -1,10 +1,10 @@
-//! Feature coverage for current_timestamp deterministic statement semantics.
+//! Feature coverage for CurrentTimestamp deterministic statement semantics.
 //!
-//! current_timestamp returns the statement-level timestamp: every reference
+//! CurrentTimestamp returns the statement-level timestamp: every reference
 //! within a single statement yields the same microsecond value, matching
 //! PostgreSQL's transaction-timestamp behavior.
 //!
-//! Unlike now() in PostgreSQL, current_timestamp is a keyword (not a function
+//! Unlike now() in PostgreSQL, CurrentTimestamp is a keyword (not a function
 //! call), so it does not use parentheses.
 const std = @import("std");
 const feature = @import("../../test_env_test.zig");
@@ -21,7 +21,7 @@ fn parseTimestampPair(row_line: []const u8) !struct { created_at: i64, updated_a
     };
 }
 
-test "feature current_timestamp returns identical value for all references in a statement" {
+test "feature CurrentTimestamp returns identical value for all references in a statement" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
@@ -40,7 +40,7 @@ test "feature current_timestamp returns identical value for all references in a 
     _ = try executor.run("CurrentTsSemantics |> insert(id = 3, created_at = null, updated_at = null) {}");
 
     var result = try executor.run(
-        "CurrentTsSemantics |> update(created_at = current_timestamp, updated_at = current_timestamp) {}",
+        "CurrentTsSemantics |> update(created_at = CurrentTimestamp, updated_at = CurrentTimestamp) {}",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=3 deleted_rows=0\n",
@@ -71,10 +71,10 @@ test "feature current_timestamp returns identical value for all references in a 
     // (PostgreSQL semantics: statement-level clock, not per-reference).
     try std.testing.expectEqual(pair_1.created_at, pair_1.updated_at);
 
-    // current_timestamp < current_timestamp is always false (both sides
+    // CurrentTimestamp < CurrentTimestamp is always false (both sides
     // are the same value), so no rows should match the predicate.
     result = try executor.run(
-        "CurrentTsSemantics |> where(current_timestamp < current_timestamp) |> sort(id asc) { id }",
+        "CurrentTsSemantics |> where(CurrentTimestamp < CurrentTimestamp) |> sort(id asc) { id }",
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
