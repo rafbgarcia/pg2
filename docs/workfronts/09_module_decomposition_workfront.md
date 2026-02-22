@@ -65,7 +65,7 @@ After extraction `filter.zig` retains the stack-based expression evaluator, AST 
 - `zig build test` passes with zero test modifications.
 - No new public API — extracted modules are `@import`ed only by `filter.zig`.
 
-## Phase 5: Session — Protocol Extraction
+## Phase 5: Session — Protocol Extraction ✅
 ### Scope
 Extract serialization logic out of `src/server/session.zig` (941 prod lines, 5 concerns):
 
