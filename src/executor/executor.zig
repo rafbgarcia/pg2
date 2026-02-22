@@ -21,6 +21,10 @@ const scan_mod = @import("scan.zig");
 const mutation_mod = @import("mutation.zig");
 const capacity_mod = @import("capacity.zig");
 const runtime_errors = @import("../runtime/error_taxonomy.zig");
+const aggregation_mod = @import("aggregation.zig");
+const sorting_mod = @import("sorting.zig");
+const joins_mod = @import("joins.zig");
+const projections_mod = @import("projections.zig");
 
 const Allocator = std.mem.Allocator;
 const Ast = ast_mod.Ast;
@@ -45,53 +49,9 @@ const Snapshot = tx_mod.Snapshot;
 const TxManager = tx_mod.TxManager;
 const UndoLog = undo_mod.UndoLog;
 const ResultRow = scan_mod.ResultRow;
-const compareValues = row_mod.compareValues;
 pub const ParameterBinding = filter_mod.ParameterBinding;
-const max_sort_keys = capacity_mod.max_sort_keys;
-const max_group_aggregate_exprs = capacity_mod.max_group_aggregate_exprs;
-const sort_key_desc_mask: u16 = 0x0001;
-const sort_key_expr_mask: u16 = 0x8000;
-const invalid_aggregate_slot: u8 = std.math.maxInt(u8);
-
-const AggregateKind = enum {
-    count_star,
-    sum,
-    avg,
-    min,
-    max,
-};
-
-const AggregateDescriptor = struct {
-    node_index: NodeIndex,
-    kind: AggregateKind,
-    arg_node: NodeIndex,
-};
-
-const AggregateState = struct {
-    value_count: u32 = 0,
-    sum_bigint: i64 = 0,
-    sum_float: f64 = 0.0,
-    has_min: bool = false,
-    has_max: bool = false,
-    min_value: Value = .{ .null_value = {} },
-    max_value: Value = .{ .null_value = {} },
-    value_type: ?row_mod.ColumnType = null,
-};
-
-const GroupRuntime = struct {
-    active: bool = false,
-    group_key_count: u16 = 0,
-    group_key_indices: [capacity_mod.max_group_keys]u16 = undefined,
-    group_counts: [scan_mod.max_result_rows]u32 =
-        [_]u32{0} ** scan_mod.max_result_rows,
-    aggregate_count: u16 = 0,
-    aggregate_descriptors: [max_group_aggregate_exprs]AggregateDescriptor =
-        undefined,
-    aggregate_slot_by_node: [ast_mod.max_ast_nodes]u8 =
-        [_]u8{invalid_aggregate_slot} ** ast_mod.max_ast_nodes,
-    aggregate_states: [max_group_aggregate_exprs][scan_mod.max_result_rows]AggregateState =
-        undefined,
-};
+const GroupRuntime = aggregation_mod.GroupRuntime;
+const JoinDescriptor = joins_mod.JoinDescriptor;
 
 /// Maximum pipeline operators in a single query.
 pub const max_operators = capacity_mod.max_pipeline_operators;
@@ -223,7 +183,7 @@ pub const ExecContext = struct {
 const OpKind = PlanOp;
 
 /// A pipeline operator descriptor.
-const OpDescriptor = struct {
+pub const OpDescriptor = struct {
     kind: OpKind,
     node: NodeIndex,
 };
@@ -464,198 +424,8 @@ fn executeReadPipeline(
     result.stats.rows_returned = result.row_count;
 }
 
-const ProjectionKind = enum {
-    column,
-    expression,
-};
-
-const ProjectionDescriptor = struct {
-    kind: ProjectionKind,
-    column_index: u16 = 0,
-    expr_node: NodeIndex = null_node,
-};
-
-fn applyFlatColumnProjection(
-    ctx: *const ExecContext,
-    result: *QueryResult,
-    pipeline_node: NodeIndex,
-    model_id: ModelId,
-    string_arena: *scan_mod.StringArena,
-) bool {
-    const selection = getPipelineSelection(ctx.ast, pipeline_node) orelse
-        return true;
-    const source_model = &ctx.catalog.models[model_id];
-    const source_schema = &source_model.row_schema;
-
-    var projection_descriptors: [scan_mod.max_columns]ProjectionDescriptor = undefined;
-    var projection_count: u16 = 0;
-    var joined_column_offset: u16 = source_schema.column_count;
-
-    var field = ctx.ast.getNode(selection).data.unary;
-    while (field != null_node) {
-        const node = ctx.ast.getNode(field);
-        switch (node.tag) {
-            .select_field => {
-                const col_name = ctx.tokens.getText(node.data.token, ctx.source);
-                const col_idx = source_schema.findColumn(col_name) orelse {
-                    setError(result, "select column not found");
-                    return false;
-                };
-                if (!appendProjectionDescriptor(
-                    result,
-                    &projection_descriptors,
-                    &projection_count,
-                    .{
-                        .kind = .column,
-                        .column_index = col_idx,
-                    },
-                )) return false;
-            },
-            .select_computed => {
-                const expr_node = node.data.unary;
-                if (expr_node == null_node) {
-                    setError(result, "computed select expression missing");
-                    return false;
-                }
-                if (!appendProjectionDescriptor(
-                    result,
-                    &projection_descriptors,
-                    &projection_count,
-                    .{
-                        .kind = .expression,
-                        .expr_node = expr_node,
-                    },
-                )) return false;
-            },
-            .select_nested => {
-                const relation_name = ctx.tokens.getText(node.extra, ctx.source);
-                const assoc_id = ctx.catalog.findAssociation(
-                    model_id,
-                    relation_name,
-                ) orelse {
-                    setError(result, "nested relation association not found");
-                    return false;
-                };
-                const assoc = &source_model.associations[assoc_id];
-                if (assoc.target_model_id == null_model) {
-                    setError(result, "nested relation target unresolved");
-                    return false;
-                }
-                const target_model = &ctx.catalog.models[assoc.target_model_id];
-                const nested_selection = getNestedSelection(ctx.ast, field) orelse {
-                    joined_column_offset += target_model.row_schema.column_count;
-                    field = node.next;
-                    continue;
-                };
-
-                var nested_field = ctx.ast.getNode(nested_selection).data.unary;
-                while (nested_field != null_node) {
-                    const nested_node = ctx.ast.getNode(nested_field);
-                    switch (nested_node.tag) {
-                        .select_field => {
-                            const nested_col_name = ctx.tokens.getText(
-                                nested_node.data.token,
-                                ctx.source,
-                            );
-                            const nested_col_idx = target_model.row_schema.findColumn(
-                                nested_col_name,
-                            ) orelse {
-                                setError(result, "select column not found");
-                                return false;
-                            };
-                            if (!appendProjectionDescriptor(
-                                result,
-                                &projection_descriptors,
-                                &projection_count,
-                                .{
-                                    .kind = .column,
-                                    .column_index = joined_column_offset + nested_col_idx,
-                                },
-                            )) return false;
-                        },
-                        // Nested relation and computed-field projection shaping
-                        // are not implemented in this pass.
-                        .select_nested, .select_computed => return true,
-                        else => return true,
-                    }
-                    nested_field = nested_node.next;
-                }
-                joined_column_offset += target_model.row_schema.column_count;
-            },
-            else => return true,
-        }
-        field = node.next;
-    }
-
-    if (projection_count == 0) return true;
-
-    var row_index: u16 = 0;
-    while (row_index < result.row_count) : (row_index += 1) {
-        var projected: [scan_mod.max_columns]Value = undefined;
-        for (projection_descriptors[0..projection_count], 0..) |descriptor, out_idx| {
-            switch (descriptor.kind) {
-                .column => {
-                    if (descriptor.column_index >= result.rows[row_index].column_count) {
-                        setError(result, "projection column out of bounds");
-                        return false;
-                    }
-                    projected[out_idx] = result.rows[row_index].values[descriptor.column_index];
-                },
-                .expression => {
-                    var exec_eval = evalContextForExec(ctx, string_arena);
-                    const value = filter_mod.evaluateExpressionFull(
-                        ctx.ast,
-                        ctx.tokens,
-                        ctx.source,
-                        descriptor.expr_node,
-                        result.rows[row_index].values[0..result.rows[row_index].column_count],
-                        source_schema,
-                        null,
-                        &exec_eval.eval_ctx,
-                    ) catch {
-                        setError(result, "select computed expression evaluation failed");
-                        return false;
-                    };
-                    projected[out_idx] = value;
-                },
-            }
-        }
-        @memcpy(
-            result.rows[row_index].values[0..projection_count],
-            projected[0..projection_count],
-        );
-        result.rows[row_index].column_count = projection_count;
-    }
-
-    return true;
-}
-
-fn appendProjectionDescriptor(
-    result: *QueryResult,
-    projection_descriptors: *[scan_mod.max_columns]ProjectionDescriptor,
-    projection_count: *u16,
-    descriptor: ProjectionDescriptor,
-) bool {
-    if (projection_count.* >= scan_mod.max_columns) {
-        setError(result, "projection column capacity exceeded");
-        return false;
-    }
-    projection_descriptors.*[projection_count.*] = descriptor;
-    projection_count.* += 1;
-    return true;
-}
-
-fn getNestedSelection(tree: *const Ast, nested_node: NodeIndex) ?NodeIndex {
-    const nested = tree.getNode(nested_node);
-    if (nested.tag != .select_nested) return null;
-    if (nested.data.unary == null_node) return null;
-    const nested_pipeline = tree.getNode(nested.data.unary);
-    if (nested_pipeline.tag != .pipeline) return null;
-    const selection: NodeIndex = nested_pipeline.extra;
-    if (selection >= tree.node_count) return null;
-    if (tree.getNode(selection).tag != .selection_set) return null;
-    return selection;
-}
+const applyFlatColumnProjection = projections_mod.applyFlatColumnProjection;
+const getPipelineSelection = projections_mod.getPipelineSelection;
 
 fn applyReadOperators(
     ctx: *const ExecContext,
@@ -689,7 +459,7 @@ fn applyReadOperators(
                 string_arena,
             ),
             .group_op => {
-                if (!applyGroup(
+                if (!aggregation_mod.applyGroup(
                     ctx,
                     result,
                     op.node,
@@ -705,7 +475,7 @@ fn applyReadOperators(
             .limit_op => applyLimit(ctx, result, op.node, string_arena),
             .offset_op => applyOffset(ctx, result, op.node, &group_runtime, string_arena),
             .sort_op => {
-                if (!applySort(
+                if (!sorting_mod.applySort(
                     ctx,
                     result,
                     op.node,
@@ -748,19 +518,6 @@ fn applyNestedSelectionJoin(
         field = node.next;
     }
     return true;
-}
-
-fn getPipelineSelection(
-    tree: *const Ast,
-    pipeline_node: NodeIndex,
-) ?NodeIndex {
-    const pipeline = tree.getNode(pipeline_node);
-    if (pipeline.tag != .pipeline) return null;
-    const idx: NodeIndex = pipeline.extra;
-    if (idx >= tree.node_count) return null;
-    const node = tree.getNode(idx);
-    if (node.tag != .selection_set) return null;
-    return idx;
 }
 
 fn applySingleNestedSelectionJoin(
@@ -852,7 +609,7 @@ fn applySingleNestedSelectionJoin(
         result,
     ) orelse return false;
     recordNestedJoinPlan(&result.stats.plan);
-    if (!executeLeftJoinBounded(
+    if (!joins_mod.executeLeftJoinBounded(
         result,
         left_copy[0..result.row_count],
         right_result.rows[0..right_result.row_count],
@@ -871,7 +628,7 @@ fn inferAssociationJoinDescriptor(
     source_model_id: ModelId,
     assoc: *const AssociationInfo,
     result: *QueryResult,
-) ?JoinDescriptor {
+) ?joins_mod.JoinDescriptor {
     _ = catalog;
     _ = source_model_id;
     if (assoc.local_column_id == catalog_mod.null_column) {
@@ -908,7 +665,7 @@ fn applyWhereFilter(
     while (read_idx < result.row_count) : (read_idx += 1) {
         const row = &result.rows[read_idx];
         const matches = if (group_runtime.active)
-            evaluateGroupedPredicate(
+            aggregation_mod.evaluateGroupedPredicate(
                 ctx,
                 group_runtime,
                 predicate,
@@ -969,12 +726,12 @@ fn applyWhereFilter(
 /// Both values live on the caller's stack frame. The EvalContext's
 /// parameter_resolver pointer targets the co-located resolver, so the
 /// returned struct must not be moved after construction.
-const ExecEvalContext = struct {
+pub const ExecEvalContext = struct {
     parameter_resolver: filter_mod.ParameterResolver,
     eval_ctx: filter_mod.EvalContext,
 };
 
-fn evalContextForExec(
+pub fn evalContextForExec(
     ctx: *const ExecContext,
     string_arena: ?*scan_mod.StringArena,
 ) ExecEvalContext {
@@ -1092,906 +849,7 @@ fn applyOffset(
     std.debug.assert(result.row_count == remaining);
 }
 
-const SortKeyKind = enum {
-    column,
-    expression,
-};
 
-const SortKeyDescriptor = struct {
-    kind: SortKeyKind,
-    descending: bool,
-    column_index: u16 = 0,
-    expr_node: NodeIndex = null_node,
-};
-
-fn applySort(
-    ctx: *const ExecContext,
-    result: *QueryResult,
-    sort_node: NodeIndex,
-    schema: *const RowSchema,
-    caps: *const capacity_mod.OperatorCapacities,
-    group_runtime: *GroupRuntime,
-    string_arena: *scan_mod.StringArena,
-) bool {
-    result.stats.plan.sort_strategy = .in_place_insertion;
-    const node = ctx.ast.getNode(sort_node);
-    const key_count = ctx.ast.listLen(node.data.unary);
-    if (key_count == 0) {
-        setError(result, "sort requires at least one key");
-        return false;
-    }
-    if (@as(usize, key_count) > caps.sort_keys) {
-        setError(result, "sort capacity exceeded");
-        return false;
-    }
-    if (@as(usize, result.row_count) > caps.sort_rows) {
-        setError(result, "sort row capacity exceeded");
-        return false;
-    }
-
-    var sort_keys: [max_sort_keys]SortKeyDescriptor = undefined;
-    if (!buildSortKeyDescriptors(
-        ctx,
-        result,
-        node.data.unary,
-        schema,
-        sort_keys[0..],
-        key_count,
-    )) {
-        return false;
-    }
-
-    sortRowsInPlace(
-        ctx,
-        result,
-        schema,
-        sort_keys[0..key_count],
-        group_runtime,
-        string_arena,
-    ) catch {
-        setError(result, "sort key evaluation failed");
-        return false;
-    };
-    return true;
-}
-
-fn applyGroup(
-    ctx: *const ExecContext,
-    result: *QueryResult,
-    group_node: NodeIndex,
-    schema: *const RowSchema,
-    ops: *const [max_operators]OpDescriptor,
-    op_count: u16,
-    group_op_index: u16,
-    caps: *const capacity_mod.OperatorCapacities,
-    group_runtime: *GroupRuntime,
-    string_arena: *scan_mod.StringArena,
-) bool {
-    result.stats.plan.group_strategy = .in_memory_linear;
-    const node = ctx.ast.getNode(group_node);
-    const group_key_count = ctx.ast.listLen(node.data.unary);
-    if (group_key_count == 0) {
-        setError(result, "group requires at least one key");
-        return false;
-    }
-    if (@as(usize, group_key_count) > caps.group_keys) {
-        setError(result, "group key capacity exceeded");
-        return false;
-    }
-    var group_key_indices: [capacity_mod.max_group_keys]u16 = undefined;
-    if (!buildGroupKeyIndices(
-        ctx,
-        result,
-        schema,
-        node.data.unary,
-        group_key_count,
-        group_key_indices[0..],
-    )) {
-        return false;
-    }
-
-    group_runtime.active = true;
-    group_runtime.group_key_count = group_key_count;
-    @memcpy(
-        group_runtime.group_key_indices[0..group_key_count],
-        group_key_indices[0..group_key_count],
-    );
-    @memset(group_runtime.group_counts[0..], 0);
-    if (!collectPostGroupAggregates(
-        ctx,
-        result,
-        ops,
-        op_count,
-        group_op_index,
-        caps,
-        group_runtime,
-    )) {
-        return false;
-    }
-
-    var write_idx: u16 = 0;
-    var read_idx: u16 = 0;
-    while (read_idx < result.row_count) : (read_idx += 1) {
-        const candidate = &result.rows[read_idx];
-        if (findGroupIndex(
-            result.rows[0..write_idx],
-            candidate,
-            group_key_indices[0..group_key_count],
-        )) |group_index| {
-            group_runtime.group_counts[group_index] += 1;
-            if (!accumulateGroupAggregates(
-                ctx,
-                result,
-                schema,
-                group_runtime,
-                group_index,
-                candidate.values[0..candidate.column_count],
-                string_arena,
-            )) {
-                return false;
-            }
-        } else {
-            if (@as(usize, write_idx) >= caps.aggregate_groups) {
-                setError(result, "aggregate group capacity exceeded");
-                return false;
-            }
-            result.rows[write_idx] = candidate.*;
-            resetAggregateStatesForGroup(group_runtime, write_idx);
-            group_runtime.group_counts[write_idx] = 1;
-            if (!accumulateGroupAggregates(
-                ctx,
-                result,
-                schema,
-                group_runtime,
-                write_idx,
-                candidate.values[0..candidate.column_count],
-                string_arena,
-            )) {
-                return false;
-            }
-            write_idx += 1;
-        }
-    }
-    result.row_count = write_idx;
-    return true;
-}
-
-fn collectPostGroupAggregates(
-    ctx: *const ExecContext,
-    result: *QueryResult,
-    ops: *const [max_operators]OpDescriptor,
-    op_count: u16,
-    group_op_index: u16,
-    caps: *const capacity_mod.OperatorCapacities,
-    group_runtime: *GroupRuntime,
-) bool {
-    group_runtime.aggregate_count = 0;
-    @memset(
-        group_runtime.aggregate_slot_by_node[0..],
-        invalid_aggregate_slot,
-    );
-
-    var op_idx = group_op_index + 1;
-    while (op_idx < op_count) : (op_idx += 1) {
-        const op = ops[op_idx];
-        switch (op.kind) {
-            .where_filter, .having_filter => {
-                const where_node = ctx.ast.getNode(op.node);
-                if (!registerAggregateExprTree(
-                    ctx,
-                    result,
-                    where_node.data.unary,
-                    caps,
-                    group_runtime,
-                )) return false;
-            },
-            .sort_op => {
-                const sort_node = ctx.ast.getNode(op.node);
-                var key = sort_node.data.unary;
-                while (key != null_node) {
-                    const key_node = ctx.ast.getNode(key);
-                    const is_expr = (key_node.extra & sort_key_expr_mask) != 0;
-                    if (is_expr and !registerAggregateExprTree(
-                        ctx,
-                        result,
-                        key_node.data.unary,
-                        caps,
-                        group_runtime,
-                    )) {
-                        return false;
-                    }
-                    key = key_node.next;
-                }
-            },
-            .limit_op, .offset_op => {
-                const n = ctx.ast.getNode(op.node);
-                if (!registerAggregateExprTree(
-                    ctx,
-                    result,
-                    n.data.unary,
-                    caps,
-                    group_runtime,
-                )) return false;
-            },
-            .group_op, .insert_op, .update_op, .delete_op, .inspect_op => {},
-        }
-    }
-
-    return true;
-}
-
-fn resetAggregateStatesForGroup(
-    group_runtime: *GroupRuntime,
-    group_index: u16,
-) void {
-    var slot: u16 = 0;
-    while (slot < group_runtime.aggregate_count) : (slot += 1) {
-        group_runtime.aggregate_states[slot][group_index] = .{};
-    }
-}
-
-fn registerAggregateExprTree(
-    ctx: *const ExecContext,
-    result: *QueryResult,
-    expr_root: NodeIndex,
-    caps: *const capacity_mod.OperatorCapacities,
-    group_runtime: *GroupRuntime,
-) bool {
-    if (expr_root == null_node) return true;
-
-    var stack: [ast_mod.max_ast_nodes]NodeIndex = undefined;
-    var stack_len: usize = 0;
-    stack[0] = expr_root;
-    stack_len = 1;
-
-    while (stack_len > 0) {
-        stack_len -= 1;
-        const node_idx = stack[stack_len];
-        if (node_idx == null_node) continue;
-        const node = ctx.ast.getNode(node_idx);
-
-        if (node.tag == .expr_aggregate) {
-            if (!registerAggregateDescriptor(
-                ctx,
-                result,
-                node_idx,
-                caps,
-                group_runtime,
-            )) {
-                return false;
-            }
-        }
-
-        switch (node.tag) {
-            .expr_binary, .expr_in, .expr_not_in => {
-                if (stack_len + 2 > stack.len) {
-                    setError(result, "aggregate expression too complex");
-                    return false;
-                }
-                stack[stack_len] = node.data.binary.lhs;
-                stack[stack_len + 1] = node.data.binary.rhs;
-                stack_len += 2;
-            },
-            .expr_unary, .expr_function_call, .expr_list, .expr_aggregate => {
-                var child = node.data.unary;
-                while (child != null_node) {
-                    if (stack_len >= stack.len) {
-                        setError(result, "aggregate expression too complex");
-                        return false;
-                    }
-                    stack[stack_len] = child;
-                    stack_len += 1;
-                    child = ctx.ast.getNode(child).next;
-                }
-            },
-            else => {},
-        }
-    }
-
-    return true;
-}
-
-fn registerAggregateDescriptor(
-    ctx: *const ExecContext,
-    result: *QueryResult,
-    aggregate_node: NodeIndex,
-    caps: *const capacity_mod.OperatorCapacities,
-    group_runtime: *GroupRuntime,
-) bool {
-    std.debug.assert(aggregate_node < ast_mod.max_ast_nodes);
-    if (group_runtime.aggregate_slot_by_node[aggregate_node] !=
-        invalid_aggregate_slot)
-    {
-        return true;
-    }
-
-    const node = ctx.ast.getNode(aggregate_node);
-    const token_type = ctx.tokens.tokens[node.extra].token_type;
-    const descriptor = switch (token_type) {
-        .agg_count => blk: {
-            if (node.data.unary != null_node) {
-                setError(result, "count aggregate shape unsupported");
-                return false;
-            }
-            break :blk null;
-        },
-        .agg_sum => blk: {
-            if (node.data.unary == null_node) {
-                setError(result, "sum aggregate requires an argument");
-                return false;
-            }
-            break :blk AggregateDescriptor{
-                .node_index = aggregate_node,
-                .kind = .sum,
-                .arg_node = node.data.unary,
-            };
-        },
-        .agg_avg => blk: {
-            if (node.data.unary == null_node) {
-                setError(result, "avg aggregate requires an argument");
-                return false;
-            }
-            break :blk AggregateDescriptor{
-                .node_index = aggregate_node,
-                .kind = .avg,
-                .arg_node = node.data.unary,
-            };
-        },
-        .agg_min => blk: {
-            if (node.data.unary == null_node) {
-                setError(result, "min aggregate requires an argument");
-                return false;
-            }
-            break :blk AggregateDescriptor{
-                .node_index = aggregate_node,
-                .kind = .min,
-                .arg_node = node.data.unary,
-            };
-        },
-        .agg_max => blk: {
-            if (node.data.unary == null_node) {
-                setError(result, "max aggregate requires an argument");
-                return false;
-            }
-            break :blk AggregateDescriptor{
-                .node_index = aggregate_node,
-                .kind = .max,
-                .arg_node = node.data.unary,
-            };
-        },
-        else => {
-            setError(result, "unsupported aggregate function");
-            return false;
-        },
-    };
-
-    if (descriptor) |desc| {
-        if (group_runtime.aggregate_count >= max_group_aggregate_exprs) {
-            setError(result, "aggregate expression capacity exceeded");
-            return false;
-        }
-        const groups_upper_bound = @min(
-            @as(usize, result.row_count),
-            caps.aggregate_groups,
-        );
-        const used_slots = @as(usize, group_runtime.aggregate_count) + 1;
-        const total_state_bytes = used_slots *
-            groups_upper_bound *
-            @sizeOf(AggregateState);
-        if (total_state_bytes > caps.aggregate_state_bytes) {
-            setError(result, "aggregate state capacity exceeded");
-            return false;
-        }
-
-        const slot = group_runtime.aggregate_count;
-        group_runtime.aggregate_descriptors[slot] = desc;
-        group_runtime.aggregate_slot_by_node[aggregate_node] = @intCast(slot);
-        group_runtime.aggregate_count += 1;
-    }
-    return true;
-}
-
-fn accumulateGroupAggregates(
-    ctx: *const ExecContext,
-    result: *QueryResult,
-    schema: *const RowSchema,
-    group_runtime: *GroupRuntime,
-    group_index: u16,
-    row_values: []const Value,
-    string_arena: *scan_mod.StringArena,
-) bool {
-    var slot: u16 = 0;
-    while (slot < group_runtime.aggregate_count) : (slot += 1) {
-        const descriptor = group_runtime.aggregate_descriptors[slot];
-        if (descriptor.kind == .count_star) continue;
-
-        var exec_eval = evalContextForExec(ctx, string_arena);
-        const arg_value = filter_mod.evaluateExpressionFull(
-            ctx.ast,
-            ctx.tokens,
-            ctx.source,
-            descriptor.arg_node,
-            row_values,
-            schema,
-            null,
-            &exec_eval.eval_ctx,
-        ) catch {
-            setError(result, "aggregate evaluation failed");
-            return false;
-        };
-
-        const state = &group_runtime.aggregate_states[slot][group_index];
-        updateAggregateState(state, descriptor.kind, arg_value) catch {
-            setError(result, "aggregate evaluation failed");
-            return false;
-        };
-    }
-    return true;
-}
-
-fn updateAggregateState(
-    state: *AggregateState,
-    kind: AggregateKind,
-    value: Value,
-) filter_mod.EvalError!void {
-    if (value == .null_value) return;
-    const value_type = value.columnType() orelse return error.TypeMismatch;
-
-    switch (kind) {
-        .sum => {
-            switch (value) {
-                .i8 => |v| {
-                    if (state.value_type == null) state.value_type = .i8;
-                    if (state.value_type.? != .i8) return error.TypeMismatch;
-                    state.sum_bigint = std.math.add(i64, state.sum_bigint, v) catch
-                        return error.NumericOverflow;
-                },
-                .i16 => |v| {
-                    if (state.value_type == null) state.value_type = .i16;
-                    if (state.value_type.? != .i16) return error.TypeMismatch;
-                    state.sum_bigint = std.math.add(i64, state.sum_bigint, v) catch
-                        return error.NumericOverflow;
-                },
-                .i64 => |v| {
-                    if (state.value_type == null) state.value_type = .i64;
-                    if (state.value_type.? != .i64) return error.TypeMismatch;
-                    state.sum_bigint = std.math.add(i64, state.sum_bigint, v) catch
-                        return error.NumericOverflow;
-                },
-                .i32 => |v| {
-                    if (state.value_type == null) state.value_type = .i32;
-                    if (state.value_type.? != .i32) return error.TypeMismatch;
-                    state.sum_bigint = std.math.add(i64, state.sum_bigint, v) catch
-                        return error.NumericOverflow;
-                },
-                .u8 => |v| {
-                    if (state.value_type == null) state.value_type = .u8;
-                    if (state.value_type.? != .u8) return error.TypeMismatch;
-                    state.sum_bigint = std.math.add(i64, state.sum_bigint, v) catch
-                        return error.NumericOverflow;
-                },
-                .u16 => |v| {
-                    if (state.value_type == null) state.value_type = .u16;
-                    if (state.value_type.? != .u16) return error.TypeMismatch;
-                    state.sum_bigint = std.math.add(i64, state.sum_bigint, v) catch
-                        return error.NumericOverflow;
-                },
-                .u32 => |v| {
-                    if (state.value_type == null) state.value_type = .u32;
-                    if (state.value_type.? != .u32) return error.TypeMismatch;
-                    state.sum_bigint = std.math.add(i64, state.sum_bigint, v) catch
-                        return error.NumericOverflow;
-                },
-                .u64 => |v| {
-                    if (state.value_type == null) state.value_type = .u64;
-                    if (state.value_type.? != .u64) return error.TypeMismatch;
-                    const narrowed = std.math.cast(i64, v) orelse return error.NumericOverflow;
-                    state.sum_bigint = std.math.add(i64, state.sum_bigint, narrowed) catch
-                        return error.NumericOverflow;
-                },
-                .f64 => |v| {
-                    if (state.value_type == null) state.value_type = .f64;
-                    if (state.value_type.? != .f64) return error.TypeMismatch;
-                    state.sum_float += v;
-                },
-                else => return error.TypeMismatch,
-            }
-            state.value_count += 1;
-        },
-        .avg => {
-            const numeric = switch (value) {
-                .i8 => |v| @as(f64, @floatFromInt(v)),
-                .i16 => |v| @as(f64, @floatFromInt(v)),
-                .i64 => |v| @as(f64, @floatFromInt(v)),
-                .i32 => |v| @as(f64, @floatFromInt(v)),
-                .u8 => |v| @as(f64, @floatFromInt(v)),
-                .u16 => |v| @as(f64, @floatFromInt(v)),
-                .u32 => |v| @as(f64, @floatFromInt(v)),
-                .u64 => |v| @as(f64, @floatFromInt(v)),
-                .f64 => |v| v,
-                else => return error.TypeMismatch,
-            };
-            if (state.value_type == null) {
-                state.value_type = value_type;
-            } else if (state.value_type.? != value_type) {
-                return error.TypeMismatch;
-            }
-            state.sum_float += numeric;
-            state.value_count += 1;
-        },
-        .min => {
-            if (state.value_type == null) {
-                state.value_type = value_type;
-            } else if (state.value_type.? != value_type) {
-                return error.TypeMismatch;
-            }
-            if (!state.has_min or compareValues(value, state.min_value) == .lt) {
-                state.min_value = value;
-                state.has_min = true;
-            }
-        },
-        .max => {
-            if (state.value_type == null) {
-                state.value_type = value_type;
-            } else if (state.value_type.? != value_type) {
-                return error.TypeMismatch;
-            }
-            if (!state.has_max or compareValues(value, state.max_value) == .gt) {
-                state.max_value = value;
-                state.has_max = true;
-            }
-        },
-        .count_star => {},
-    }
-}
-
-fn buildGroupKeyIndices(
-    ctx: *const ExecContext,
-    result: *QueryResult,
-    schema: *const RowSchema,
-    first_group_key: NodeIndex,
-    group_key_count: u16,
-    out_indices: []u16,
-) bool {
-    std.debug.assert(@as(usize, group_key_count) <= out_indices.len);
-
-    var key_idx: u16 = 0;
-    var current = first_group_key;
-    while (current != null_node and key_idx < group_key_count) : (key_idx += 1) {
-        const key_node = ctx.ast.getNode(current);
-        if (key_node.tag != .expr_column_ref) {
-            setError(result, "group key must be a column");
-            return false;
-        }
-        const col_name = ctx.tokens.getText(key_node.data.token, ctx.source);
-        const col_index = schema.findColumn(col_name) orelse {
-            setError(result, "group column not found");
-            return false;
-        };
-        out_indices[key_idx] = col_index;
-        current = key_node.next;
-    }
-    return key_idx == group_key_count;
-}
-
-fn findGroupIndex(
-    grouped_rows: []const ResultRow,
-    candidate: *const ResultRow,
-    key_indices: []const u16,
-) ?u16 {
-    var idx: u16 = 0;
-    for (grouped_rows) |grouped| {
-        if (rowsEqualOnGroupKeys(&grouped, candidate, key_indices)) {
-            return idx;
-        }
-        idx += 1;
-    }
-    return null;
-}
-
-fn rowsEqualOnGroupKeys(
-    lhs: *const ResultRow,
-    rhs: *const ResultRow,
-    key_indices: []const u16,
-) bool {
-    for (key_indices) |col_index| {
-        if (compareValues(lhs.values[col_index], rhs.values[col_index]) != .eq) {
-            return false;
-        }
-    }
-    return true;
-}
-
-fn buildSortKeyDescriptors(
-    ctx: *const ExecContext,
-    result: *QueryResult,
-    first_key: NodeIndex,
-    schema: *const RowSchema,
-    out_keys: []SortKeyDescriptor,
-    key_count: u16,
-) bool {
-    std.debug.assert(@as(usize, key_count) <= out_keys.len);
-
-    var current = first_key;
-    var index: u16 = 0;
-    while (current != null_node and index < key_count) : (index += 1) {
-        const key_node = ctx.ast.getNode(current);
-        if (key_node.tag != .sort_key) {
-            setError(result, "invalid sort key node");
-            return false;
-        }
-
-        const descending = (key_node.extra & sort_key_desc_mask) != 0;
-        const is_expr = (key_node.extra & sort_key_expr_mask) != 0;
-        if (is_expr) {
-            const expr_node = key_node.data.unary;
-            if (expr_node == null_node) {
-                setError(result, "invalid sort expression key");
-                return false;
-            }
-            out_keys[index] = .{
-                .kind = .expression,
-                .descending = descending,
-                .expr_node = expr_node,
-            };
-        } else {
-            const col_name = ctx.tokens.getText(key_node.data.token, ctx.source);
-            const col_index = schema.findColumn(col_name) orelse {
-                setError(result, "sort column not found");
-                return false;
-            };
-            out_keys[index] = .{
-                .kind = .column,
-                .descending = descending,
-                .column_index = col_index,
-            };
-        }
-
-        current = key_node.next;
-    }
-
-    if (index != key_count) {
-        setError(result, "sort key list malformed");
-        return false;
-    }
-    return true;
-}
-
-const SortEvalError = error{
-    EvalFailed,
-};
-
-fn sortRowsInPlace(
-    ctx: *const ExecContext,
-    result: *QueryResult,
-    schema: *const RowSchema,
-    sort_keys: []const SortKeyDescriptor,
-    group_runtime: *GroupRuntime,
-    string_arena: *scan_mod.StringArena,
-) SortEvalError!void {
-    if (result.row_count <= 1) return;
-
-    var i: u16 = 1;
-    while (i < result.row_count) : (i += 1) {
-        var j: u16 = i;
-        while (j > 0) {
-            const prev_idx = j - 1;
-            const order = compareRowsBySortKeys(
-                ctx,
-                schema,
-                group_runtime,
-                prev_idx,
-                j,
-                &result.rows[prev_idx],
-                &result.rows[j],
-                sort_keys,
-                string_arena,
-            ) catch return error.EvalFailed;
-            if (order != .gt) break;
-            const temp = result.rows[prev_idx];
-            result.rows[prev_idx] = result.rows[j];
-            result.rows[j] = temp;
-            if (group_runtime.active) {
-                const count_tmp = group_runtime.group_counts[prev_idx];
-                group_runtime.group_counts[prev_idx] =
-                    group_runtime.group_counts[j];
-                group_runtime.group_counts[j] = count_tmp;
-            }
-            j -= 1;
-        }
-    }
-}
-
-fn compareRowsBySortKeys(
-    ctx: *const ExecContext,
-    schema: *const RowSchema,
-    group_runtime: *const GroupRuntime,
-    lhs_row_index: u16,
-    rhs_row_index: u16,
-    lhs_row: *const ResultRow,
-    rhs_row: *const ResultRow,
-    sort_keys: []const SortKeyDescriptor,
-    string_arena: *scan_mod.StringArena,
-) SortEvalError!std.math.Order {
-    for (sort_keys) |key| {
-        const lhs_value = evaluateSortKeyValue(
-            ctx,
-            schema,
-            group_runtime,
-            lhs_row_index,
-            lhs_row,
-            key,
-            string_arena,
-        ) catch return error.EvalFailed;
-        const rhs_value = evaluateSortKeyValue(
-            ctx,
-            schema,
-            group_runtime,
-            rhs_row_index,
-            rhs_row,
-            key,
-            string_arena,
-        ) catch return error.EvalFailed;
-        var order = compareValues(lhs_value, rhs_value);
-        if (key.descending) {
-            order = switch (order) {
-                .lt => .gt,
-                .gt => .lt,
-                .eq => .eq,
-            };
-        }
-        if (order != .eq) return order;
-    }
-    return .eq;
-}
-
-fn evaluateSortKeyValue(
-    ctx: *const ExecContext,
-    schema: *const RowSchema,
-    group_runtime: *const GroupRuntime,
-    row_index: u16,
-    row: *const ResultRow,
-    key: SortKeyDescriptor,
-    string_arena: *scan_mod.StringArena,
-) filter_mod.EvalError!Value {
-    var exec_eval = evalContextForExec(ctx, string_arena);
-    return switch (key.kind) {
-        .column => row.values[key.column_index],
-        .expression => if (group_runtime.active)
-            evaluateGroupedExpression(
-                ctx,
-                group_runtime,
-                key.expr_node,
-                row.values[0..row.column_count],
-                schema,
-                row_index,
-                &exec_eval.eval_ctx,
-            )
-        else
-            filter_mod.evaluateExpressionFull(
-                ctx.ast,
-                ctx.tokens,
-                ctx.source,
-                key.expr_node,
-                row.values[0..row.column_count],
-                schema,
-                null,
-                &exec_eval.eval_ctx,
-            ),
-    };
-}
-
-const GroupAggregateContext = struct {
-    ctx: *const ExecContext,
-    group_runtime: *const GroupRuntime,
-    row_index: u16,
-};
-
-fn evaluateGroupedPredicate(
-    ctx: *const ExecContext,
-    group_runtime: *const GroupRuntime,
-    predicate: NodeIndex,
-    row_values: []const Value,
-    schema: *const RowSchema,
-    row_index: u16,
-    eval_ctx: *const filter_mod.EvalContext,
-) filter_mod.EvalError!bool {
-    const agg_ctx = GroupAggregateContext{
-        .ctx = ctx,
-        .group_runtime = group_runtime,
-        .row_index = row_index,
-    };
-    const resolver = filter_mod.AggregateResolver{
-        .ctx = &agg_ctx,
-        .resolve = resolveGroupedAggregate,
-    };
-    return filter_mod.evaluatePredicateFull(
-        ctx.ast,
-        ctx.tokens,
-        ctx.source,
-        predicate,
-        row_values,
-        schema,
-        &resolver,
-        eval_ctx,
-    );
-}
-
-fn evaluateGroupedExpression(
-    ctx: *const ExecContext,
-    group_runtime: *const GroupRuntime,
-    expr: NodeIndex,
-    row_values: []const Value,
-    schema: *const RowSchema,
-    row_index: u16,
-    eval_ctx: *const filter_mod.EvalContext,
-) filter_mod.EvalError!Value {
-    const agg_ctx = GroupAggregateContext{
-        .ctx = ctx,
-        .group_runtime = group_runtime,
-        .row_index = row_index,
-    };
-    const resolver = filter_mod.AggregateResolver{
-        .ctx = &agg_ctx,
-        .resolve = resolveGroupedAggregate,
-    };
-    return filter_mod.evaluateExpressionFull(
-        ctx.ast,
-        ctx.tokens,
-        ctx.source,
-        expr,
-        row_values,
-        schema,
-        &resolver,
-        eval_ctx,
-    );
-}
-
-fn resolveGroupedAggregate(
-    raw_ctx: *const anyopaque,
-    node_index: NodeIndex,
-    row_values: []const Value,
-    schema: *const RowSchema,
-) filter_mod.EvalError!Value {
-    _ = row_values;
-    _ = schema;
-
-    const agg_ctx: *const GroupAggregateContext = @ptrCast(@alignCast(raw_ctx));
-    if (!agg_ctx.group_runtime.active) return error.UnknownFunction;
-
-    const node = agg_ctx.ctx.ast.getNode(node_index);
-    if (node.tag != .expr_aggregate) return error.UnknownFunction;
-    const token_type = agg_ctx.ctx.tokens.tokens[node.extra].token_type;
-    if (token_type == .agg_count) {
-        if (node.data.unary != null_node) return error.UnknownFunction;
-        const count = agg_ctx.group_runtime.group_counts[agg_ctx.row_index];
-        return .{ .i64 = @intCast(count) };
-    }
-
-    if (node_index >= agg_ctx.group_runtime.aggregate_slot_by_node.len) {
-        return error.UnknownFunction;
-    }
-    const slot = agg_ctx.group_runtime.aggregate_slot_by_node[node_index];
-    if (slot == invalid_aggregate_slot) return error.UnknownFunction;
-
-    const descriptor = agg_ctx.group_runtime.aggregate_descriptors[slot];
-    const state = agg_ctx.group_runtime.aggregate_states[slot][agg_ctx.row_index];
-    return switch (descriptor.kind) {
-        .count_star => return error.UnknownFunction,
-        .sum => if (state.value_type) |ty| switch (ty) {
-            .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64 => .{ .i64 = state.sum_bigint },
-            .f64 => .{ .f64 = state.sum_float },
-            else => return error.TypeMismatch,
-        } else .{ .null_value = {} },
-        .avg => blk: {
-            if (state.value_count == 0) break :blk .{ .null_value = {} };
-            const divisor = @as(f64, @floatFromInt(state.value_count));
-            break :blk .{ .f64 = state.sum_float / divisor };
-        },
-        .min => if (state.has_min) state.min_value else .{ .null_value = {} },
-        .max => if (state.has_max) state.max_value else .{ .null_value = {} },
-    };
-}
 
 fn numericToRowCount(value: Value) ?u16 {
     return switch (value) {
@@ -2005,170 +863,6 @@ fn numericToRowCount(value: Value) ?u16 {
         .u64 => |v| @intCast(@min(v, scan_mod.max_result_rows)),
         else => null,
     };
-}
-
-const JoinDescriptor = struct {
-    left_key_index: u16,
-    right_key_index: u16,
-};
-
-fn executeInnerJoinBounded(
-    result: *QueryResult,
-    left_rows: []const ResultRow,
-    right_rows: []const ResultRow,
-    join: JoinDescriptor,
-    caps: *const capacity_mod.OperatorCapacities,
-) bool {
-    if (left_rows.len > caps.join_build_rows) {
-        setError(result, "join build row capacity exceeded");
-        return false;
-    }
-    const state_bytes = left_rows.len * (@sizeOf(Value) + @sizeOf(u16));
-    if (state_bytes > caps.join_state_bytes) {
-        setError(result, "join state capacity exceeded");
-        return false;
-    }
-    if (left_rows.len > 0 and
-        join.left_key_index >= left_rows[0].column_count)
-    {
-        setError(result, "join key out of bounds");
-        return false;
-    }
-    if (right_rows.len > 0 and
-        join.right_key_index >= right_rows[0].column_count)
-    {
-        setError(result, "join key out of bounds");
-        return false;
-    }
-
-    result.row_count = 0;
-    for (left_rows) |left_row| {
-        const left_key = left_row.values[join.left_key_index];
-        for (right_rows) |right_row| {
-            if (compareValues(left_key, right_row.values[join.right_key_index]) !=
-                .eq) continue;
-            const total_columns = @as(usize, left_row.column_count) +
-                @as(usize, right_row.column_count);
-            if (total_columns > scan_mod.max_columns) {
-                setError(result, "join column capacity exceeded");
-                return false;
-            }
-            if (@as(usize, result.row_count) >= caps.join_output_rows) {
-                setError(result, "join output row capacity exceeded");
-                return false;
-            }
-
-            var out = ResultRow.init();
-            out.column_count = @intCast(total_columns);
-            out.row_id = left_row.row_id;
-            @memcpy(
-                out.values[0..left_row.column_count],
-                left_row.values[0..left_row.column_count],
-            );
-            @memcpy(
-                out.values[left_row.column_count..out.column_count],
-                right_row.values[0..right_row.column_count],
-            );
-            result.rows[result.row_count] = out;
-            result.row_count += 1;
-        }
-    }
-    return true;
-}
-
-fn executeLeftJoinBounded(
-    result: *QueryResult,
-    left_rows: []const ResultRow,
-    right_rows: []const ResultRow,
-    join: JoinDescriptor,
-    right_column_count: u16,
-    caps: *const capacity_mod.OperatorCapacities,
-) bool {
-    if (left_rows.len > caps.join_build_rows) {
-        setError(result, "join build row capacity exceeded");
-        return false;
-    }
-    const state_bytes = left_rows.len * (@sizeOf(Value) + @sizeOf(u16));
-    if (state_bytes > caps.join_state_bytes) {
-        setError(result, "join state capacity exceeded");
-        return false;
-    }
-    if (left_rows.len > 0 and
-        join.left_key_index >= left_rows[0].column_count)
-    {
-        setError(result, "join key out of bounds");
-        return false;
-    }
-    if (right_rows.len > 0 and
-        join.right_key_index >= right_rows[0].column_count)
-    {
-        setError(result, "join key out of bounds");
-        return false;
-    }
-
-    result.row_count = 0;
-    for (left_rows) |left_row| {
-        var matched = false;
-        const total_columns_with_right = @as(usize, left_row.column_count) +
-            @as(usize, right_column_count);
-        if (total_columns_with_right > scan_mod.max_columns) {
-            setError(result, "join column capacity exceeded");
-            return false;
-        }
-
-        const left_key = left_row.values[join.left_key_index];
-        for (right_rows) |right_row| {
-            if (compareValues(left_key, right_row.values[join.right_key_index]) !=
-                .eq) continue;
-            matched = true;
-            const total_columns = @as(usize, left_row.column_count) +
-                @as(usize, right_row.column_count);
-            if (total_columns > scan_mod.max_columns) {
-                setError(result, "join column capacity exceeded");
-                return false;
-            }
-            if (@as(usize, result.row_count) >= caps.join_output_rows) {
-                setError(result, "join output row capacity exceeded");
-                return false;
-            }
-
-            var out = ResultRow.init();
-            out.column_count = @intCast(total_columns);
-            out.row_id = left_row.row_id;
-            @memcpy(
-                out.values[0..left_row.column_count],
-                left_row.values[0..left_row.column_count],
-            );
-            @memcpy(
-                out.values[left_row.column_count..out.column_count],
-                right_row.values[0..right_row.column_count],
-            );
-            result.rows[result.row_count] = out;
-            result.row_count += 1;
-        }
-
-        if (!matched) {
-            if (@as(usize, result.row_count) >= caps.join_output_rows) {
-                setError(result, "join output row capacity exceeded");
-                return false;
-            }
-
-            var out = ResultRow.init();
-            out.column_count = @intCast(total_columns_with_right);
-            out.row_id = left_row.row_id;
-            @memcpy(
-                out.values[0..left_row.column_count],
-                left_row.values[0..left_row.column_count],
-            );
-            var right_idx: u16 = 0;
-            while (right_idx < right_column_count) : (right_idx += 1) {
-                out.values[left_row.column_count + right_idx] = .{ .null_value = {} };
-            }
-            result.rows[result.row_count] = out;
-            result.row_count += 1;
-        }
-    }
-    return true;
 }
 
 /// Execute a mutation pipeline (insert, update, or delete).
@@ -2603,7 +1297,7 @@ fn findPredicate(
     return null_node;
 }
 
-fn setError(result: *QueryResult, msg: []const u8) void {
+pub fn setError(result: *QueryResult, msg: []const u8) void {
     result.has_error = true;
     @memset(&result.error_message, 0);
     const copy_len = @min(msg.len, result.error_message.len);
@@ -3700,7 +2394,7 @@ test "bounded inner join preserves deterministic left-major ordering" {
     var result = QueryResult.init(result_rows[0..]);
     defer result.deinit();
     const caps = capacity_mod.OperatorCapacities.defaults();
-    const ok = executeInnerJoinBounded(
+    const ok = joins_mod.executeInnerJoinBounded(
         &result,
         left[0..],
         right[0..],
@@ -3742,7 +2436,7 @@ test "bounded inner join enforces build row capacity contract" {
     defer result.deinit();
     var caps = capacity_mod.OperatorCapacities.defaults();
     caps.join_build_rows = 1;
-    const ok = executeInnerJoinBounded(
+    const ok = joins_mod.executeInnerJoinBounded(
         &result,
         left[0..],
         right[0..],
@@ -3771,7 +2465,7 @@ test "bounded inner join enforces output row capacity contract" {
     defer result.deinit();
     var caps = capacity_mod.OperatorCapacities.defaults();
     caps.join_output_rows = 3;
-    const ok = executeInnerJoinBounded(
+    const ok = joins_mod.executeInnerJoinBounded(
         &result,
         left[0..],
         right[0..],
@@ -3799,7 +2493,7 @@ test "bounded inner join enforces state byte capacity contract" {
     defer result.deinit();
     var caps = capacity_mod.OperatorCapacities.defaults();
     caps.join_state_bytes = @sizeOf(Value);
-    const ok = executeInnerJoinBounded(
+    const ok = joins_mod.executeInnerJoinBounded(
         &result,
         left[0..],
         right[0..],
