@@ -217,12 +217,19 @@ pub const ExecContext = struct {
     string_arena_bytes: []u8,
 };
 
+const max_now_call_sites = 32;
+
+const NowCacheEntry = struct {
+    token_index: u16 = 0,
+    value: i64 = 0,
+};
+
 const StatementNowCache = struct {
     source: ?NowSource,
     fallback_timestamp_micros: ?i64,
     high_water_micros: ?i64 = null,
-    resolved: [max_tokens]bool = [_]bool{false} ** max_tokens,
-    values: [max_tokens]i64 = [_]i64{0} ** max_tokens,
+    entries: [max_now_call_sites]NowCacheEntry = [_]NowCacheEntry{.{}} ** max_now_call_sites,
+    count: u16 = 0,
 };
 
 /// Operator kind extracted from the AST.
@@ -412,10 +419,14 @@ fn resolveStatementNowMicros(
     raw_ctx: *anyopaque,
     token_index: u16,
 ) filter_mod.EvalError!i64 {
-    if (token_index >= max_tokens) return error.TypeMismatch;
     const cache: *StatementNowCache = @ptrCast(@alignCast(raw_ctx));
-    if (cache.resolved[token_index]) return cache.values[token_index];
 
+    // Check if this call site was already resolved.
+    for (cache.entries[0..cache.count]) |entry| {
+        if (entry.token_index == token_index) return entry.value;
+    }
+
+    // Resolve a fresh timestamp for this call site.
     var candidate = if (cache.source) |source|
         source.next_micros(source.ctx)
     else
@@ -424,8 +435,9 @@ fn resolveStatementNowMicros(
         if (candidate <= last) candidate = last + 1;
     }
 
-    cache.resolved[token_index] = true;
-    cache.values[token_index] = candidate;
+    if (cache.count >= max_now_call_sites) return error.TypeMismatch;
+    cache.entries[cache.count] = .{ .token_index = token_index, .value = candidate };
+    cache.count += 1;
     cache.high_water_micros = candidate;
     return candidate;
 }
