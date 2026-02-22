@@ -20,6 +20,27 @@ User |> where(id == 123) |> delete {}
 User |> where(active == true) |> count() { count }
 ```
 
+Last statement is the return
+
+## Allow for arbitrary return
+Examples:
+
+```pg2
+1 + 1 // equivalent SQL `SELECT 1 + 1`
+```
+
+```pg2
+let sum = User |> count()
+sum // return e.g. int 10
+```
+
+```pg2
+{
+  total_users: User |> count()
+  posts: User { id post_count: posts |> count() }
+} // returns {total_users: 123, posts: [{id: 1, post_count: 10}, {id: 2, post_count: 3}] }
+```
+
 ## Scope Boundaries
 - In scope:
   - `let` for scalar values and rowset-derived single-column lists (for `in` usage).

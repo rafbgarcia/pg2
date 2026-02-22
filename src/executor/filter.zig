@@ -32,6 +32,7 @@ pub const EvalError = error{
     TypeMismatch,
     DivisionByZero,
     NumericOverflow,
+    NumericDomain,
     NullArithmeticOperand,
     ColumnNotFound,
     InvalidLiteral,
@@ -970,7 +971,7 @@ pub fn applyBuiltinFunction(
 ) EvalError!Value {
     return switch (fn_type) {
         .fn_abs => blk: {
-            if (args.len < 1) return error.TypeMismatch;
+            if (args.len != 1) return error.TypeMismatch;
             const v = args[0];
             if (v == .null_value) break :blk Value{ .null_value = {} };
             if (v == .i8) {
@@ -998,34 +999,36 @@ pub fn applyBuiltinFunction(
             return error.TypeMismatch;
         },
         .fn_sqrt => blk: {
-            if (args.len < 1) return error.TypeMismatch;
+            if (args.len != 1) return error.TypeMismatch;
             const v = args[0];
             if (v == .null_value) break :blk Value{ .null_value = {} };
             const f = toFloat(v) orelse return error.TypeMismatch;
+            if (f < 0) return error.NumericDomain;
             break :blk Value{ .f64 = @sqrt(f) };
         },
         .fn_round => blk: {
-            if (args.len < 1) return error.TypeMismatch;
+            if (args.len != 1) return error.TypeMismatch;
             const v = args[0];
             if (v == .null_value) break :blk Value{ .null_value = {} };
             const f = toFloat(v) orelse return error.TypeMismatch;
-            break :blk Value{ .f64 = @round(f) };
+            break :blk Value{ .f64 = roundToNearestEven(f) };
         },
         .fn_length => blk: {
-            if (args.len < 1) return error.TypeMismatch;
+            if (args.len != 1) return error.TypeMismatch;
             const v = args[0];
             if (v == .null_value) break :blk Value{ .null_value = {} };
             if (v != .string) return error.TypeMismatch;
             break :blk Value{ .i64 = @intCast(v.string.len) };
         },
         .fn_coalesce => blk: {
+            if (args.len == 0) return error.TypeMismatch;
             for (args) |arg| {
                 if (arg != .null_value) break :blk arg;
             }
             break :blk Value{ .null_value = {} };
         },
         .fn_lower => blk: {
-            if (args.len < 1) return error.TypeMismatch;
+            if (args.len != 1) return error.TypeMismatch;
             const v = args[0];
             if (v == .null_value) break :blk Value{ .null_value = {} };
             if (v != .string) return error.TypeMismatch;
@@ -1035,7 +1038,7 @@ pub fn applyBuiltinFunction(
             };
         },
         .fn_upper => blk: {
-            if (args.len < 1) return error.TypeMismatch;
+            if (args.len != 1) return error.TypeMismatch;
             const v = args[0];
             if (v == .null_value) break :blk Value{ .null_value = {} };
             if (v != .string) return error.TypeMismatch;
@@ -1120,6 +1123,18 @@ fn trimAsciiSpaces(
 
     if (start == 0 and end == input.len) return input;
     return copyToArena(input[start..end], string_arena);
+}
+
+fn roundToNearestEven(v: f64) f64 {
+    if (!std.math.isFinite(v)) return v;
+    const lower = @floor(v);
+    const delta = v - lower;
+    if (delta < 0.5) return lower;
+    if (delta > 0.5) return lower + 1.0;
+
+    const lower_mod_two = @rem(lower, 2.0);
+    if (lower_mod_two == 0.0) return lower;
+    return lower + 1.0;
 }
 
 // --- Tests ---
@@ -1418,11 +1433,30 @@ test "function call — sqrt" {
     try testing.expectEqual(@as(f64, 3.0), result.f64);
 }
 
+test "function call — sqrt fails closed on negative input" {
+    const result = applyBuiltinFunction(.fn_sqrt, &[_]Value{
+        .{ .f64 = -1.0 },
+    }, null);
+    try testing.expectError(error.NumericDomain, result);
+}
+
 test "function call — length" {
     const result = try applyBuiltinFunction(.fn_length, &[_]Value{
         .{ .string = "hello" },
     }, null);
     try testing.expectEqual(@as(i64, 5), result.i64);
+}
+
+test "function call — round applies nearest-even tie handling" {
+    const positive_tie = try applyBuiltinFunction(.fn_round, &[_]Value{
+        .{ .f64 = 2.5 },
+    }, null);
+    try testing.expectEqual(@as(f64, 2.0), positive_tie.f64);
+
+    const negative_tie = try applyBuiltinFunction(.fn_round, &[_]Value{
+        .{ .f64 = -2.5 },
+    }, null);
+    try testing.expectEqual(@as(f64, -2.0), negative_tie.f64);
 }
 
 test "function call — coalesce" {
@@ -1431,6 +1465,43 @@ test "function call — coalesce" {
         .{ .i64 = 42 },
     }, null);
     try testing.expectEqual(@as(i64, 42), result.i64);
+}
+
+test "function call — abs fails closed on arity mismatch" {
+    const result = applyBuiltinFunction(.fn_abs, &[_]Value{
+        .{ .i64 = 1 },
+        .{ .i64 = 2 },
+    }, null);
+    try testing.expectError(error.TypeMismatch, result);
+}
+
+test "function call — sqrt fails closed on arity mismatch" {
+    const result = applyBuiltinFunction(.fn_sqrt, &[_]Value{
+        .{ .i64 = 9 },
+        .{ .i64 = 1 },
+    }, null);
+    try testing.expectError(error.TypeMismatch, result);
+}
+
+test "function call — round fails closed on arity mismatch" {
+    const result = applyBuiltinFunction(.fn_round, &[_]Value{
+        .{ .f64 = 1.5 },
+        .{ .f64 = 2.0 },
+    }, null);
+    try testing.expectError(error.TypeMismatch, result);
+}
+
+test "function call — length fails closed on arity mismatch" {
+    const result = applyBuiltinFunction(.fn_length, &[_]Value{
+        .{ .string = "x" },
+        .{ .string = "y" },
+    }, null);
+    try testing.expectError(error.TypeMismatch, result);
+}
+
+test "function call — coalesce fails closed on empty args" {
+    const result = applyBuiltinFunction(.fn_coalesce, &[_]Value{}, null);
+    try testing.expectError(error.TypeMismatch, result);
 }
 
 test "function call — lower applies ASCII-only folding" {
@@ -1470,6 +1541,30 @@ test "function call — trim removes ASCII spaces only" {
         &arena,
     );
     try testing.expectEqualStrings("hello\t", result.string);
+}
+
+test "function call — lower fails closed on arity mismatch" {
+    const result = applyBuiltinFunction(.fn_lower, &[_]Value{
+        .{ .string = "x" },
+        .{ .string = "y" },
+    }, null);
+    try testing.expectError(error.TypeMismatch, result);
+}
+
+test "function call — upper fails closed on arity mismatch" {
+    const result = applyBuiltinFunction(.fn_upper, &[_]Value{
+        .{ .string = "x" },
+        .{ .string = "y" },
+    }, null);
+    try testing.expectError(error.TypeMismatch, result);
+}
+
+test "function call — trim fails closed on arity mismatch" {
+    const result = applyBuiltinFunction(.fn_trim, &[_]Value{
+        .{ .string = "x" },
+        .{ .string = "y" },
+    }, null);
+    try testing.expectError(error.TypeMismatch, result);
 }
 
 test "membership function returns true for contained value" {

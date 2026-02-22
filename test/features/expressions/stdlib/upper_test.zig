@@ -41,6 +41,20 @@ test "feature upper applies ASCII-only case folding and leaves non-ASCII unchang
         "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1\n",
         result,
     );
+
+    _ = try executor.run(
+        "LabelUpper |> insert(id = 2, raw = \"beta\", uppered = \"\") {}",
+    );
+    _ = try executor.run(
+        "LabelUpper |> insert(id = 3, raw = \"Alpha\", uppered = \"\") {}",
+    );
+    result = try executor.run(
+        "LabelUpper |> sort(upper(raw) asc, id asc) { id }",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=3 inserted_rows=0 updated_rows=0 deleted_rows=0\n3\n2\n1\n",
+        result,
+    );
 }
 
 test "feature upper fails closed on non-string input" {
@@ -59,6 +73,29 @@ test "feature upper fails closed on non-string input" {
     _ = try executor.run("UpperMismatch |> insert(id = 1, v = \"x\") {}");
     const result = try executor.run(
         "UpperMismatch |> where(id == 1) |> update(v = upper(1)) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "ERR query: update failed; class=fatal; code=TypeMismatch\n",
+        result,
+    );
+}
+
+test "feature upper fails closed on invalid arity" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\UpperArity {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(v, string, notNull)
+        \\}
+    );
+
+    _ = try executor.run("UpperArity |> insert(id = 1, v = \"x\") {}");
+    const result = try executor.run(
+        "UpperArity |> where(id == 1) |> update(v = upper(v, \"y\")) {}",
     );
     try std.testing.expectEqualStrings(
         "ERR query: update failed; class=fatal; code=TypeMismatch\n",
