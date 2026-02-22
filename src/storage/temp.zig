@@ -313,7 +313,6 @@ pub const TempStorageManager = struct {
         next_page_id: u64,
     ) (TempAllocatorError || TempPageError || TempStorageError)!u64 {
         const page_id = try self.allocator.allocate();
-        self.stats.temp_pages_allocated += 1;
 
         var page = Page.init(page_id, .temp);
         TempPage.init(&page);
@@ -322,6 +321,7 @@ pub const TempStorageManager = struct {
         var raw: [page_size]u8 = undefined;
         page.serialize(&raw);
         self.storage.write(page_id, &raw) catch return error.WriteError;
+        self.stats.temp_pages_allocated += 1;
         self.stats.temp_bytes_written += page_size;
         return page_id;
     }
@@ -390,6 +390,32 @@ test "temp page write/read chunk roundtrip" {
     const chunk = try TempPage.readChunk(&page);
     try std.testing.expectEqualSlices(u8, payload, chunk.payload);
     try std.testing.expectEqual(@as(u64, 42), chunk.next_page_id);
+}
+
+test "temp page write/read at exact max payload boundary" {
+    var page = Page.init(10, .free);
+    TempPage.init(&page);
+
+    // Fill page to exact capacity — this is what production sort spills do.
+    var max_payload: [TempPage.max_payload_len()]u8 = undefined;
+    for (&max_payload, 0..) |*b, i| {
+        b.* = @truncate(i);
+    }
+    try TempPage.writeChunk(&page, max_payload[0..], 99);
+    const chunk = try TempPage.readChunk(&page);
+    try std.testing.expectEqualSlices(u8, max_payload[0..], chunk.payload);
+    try std.testing.expectEqual(@as(u64, 99), chunk.next_page_id);
+}
+
+test "temp page write/read with empty payload" {
+    var page = Page.init(11, .free);
+    TempPage.init(&page);
+
+    // Zero-length payload — valid for sentinel/terminator pages in a chain.
+    try TempPage.writeChunk(&page, &.{}, 77);
+    const chunk = try TempPage.readChunk(&page);
+    try std.testing.expectEqual(@as(usize, 0), chunk.payload.len);
+    try std.testing.expectEqual(@as(u64, 77), chunk.next_page_id);
 }
 
 test "temp page write rejects payload bigger than page capacity" {
@@ -551,8 +577,8 @@ test "temp storage manager survives write fault" {
     const result = mgr.allocateAndWrite("data", TempPage.null_page_id);
     try std.testing.expectError(error.WriteError, result);
 
-    // Allocator consumed a page ID, but no successful write occurred.
-    try std.testing.expectEqual(@as(u32, 1), mgr.snapshotStats().temp_pages_allocated);
+    // Stats only count successful writes — failed write increments neither counter.
+    try std.testing.expectEqual(@as(u32, 0), mgr.snapshotStats().temp_pages_allocated);
     try std.testing.expectEqual(@as(u64, 0), mgr.snapshotStats().temp_bytes_written);
 }
 
@@ -573,4 +599,34 @@ test "temp storage manager survives read fault" {
     try std.testing.expectEqual(@as(u64, page_size), mgr.snapshotStats().temp_bytes_written);
     // Read stats: no successful read counted.
     try std.testing.expectEqual(@as(u64, 0), mgr.snapshotStats().temp_bytes_read);
+}
+
+test "temp storage manager recovers after write fault" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var mgr = try TempStorageManager.init(0, disk.storage(), 16, 11_000);
+
+    // First write succeeds.
+    const id1 = try mgr.allocateAndWrite("before-fault", TempPage.null_page_id);
+
+    // Second write fails — one-shot fault.
+    disk.failWriteAt(disk.writes + 1);
+    const failed = mgr.allocateAndWrite("fault", TempPage.null_page_id);
+    try std.testing.expectError(error.WriteError, failed);
+
+    // Third write should succeed. The allocator skipped a page ID (gap from
+    // the failed attempt), but the manager is otherwise healthy.
+    const id3 = try mgr.allocateAndWrite("after-fault", TempPage.null_page_id);
+
+    // Verify both successful pages are readable with correct payloads.
+    const r1 = try mgr.readPage(id1);
+    try std.testing.expectEqualSlices(u8, "before-fault", r1.payload);
+    const r3 = try mgr.readPage(id3);
+    try std.testing.expectEqualSlices(u8, "after-fault", r3.payload);
+
+    // Stats: 2 successful allocations (fault page not counted).
+    try std.testing.expectEqual(@as(u32, 2), mgr.snapshotStats().temp_pages_allocated);
+    try std.testing.expectEqual(@as(u64, 2 * page_size), mgr.snapshotStats().temp_bytes_written);
 }
