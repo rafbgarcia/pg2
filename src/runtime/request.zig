@@ -54,6 +54,7 @@ fn makeExecContext(
         .ast = request.ast,
         .tokens = request.tokens,
         .source = request.source,
+        .statement_timestamp_micros = @intCast(@max(@as(i64, 0), std.time.microTimestamp())),
         .parameter_bindings = request.parameter_bindings,
         .allocator = runtime.static_allocator.allocator(),
         .result_rows = request.pool_conn.query_buffers.result_rows,

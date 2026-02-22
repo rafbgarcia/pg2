@@ -39,6 +39,7 @@ pub const EvalError = error{
     UnknownFunction,
     NullInPredicate,
     UndefinedParameter,
+    ClockUnavailable,
 };
 
 pub const AggregateResolver = struct {
@@ -157,6 +158,32 @@ pub fn evaluateExpressionWithResolversAndArena(
     parameter_resolver: ?*const ParameterResolver,
     string_arena: ?*scan_mod.StringArena,
 ) EvalError!Value {
+    return evaluateExpressionWithResolversArenaAndTimestamp(
+        tree,
+        tokens,
+        source,
+        node_index,
+        row_values,
+        schema,
+        aggregate_resolver,
+        parameter_resolver,
+        string_arena,
+        null,
+    );
+}
+
+pub fn evaluateExpressionWithResolversArenaAndTimestamp(
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    node_index: NodeIndex,
+    row_values: []const Value,
+    schema: *const RowSchema,
+    aggregate_resolver: ?*const AggregateResolver,
+    parameter_resolver: ?*const ParameterResolver,
+    string_arena: ?*scan_mod.StringArena,
+    statement_timestamp_micros: ?i64,
+) EvalError!Value {
     var eval_stack: [max_eval_stack]Value = undefined;
     var eval_count: u16 = 0;
     var work_stack: [max_work_stack]WorkItem = undefined;
@@ -227,6 +254,7 @@ pub fn evaluateExpressionWithResolversAndArena(
                     fn_type,
                     args[0..count],
                     string_arena,
+                    statement_timestamp_micros,
                 );
                 try evalPush(&eval_stack, &eval_count, result);
             },
@@ -343,7 +371,7 @@ pub fn evaluatePredicateWithResolversAndArena(
     parameter_resolver: ?*const ParameterResolver,
     string_arena: ?*scan_mod.StringArena,
 ) EvalError!bool {
-    const val = try evaluateExpressionWithResolversAndArena(
+    return evaluatePredicateWithResolversArenaAndTimestamp(
         tree,
         tokens,
         source,
@@ -353,6 +381,33 @@ pub fn evaluatePredicateWithResolversAndArena(
         aggregate_resolver,
         parameter_resolver,
         string_arena,
+        null,
+    );
+}
+
+pub fn evaluatePredicateWithResolversArenaAndTimestamp(
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    node_index: NodeIndex,
+    row_values: []const Value,
+    schema: *const RowSchema,
+    aggregate_resolver: ?*const AggregateResolver,
+    parameter_resolver: ?*const ParameterResolver,
+    string_arena: ?*scan_mod.StringArena,
+    statement_timestamp_micros: ?i64,
+) EvalError!bool {
+    const val = try evaluateExpressionWithResolversArenaAndTimestamp(
+        tree,
+        tokens,
+        source,
+        node_index,
+        row_values,
+        schema,
+        aggregate_resolver,
+        parameter_resolver,
+        string_arena,
+        statement_timestamp_micros,
     );
     if (val == .null_value) return error.NullInPredicate;
     if (val != .bool) return error.TypeMismatch;
@@ -968,6 +1023,7 @@ pub fn applyBuiltinFunction(
     fn_type: TokenType,
     args: []const Value,
     string_arena: ?*scan_mod.StringArena,
+    statement_timestamp_micros: ?i64,
 ) EvalError!Value {
     return switch (fn_type) {
         .fn_abs => blk: {
@@ -1057,7 +1113,11 @@ pub fn applyBuiltinFunction(
                 .string = try trimAsciiSpaces(v.string, string_arena),
             };
         },
-        .fn_now => Value{ .timestamp = 0 },
+        .fn_now => blk: {
+            if (args.len != 0) return error.TypeMismatch;
+            const ts = statement_timestamp_micros orelse return error.ClockUnavailable;
+            break :blk Value{ .timestamp = ts };
+        },
         else => error.UnknownFunction,
     };
 }
@@ -1422,40 +1482,40 @@ test "parameter reference fails closed when binding is undefined" {
 test "function call — abs" {
     const result = try applyBuiltinFunction(.fn_abs, &[_]Value{
         .{ .i64 = -5 },
-    }, null);
+    }, null, null);
     try testing.expectEqual(@as(i64, 5), result.i64);
 }
 
 test "function call — sqrt" {
     const result = try applyBuiltinFunction(.fn_sqrt, &[_]Value{
         .{ .f64 = 9.0 },
-    }, null);
+    }, null, null);
     try testing.expectEqual(@as(f64, 3.0), result.f64);
 }
 
 test "function call — sqrt fails closed on negative input" {
     const result = applyBuiltinFunction(.fn_sqrt, &[_]Value{
         .{ .f64 = -1.0 },
-    }, null);
+    }, null, null);
     try testing.expectError(error.NumericDomain, result);
 }
 
 test "function call — length" {
     const result = try applyBuiltinFunction(.fn_length, &[_]Value{
         .{ .string = "hello" },
-    }, null);
+    }, null, null);
     try testing.expectEqual(@as(i64, 5), result.i64);
 }
 
 test "function call — round applies nearest-even tie handling" {
     const positive_tie = try applyBuiltinFunction(.fn_round, &[_]Value{
         .{ .f64 = 2.5 },
-    }, null);
+    }, null, null);
     try testing.expectEqual(@as(f64, 2.0), positive_tie.f64);
 
     const negative_tie = try applyBuiltinFunction(.fn_round, &[_]Value{
         .{ .f64 = -2.5 },
-    }, null);
+    }, null, null);
     try testing.expectEqual(@as(f64, -2.0), negative_tie.f64);
 }
 
@@ -1463,7 +1523,7 @@ test "function call — coalesce" {
     const result = try applyBuiltinFunction(.fn_coalesce, &[_]Value{
         .{ .null_value = {} },
         .{ .i64 = 42 },
-    }, null);
+    }, null, null);
     try testing.expectEqual(@as(i64, 42), result.i64);
 }
 
@@ -1471,7 +1531,7 @@ test "function call — abs fails closed on arity mismatch" {
     const result = applyBuiltinFunction(.fn_abs, &[_]Value{
         .{ .i64 = 1 },
         .{ .i64 = 2 },
-    }, null);
+    }, null, null);
     try testing.expectError(error.TypeMismatch, result);
 }
 
@@ -1479,7 +1539,7 @@ test "function call — sqrt fails closed on arity mismatch" {
     const result = applyBuiltinFunction(.fn_sqrt, &[_]Value{
         .{ .i64 = 9 },
         .{ .i64 = 1 },
-    }, null);
+    }, null, null);
     try testing.expectError(error.TypeMismatch, result);
 }
 
@@ -1487,7 +1547,7 @@ test "function call — round fails closed on arity mismatch" {
     const result = applyBuiltinFunction(.fn_round, &[_]Value{
         .{ .f64 = 1.5 },
         .{ .f64 = 2.0 },
-    }, null);
+    }, null, null);
     try testing.expectError(error.TypeMismatch, result);
 }
 
@@ -1495,12 +1555,28 @@ test "function call — length fails closed on arity mismatch" {
     const result = applyBuiltinFunction(.fn_length, &[_]Value{
         .{ .string = "x" },
         .{ .string = "y" },
-    }, null);
+    }, null, null);
     try testing.expectError(error.TypeMismatch, result);
 }
 
 test "function call — coalesce fails closed on empty args" {
-    const result = applyBuiltinFunction(.fn_coalesce, &[_]Value{}, null);
+    const result = applyBuiltinFunction(.fn_coalesce, &[_]Value{}, null, null);
+    try testing.expectError(error.TypeMismatch, result);
+}
+
+test "function call — now returns injected microsecond timestamp" {
+    const result = try applyBuiltinFunction(.fn_now, &[_]Value{}, null, 1700000000123456);
+    try testing.expect(result == .timestamp);
+    try testing.expectEqual(@as(i64, 1700000000123456), result.timestamp);
+}
+
+test "function call — now fails closed without injected timestamp" {
+    const result = applyBuiltinFunction(.fn_now, &[_]Value{}, null, null);
+    try testing.expectError(error.ClockUnavailable, result);
+}
+
+test "function call — now fails closed on arity mismatch" {
+    const result = applyBuiltinFunction(.fn_now, &[_]Value{.{ .i64 = 1 }}, null, 1700000000123456);
     try testing.expectError(error.TypeMismatch, result);
 }
 
@@ -1511,6 +1587,7 @@ test "function call — lower applies ASCII-only folding" {
         .fn_lower,
         &[_]Value{.{ .string = "HELLO \xC3\x84\xC3\x96\xC3\x9C" }},
         &arena,
+        null,
     );
     try testing.expectEqualStrings(
         "hello \xC3\x84\xC3\x96\xC3\x9C",
@@ -1525,6 +1602,7 @@ test "function call — upper applies ASCII-only folding" {
         .fn_upper,
         &[_]Value{.{ .string = "hello \xC3\xA4\xC3\xB6\xC3\xBC" }},
         &arena,
+        null,
     );
     try testing.expectEqualStrings(
         "HELLO \xC3\xA4\xC3\xB6\xC3\xBC",
@@ -1539,6 +1617,7 @@ test "function call — trim removes ASCII spaces only" {
         .fn_trim,
         &[_]Value{.{ .string = "  hello\t " }},
         &arena,
+        null,
     );
     try testing.expectEqualStrings("hello\t", result.string);
 }
@@ -1547,7 +1626,7 @@ test "function call — lower fails closed on arity mismatch" {
     const result = applyBuiltinFunction(.fn_lower, &[_]Value{
         .{ .string = "x" },
         .{ .string = "y" },
-    }, null);
+    }, null, null);
     try testing.expectError(error.TypeMismatch, result);
 }
 
@@ -1555,7 +1634,7 @@ test "function call — upper fails closed on arity mismatch" {
     const result = applyBuiltinFunction(.fn_upper, &[_]Value{
         .{ .string = "x" },
         .{ .string = "y" },
-    }, null);
+    }, null, null);
     try testing.expectError(error.TypeMismatch, result);
 }
 
@@ -1563,7 +1642,7 @@ test "function call — trim fails closed on arity mismatch" {
     const result = applyBuiltinFunction(.fn_trim, &[_]Value{
         .{ .string = "x" },
         .{ .string = "y" },
-    }, null);
+    }, null, null);
     try testing.expectError(error.TypeMismatch, result);
 }
 
@@ -1843,7 +1922,7 @@ test "unary minus rejects values below signed i64 minimum" {
 test "abs overflow returns error" {
     const result = applyBuiltinFunction(.fn_abs, &[_]Value{
         .{ .i64 = std.math.minInt(i64) },
-    }, null);
+    }, null, null);
     try testing.expectError(error.NumericOverflow, result);
 }
 

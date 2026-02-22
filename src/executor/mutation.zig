@@ -83,6 +83,7 @@ pub const MutationError = error{
     UnknownFunction,
     NullInPredicate,
     UndefinedParameter,
+    ClockUnavailable,
     ResultOverflow,
     ReturningBufferExhausted,
     OverflowRegionExhausted,
@@ -224,6 +225,7 @@ pub fn executeInsertWithDiagnostic(
         first_assignment_node,
         &.{},
         diagnostic,
+        null,
     );
 }
 
@@ -239,6 +241,7 @@ pub fn executeInsertWithDiagnosticAndParameters(
     first_assignment_node: NodeIndex,
     parameter_bindings: []const ParameterBinding,
     diagnostic: ?*MutationDiagnostic,
+    statement_timestamp_micros: ?i64,
 ) MutationError!RowId {
     std.debug.assert(model_id < catalog.model_count);
     const model = &catalog.models[model_id];
@@ -262,6 +265,7 @@ pub fn executeInsertWithDiagnosticAndParameters(
         &assigned_columns,
         diagnostic,
         &string_arena,
+        statement_timestamp_micros,
     );
     applyColumnDefaultsForInsert(
         catalog,
@@ -407,6 +411,7 @@ pub fn executeUpdate(
         &.{},
         null,
         null,
+        null,
     );
 }
 
@@ -445,6 +450,7 @@ pub fn executeUpdateWithDiagnostic(
         &.{},
         null,
         diagnostic,
+        null,
     );
 }
 
@@ -485,6 +491,7 @@ pub fn executeUpdateWithDiagnosticAndReturning(
         parameter_bindings,
         returning_capture,
         diagnostic,
+        null,
     );
 }
 
@@ -506,6 +513,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
     parameter_bindings: []const ParameterBinding,
     returning_capture: ?*ReturningCapture,
     diagnostic: ?*MutationDiagnostic,
+    statement_timestamp_micros: ?i64,
 ) MutationError!u32 {
     std.debug.assert(model_id < catalog.model_count);
     const model = &catalog.models[model_id];
@@ -559,7 +567,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                     .ctx = &parameter_ctx,
                     .resolve = resolveParameterBinding,
                 };
-                const matches = filter_mod.evaluatePredicateWithResolversAndArena(
+                const matches = filter_mod.evaluatePredicateWithResolversArenaAndTimestamp(
                     tree,
                     tokens,
                     source,
@@ -569,6 +577,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                     null,
                     &parameter_resolver,
                     &string_arena,
+                    statement_timestamp_micros,
                 ) catch continue;
                 if (!matches) continue;
             }
@@ -587,6 +596,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                 new_values[0..row.column_count],
                 diagnostic,
                 &string_arena,
+                statement_timestamp_micros,
             ) catch |e| return e;
 
             try enforceOutgoingReferentialIntegrity(
@@ -666,6 +676,7 @@ pub fn executeDelete(
         allocator,
         &.{},
         null,
+        null,
     );
 }
 
@@ -702,6 +713,7 @@ pub fn executeDeleteWithReturning(
         allocator,
         parameter_bindings,
         returning_capture,
+        null,
     );
 }
 
@@ -721,6 +733,7 @@ pub fn executeDeleteWithReturningAndParameters(
     allocator: Allocator,
     parameter_bindings: []const ParameterBinding,
     returning_capture: ?*ReturningCapture,
+    statement_timestamp_micros: ?i64,
 ) MutationError!u32 {
     std.debug.assert(model_id < catalog.model_count);
     _ = allocator;
@@ -775,7 +788,7 @@ pub fn executeDeleteWithReturningAndParameters(
                     .ctx = &parameter_ctx,
                     .resolve = resolveParameterBinding,
                 };
-                const matches = filter_mod.evaluatePredicateWithResolversAndArena(
+                const matches = filter_mod.evaluatePredicateWithResolversArenaAndTimestamp(
                     tree,
                     tokens,
                     source,
@@ -785,6 +798,7 @@ pub fn executeDeleteWithReturningAndParameters(
                     null,
                     &parameter_resolver,
                     &string_arena,
+                    statement_timestamp_micros,
                 ) catch continue;
                 if (!matches) continue;
             }
@@ -1881,6 +1895,7 @@ pub fn buildRowFromAssignments(
     out_assigned: []bool,
     diagnostic: ?*MutationDiagnostic,
     string_arena: *scan_mod.StringArena,
+    statement_timestamp_micros: ?i64,
 ) MutationError!void {
     std.debug.assert(out_values.len >= schema.column_count);
     std.debug.assert(out_assigned.len >= schema.column_count);
@@ -1910,7 +1925,7 @@ pub fn buildRowFromAssignments(
         };
 
         const expr_node = node.data.unary;
-        const val = filter_mod.evaluateExpressionWithResolversAndArena(
+        const val = filter_mod.evaluateExpressionWithResolversArenaAndTimestamp(
             tree,
             tokens,
             source,
@@ -1920,6 +1935,7 @@ pub fn buildRowFromAssignments(
             null,
             &parameter_resolver,
             string_arena,
+            statement_timestamp_micros,
         ) catch |e| {
             const mapped = mapFilterError(e);
             if (mapped == error.NumericOverflow) {
@@ -1982,6 +1998,7 @@ fn applyAssignments(
     values: []Value,
     diagnostic: ?*MutationDiagnostic,
     string_arena: *scan_mod.StringArena,
+    statement_timestamp_micros: ?i64,
 ) MutationError!void {
     std.debug.assert(values.len >= schema.column_count);
 
@@ -2011,7 +2028,7 @@ fn applyAssignments(
 
         // Evaluate expression with current row values for context.
         const expr_node = node.data.unary;
-        const val = filter_mod.evaluateExpressionWithResolversAndArena(
+        const val = filter_mod.evaluateExpressionWithResolversArenaAndTimestamp(
             tree,
             tokens,
             source,
@@ -2021,6 +2038,7 @@ fn applyAssignments(
             null,
             &parameter_resolver,
             string_arena,
+            statement_timestamp_micros,
         ) catch |e| {
             const mapped = mapFilterError(e);
             if (mapped == error.NumericOverflow) {
@@ -2428,6 +2446,7 @@ fn mapFilterError(err: filter_mod.EvalError) MutationError {
         error.UnknownFunction => error.UnknownFunction,
         error.NullInPredicate => error.NullInPredicate,
         error.UndefinedParameter => error.UndefinedParameter,
+        error.ClockUnavailable => error.ClockUnavailable,
     };
 }
 
