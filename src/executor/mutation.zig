@@ -16,7 +16,6 @@ const buffer_pool_mod = @import("../storage/buffer_pool.zig");
 const wal_mod = @import("../storage/wal.zig");
 const row_mod = @import("../storage/row.zig");
 const overflow_mod = @import("../storage/overflow.zig");
-const btree_mod = @import("../storage/btree.zig");
 const catalog_mod = @import("../catalog/catalog.zig");
 const tx_mod = @import("../mvcc/transaction.zig");
 const undo_mod = @import("../mvcc/undo.zig");
@@ -36,10 +35,8 @@ const BufferPool = buffer_pool_mod.BufferPool;
 const Wal = wal_mod.Wal;
 const Value = row_mod.Value;
 const RowSchema = row_mod.RowSchema;
-const ColumnType = row_mod.ColumnType;
 const OverflowPage = overflow_mod.OverflowPage;
 const OverflowPageIdAllocator = overflow_mod.PageIdAllocator;
-const BTree = btree_mod.BTree;
 const Catalog = catalog_mod.Catalog;
 const ModelId = catalog_mod.ModelId;
 const TxId = tx_mod.TxId;
@@ -49,6 +46,42 @@ const UndoLog = undo_mod.UndoLog;
 const ResultRow = scan_mod.ResultRow;
 const ParameterBinding = filter_mod.ParameterBinding;
 const ParameterResolver = filter_mod.ParameterResolver;
+
+// --- Extracted submodules (Phase 2, Workfront 09) ---
+const overflow_chains_mod = @import("overflow_chains.zig");
+const referential_integrity_mod = @import("referential_integrity.zig");
+const value_builder_mod = @import("value_builder.zig");
+const constraints_mod = @import("constraints.zig");
+
+// Overflow chains delegation
+const OverflowChainStats = overflow_chains_mod.OverflowChainStats;
+const markOversizedStringSlots = overflow_chains_mod.markOversizedStringSlots;
+const spillOversizedStrings = overflow_chains_mod.spillOversizedStrings;
+const decodeRowWithOverflow = overflow_chains_mod.decodeRowWithOverflow;
+const collectOverflowRootsFromRow = overflow_chains_mod.collectOverflowRootsFromRow;
+const appendOverflowRelinkWalForRow = overflow_chains_mod.appendOverflowRelinkWalForRow;
+const enqueueOverflowChainForReclaim = overflow_chains_mod.enqueueOverflowChainForReclaim;
+const decodeOverflowChainRecordMeta = overflow_chains_mod.decodeOverflowChainRecordMeta;
+const decodeOverflowRelinkRecordMeta = overflow_chains_mod.decodeOverflowRelinkRecordMeta;
+const drainOverflowReclaimQueue = overflow_chains_mod.drainOverflowReclaimQueue;
+pub const commitOverflowReclaimEntriesForTx = overflow_chains_mod.commitOverflowReclaimEntriesForTx;
+pub const rollbackOverflowReclaimEntriesForTx = overflow_chains_mod.rollbackOverflowReclaimEntriesForTx;
+
+// Referential integrity delegation
+const enforceOutgoingReferentialIntegrity = referential_integrity_mod.enforceOutgoingReferentialIntegrity;
+const enforceIncomingDeleteReferentialIntegrity = referential_integrity_mod.enforceIncomingDeleteReferentialIntegrity;
+const enforceIncomingUpdateReferentialIntegrity = referential_integrity_mod.enforceIncomingUpdateReferentialIntegrity;
+
+// Constraints delegation
+const enforceInsertUniqueness = constraints_mod.enforceInsertUniqueness;
+
+// Value builder delegation
+const ParameterBindingContext = value_builder_mod.ParameterBindingContext;
+const resolveParameterBinding = value_builder_mod.resolveParameterBinding;
+pub const buildRowFromAssignments = value_builder_mod.buildRowFromAssignments;
+const applyColumnDefaultsForInsert = value_builder_mod.applyColumnDefaultsForInsert;
+const applyAssignments = value_builder_mod.applyAssignments;
+const coerceValueForColumn = value_builder_mod.coerceValueForColumn;
 
 /// Maximum encoded row size.
 pub const max_row_buf_size = 8000;
@@ -119,14 +152,14 @@ pub const MutationDiagnostic = struct {
     }
 };
 
-const PinnedMutationPage = struct {
+pub const PinnedMutationPage = struct {
     pool: *BufferPool,
     page_id: u64,
     page: *Page,
     dirty: bool = false,
     active: bool = true,
 
-    fn pin(pool: *BufferPool, page_id: u64) MutationError!PinnedMutationPage {
+    pub fn pin(pool: *BufferPool, page_id: u64) MutationError!PinnedMutationPage {
         const page = pool.pin(page_id) catch |e| return mapPoolError(e);
         return .{
             .pool = pool,
@@ -135,32 +168,15 @@ const PinnedMutationPage = struct {
         };
     }
 
-    fn markDirty(self: *PinnedMutationPage) void {
+    pub fn markDirty(self: *PinnedMutationPage) void {
         self.dirty = true;
     }
 
-    fn release(self: *PinnedMutationPage) void {
+    pub fn release(self: *PinnedMutationPage) void {
         if (!self.active) return;
         self.pool.unpin(self.page_id, self.dirty);
         self.active = false;
     }
-};
-
-const OverflowChainRecordMeta = struct {
-    first_page_id: u64,
-    page_count: u32,
-    payload_bytes: u32,
-};
-
-const OverflowRelinkRecordMeta = struct {
-    old_first_page_id: u64,
-    new_first_page_id: u64,
-};
-
-const OverflowChainStats = struct {
-    first_page_id: u64,
-    page_count: u32,
-    payload_bytes: u32,
 };
 
 /// Optional bounded row capture sink for mutation RETURNING semantics.
@@ -886,7 +902,7 @@ fn cloneValueForReturning(
 }
 
 /// Delete a single matched row: undo push, tombstone, WAL append.
-fn deleteSingleRow(
+pub fn deleteSingleRow(
     catalog: *Catalog,
     pool: *BufferPool,
     wal: *Wal,
@@ -934,7 +950,7 @@ fn deleteSingleRow(
     }
 }
 
-fn updateRowWithValues(
+pub fn updateRowWithValues(
     catalog: *Catalog,
     pool: *BufferPool,
     wal: *Wal,
@@ -1029,832 +1045,6 @@ fn canUpdateFitInPage(page: *const Page, slot_idx: u16, new_len: u16) bool {
     return @as(u32, free) + @as(u32, fragmented) >= new_len;
 }
 
-fn markOversizedStringSlots(
-    schema: *const RowSchema,
-    values: []const Value,
-    overflow_page_ids: []u64,
-) void {
-    std.debug.assert(values.len >= schema.column_count);
-    std.debug.assert(overflow_page_ids.len >= schema.column_count);
-    for (0..schema.column_count) |i| {
-        if (values[i] == .null_value) continue;
-        const col = schema.columns[i];
-        if (col.column_type != .string) continue;
-        if (values[i].string.len > overflow_mod.string_inline_threshold_bytes) {
-            // Non-zero sentinel to force pointer-sized dry-run encoding.
-            overflow_page_ids[i] = 1;
-        }
-    }
-}
-
-fn spillOversizedStrings(
-    pool: *BufferPool,
-    wal: *Wal,
-    tx_id: TxId,
-    overflow_allocator: *OverflowPageIdAllocator,
-    schema: *const RowSchema,
-    values: []const Value,
-    overflow_page_ids: []u64,
-    overflow_chain_stats: []OverflowChainStats,
-) MutationError!void {
-    std.debug.assert(values.len >= schema.column_count);
-    std.debug.assert(overflow_page_ids.len >= schema.column_count);
-    std.debug.assert(overflow_chain_stats.len >= schema.column_count);
-    for (0..schema.column_count) |i| {
-        if (overflow_page_ids[i] == 0) continue;
-        if (values[i] == .null_value) continue;
-        const col = schema.columns[i];
-        if (col.column_type != .string) continue;
-        overflow_chain_stats[i] = try writeOverflowChain(
-            pool,
-            wal,
-            tx_id,
-            overflow_allocator,
-            values[i].string,
-        );
-        overflow_page_ids[i] = overflow_chain_stats[i].first_page_id;
-    }
-}
-
-fn writeOverflowChain(
-    pool: *BufferPool,
-    wal: *Wal,
-    tx_id: TxId,
-    overflow_allocator: *OverflowPageIdAllocator,
-    payload: []const u8,
-) MutationError!OverflowChainStats {
-    std.debug.assert(payload.len > overflow_mod.string_inline_threshold_bytes);
-    const chunk_capacity = OverflowPage.max_payload_len();
-    std.debug.assert(chunk_capacity > 0);
-
-    const first_page_id = overflow_allocator.allocate() catch |e|
-        return mapOverflowAllocatorError(e);
-    var page_count: u32 = 0;
-
-    var payload_offset: usize = 0;
-    var current_page_id = first_page_id;
-    while (payload_offset < payload.len) {
-        const remaining = payload.len - payload_offset;
-        const chunk_len = @min(remaining, chunk_capacity);
-        const next_page_id = if (chunk_len == remaining)
-            OverflowPage.null_page_id
-        else
-            overflow_allocator.allocate() catch |e| return mapOverflowAllocatorError(e);
-
-        var pinned = try PinnedMutationPage.pin(pool, current_page_id);
-        defer pinned.release();
-        if (pinned.page.header.page_type == .free) {
-            OverflowPage.init(pinned.page);
-        } else if (pinned.page.header.page_type != .overflow) {
-            return error.Corruption;
-        }
-        OverflowPage.writeChunk(
-            pinned.page,
-            payload[payload_offset..][0..chunk_len],
-            next_page_id,
-        ) catch |e| return mapOverflowPageError(e);
-        pinned.markDirty();
-
-        payload_offset += chunk_len;
-        page_count += 1;
-        current_page_id = next_page_id;
-    }
-
-    var payload_buf: [16]u8 = undefined;
-    const payload_meta: OverflowChainRecordMeta = .{
-        .first_page_id = first_page_id,
-        .page_count = page_count,
-        .payload_bytes = @intCast(payload.len),
-    };
-    const payload_len = encodeOverflowChainRecordMeta(payload_buf[0..], payload_meta);
-    _ = wal.append(
-        tx_id,
-        .overflow_chain_create,
-        first_page_id,
-        payload_buf[0..payload_len],
-    ) catch |e| return mapWalAppendError(e);
-
-    return .{
-        .first_page_id = first_page_id,
-        .page_count = page_count,
-        .payload_bytes = @intCast(payload.len),
-    };
-}
-
-fn decodeRowWithOverflow(
-    schema: *const RowSchema,
-    row_data: []const u8,
-    pool: *BufferPool,
-    overflow_allocator: *const OverflowPageIdAllocator,
-    string_arena: *scan_mod.StringArena,
-    out: []Value,
-) MutationError!void {
-    std.debug.assert(out.len >= schema.column_count);
-    var col_idx: u16 = 0;
-    while (col_idx < schema.column_count) : (col_idx += 1) {
-        const decoded = row_mod.decodeColumnStorageChecked(
-            schema,
-            row_data,
-            col_idx,
-        ) catch return error.Corruption;
-        out[col_idx] = switch (decoded) {
-            .value => |v| v,
-            .string_overflow_page_id => |first_page_id| .{
-                .string = try resolveOverflowStringIntoArena(
-                    pool,
-                    overflow_allocator,
-                    first_page_id,
-                    string_arena,
-                ),
-            },
-        };
-    }
-}
-
-fn resolveOverflowStringIntoArena(
-    pool: *BufferPool,
-    overflow_allocator: *const OverflowPageIdAllocator,
-    first_page_id: u64,
-    string_arena: *scan_mod.StringArena,
-) MutationError![]const u8 {
-    if (!overflow_allocator.ownsPageId(first_page_id)) return error.Corruption;
-    const start = string_arena.startString();
-    var current = first_page_id;
-    var hops: u64 = 0;
-    const max_hops = overflow_allocator.capacity();
-    while (true) {
-        if (hops >= max_hops) return error.Corruption;
-        hops += 1;
-
-        var pinned = try PinnedMutationPage.pin(pool, current);
-        defer pinned.release();
-        if (pinned.page.header.page_type != .overflow) return error.Corruption;
-
-        const chunk = OverflowPage.readChunk(pinned.page) catch return error.Corruption;
-        string_arena.appendChunk(chunk.payload) catch return error.OutOfMemory;
-        if (chunk.next_page_id == OverflowPage.null_page_id) break;
-        if (!overflow_allocator.ownsPageId(chunk.next_page_id)) return error.Corruption;
-        current = chunk.next_page_id;
-    }
-    return string_arena.finishString(start);
-}
-
-fn collectOverflowRootsFromRow(
-    schema: *const RowSchema,
-    row_data: []const u8,
-    out_overflow_roots: []u64,
-) MutationError!usize {
-    std.debug.assert(out_overflow_roots.len >= schema.column_count);
-    var count: usize = 0;
-    for (0..schema.column_count) |i| {
-        const decoded = row_mod.decodeColumnStorageChecked(
-            schema,
-            row_data,
-            @intCast(i),
-        ) catch return error.Corruption;
-        switch (decoded) {
-            .value => {},
-            .string_overflow_page_id => |first_page_id| {
-                if (first_page_id == 0) return error.Corruption;
-                var seen = false;
-                for (0..count) |existing_idx| {
-                    if (out_overflow_roots[existing_idx] == first_page_id) {
-                        seen = true;
-                        break;
-                    }
-                }
-                if (seen) continue;
-                if (count >= out_overflow_roots.len) return error.Corruption;
-                out_overflow_roots[count] = first_page_id;
-                count += 1;
-            },
-        }
-    }
-    return count;
-}
-
-fn appendOverflowRelinkWalForRow(
-    wal: *Wal,
-    tx_id: TxId,
-    row_page_id: u64,
-    new_overflow_page_ids: []const u64,
-    old_first_page_id: u64,
-) MutationError!void {
-    for (new_overflow_page_ids) |new_first_page_id| {
-        if (new_first_page_id == 0) continue;
-        var payload_buf: [16]u8 = undefined;
-        const payload_len = encodeOverflowRelinkRecordMeta(
-            payload_buf[0..],
-            .{
-                .old_first_page_id = old_first_page_id,
-                .new_first_page_id = new_first_page_id,
-            },
-        );
-        _ = wal.append(
-            tx_id,
-            .overflow_chain_relink,
-            row_page_id,
-            payload_buf[0..payload_len],
-        ) catch |e| return mapWalAppendError(e);
-    }
-}
-
-fn enqueueOverflowChainForReclaim(
-    catalog: *Catalog,
-    wal: *Wal,
-    tx_id: TxId,
-    first_page_id: u64,
-) MutationError!void {
-    catalog.overflow_reclaim_queue.enqueue(tx_id, first_page_id) catch |e| {
-        return switch (e) {
-            error.InvalidChainRoot => error.Corruption,
-            error.QueueFull => error.OverflowReclaimQueueFull,
-            error.QueueEmpty => error.Corruption,
-            error.DuplicateChainRoot => error.Corruption,
-        };
-    };
-    catalog.recordOverflowReclaimEnqueue();
-    var payload_buf: [16]u8 = undefined;
-    const payload_len = encodeOverflowChainRecordMeta(
-        payload_buf[0..],
-        .{
-            .first_page_id = first_page_id,
-            .page_count = 0,
-            .payload_bytes = 0,
-        },
-    );
-    _ = wal.append(
-        tx_id,
-        .overflow_chain_unlink,
-        first_page_id,
-        payload_buf[0..payload_len],
-    ) catch |e| return mapWalAppendError(e);
-}
-
-fn drainOverflowReclaimQueue(
-    catalog: *Catalog,
-    pool: *BufferPool,
-    wal: *Wal,
-    tx_id: TxId,
-    max_items: usize,
-) MutationError!void {
-    var processed: usize = 0;
-    while (processed < max_items and !catalog.overflow_reclaim_queue.isEmpty()) : (processed += 1) {
-        const first_page_id = (catalog.overflow_reclaim_queue.dequeueCommitted() catch
-            return error.Corruption) orelse break;
-        catalog.recordOverflowReclaimDequeue();
-        const page_count = reclaimOverflowChain(
-            pool,
-            &catalog.overflow_page_allocator,
-            first_page_id,
-        ) catch |err| {
-            catalog.recordOverflowReclaimFailure();
-            return err;
-        };
-        catalog.recordOverflowReclaimSuccess(page_count);
-        var payload_buf: [16]u8 = undefined;
-        const payload_len = encodeOverflowChainRecordMeta(
-            payload_buf[0..],
-            .{
-                .first_page_id = first_page_id,
-                .page_count = page_count,
-                .payload_bytes = 0,
-            },
-        );
-        _ = wal.append(
-            tx_id,
-            .overflow_chain_reclaim,
-            first_page_id,
-            payload_buf[0..payload_len],
-        ) catch |e| return mapWalAppendError(e);
-    }
-}
-
-pub fn commitOverflowReclaimEntriesForTx(
-    catalog: *Catalog,
-    pool: *BufferPool,
-    wal: *Wal,
-    tx_id: TxId,
-    max_items: usize,
-) MutationError!void {
-    catalog.overflow_reclaim_queue.commitTx(tx_id);
-    try drainOverflowReclaimQueue(catalog, pool, wal, tx_id, max_items);
-}
-
-pub fn rollbackOverflowReclaimEntriesForTx(
-    catalog: *Catalog,
-    tx_id: TxId,
-) void {
-    catalog.overflow_reclaim_queue.abortTx(tx_id);
-}
-
-fn reclaimOverflowChain(
-    pool: *BufferPool,
-    overflow_allocator: *const OverflowPageIdAllocator,
-    first_page_id: u64,
-) MutationError!u32 {
-    if (!overflow_allocator.ownsPageId(first_page_id)) return error.Corruption;
-
-    var page_count: u32 = 0;
-    var hops: u64 = 0;
-    const max_hops = overflow_allocator.capacity();
-    var current = first_page_id;
-    while (true) {
-        if (hops >= max_hops) return error.Corruption;
-        hops += 1;
-
-        var pinned = try PinnedMutationPage.pin(pool, current);
-        defer pinned.release();
-        if (pinned.page.header.page_type != .overflow) return error.Corruption;
-
-        const chunk = OverflowPage.readChunk(pinned.page) catch return error.Corruption;
-        const next_page_id = chunk.next_page_id;
-        if (next_page_id != OverflowPage.null_page_id and
-            !overflow_allocator.ownsPageId(next_page_id))
-        {
-            return error.Corruption;
-        }
-
-        pinned.page.header.page_type = .free;
-        @memset(&pinned.page.content, 0);
-        pinned.markDirty();
-        page_count += 1;
-
-        if (next_page_id == OverflowPage.null_page_id) break;
-        current = next_page_id;
-    }
-    return page_count;
-}
-
-fn encodeOverflowChainRecordMeta(
-    out: []u8,
-    meta: OverflowChainRecordMeta,
-) usize {
-    std.debug.assert(out.len >= 16);
-    @memcpy(out[0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, meta.first_page_id)));
-    @memcpy(out[8..12], std.mem.asBytes(&std.mem.nativeToLittle(u32, meta.page_count)));
-    @memcpy(out[12..16], std.mem.asBytes(&std.mem.nativeToLittle(u32, meta.payload_bytes)));
-    return 16;
-}
-
-fn decodeOverflowChainRecordMeta(payload: []const u8) MutationError!OverflowChainRecordMeta {
-    if (payload.len != 16) return error.Corruption;
-    return .{
-        .first_page_id = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[0..8]).*),
-        .page_count = std.mem.littleToNative(u32, std.mem.bytesAsValue(u32, payload[8..12]).*),
-        .payload_bytes = std.mem.littleToNative(u32, std.mem.bytesAsValue(u32, payload[12..16]).*),
-    };
-}
-
-fn encodeOverflowRelinkRecordMeta(
-    out: []u8,
-    meta: OverflowRelinkRecordMeta,
-) usize {
-    std.debug.assert(out.len >= 16);
-    @memcpy(out[0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, meta.old_first_page_id)));
-    @memcpy(out[8..16], std.mem.asBytes(&std.mem.nativeToLittle(u64, meta.new_first_page_id)));
-    return 16;
-}
-
-fn decodeOverflowRelinkRecordMeta(payload: []const u8) MutationError!OverflowRelinkRecordMeta {
-    if (payload.len != 16) return error.Corruption;
-    return .{
-        .old_first_page_id = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[0..8]).*),
-        .new_first_page_id = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[8..16]).*),
-    };
-}
-
-fn enforceOutgoingReferentialIntegrity(
-    catalog: *const Catalog,
-    pool: *BufferPool,
-    model_id: ModelId,
-    row_values: []const Value,
-) MutationError!void {
-    const model = &catalog.models[model_id];
-    var assoc_idx: u16 = 0;
-    while (assoc_idx < model.association_count) : (assoc_idx += 1) {
-        const assoc = &model.associations[assoc_idx];
-        if (assoc.referential_integrity_mode != .with_referential_integrity) continue;
-        if (assoc.target_model_id == catalog_mod.null_model) {
-            return error.ReferentialIntegrityViolation;
-        }
-        if (assoc.local_column_id == catalog_mod.null_column or
-            assoc.foreign_key_column_id == catalog_mod.null_column)
-        {
-            return error.ReferentialIntegrityViolation;
-        }
-
-        const local_idx: usize = assoc.local_column_id;
-        if (local_idx >= row_values.len) return error.ReferentialIntegrityViolation;
-        const fk_value = row_values[local_idx];
-        if (fk_value == .null_value) continue;
-
-        if (!rowExistsForValue(
-            catalog,
-            pool,
-            assoc.target_model_id,
-            assoc.foreign_key_column_id,
-            fk_value,
-        )) {
-            return error.ReferentialIntegrityViolation;
-        }
-    }
-}
-
-fn enforceIncomingDeleteReferentialIntegrity(
-    catalog: *const Catalog,
-    pool: *BufferPool,
-    wal: *Wal,
-    undo_log: *UndoLog,
-    tx_id: TxId,
-    target_model_id: ModelId,
-    deleted_row_values: []const Value,
-) MutationError!void {
-    var source_model_id: ModelId = 0;
-    while (source_model_id < catalog.model_count) : (source_model_id += 1) {
-        const source_model = &catalog.models[source_model_id];
-        var assoc_idx: u16 = 0;
-        while (assoc_idx < source_model.association_count) : (assoc_idx += 1) {
-            const assoc = &source_model.associations[assoc_idx];
-            if (assoc.referential_integrity_mode != .with_referential_integrity) continue;
-            if (assoc.target_model_id != target_model_id) continue;
-            if (assoc.local_column_id == catalog_mod.null_column or
-                assoc.foreign_key_column_id == catalog_mod.null_column)
-            {
-                return error.ReferentialIntegrityViolation;
-            }
-
-            const key_idx: usize = assoc.foreign_key_column_id;
-            if (key_idx >= deleted_row_values.len) return error.ReferentialIntegrityViolation;
-            const key = deleted_row_values[key_idx];
-
-            switch (assoc.on_delete) {
-                .restrict => {
-                    if (hasReferencingRows(
-                        catalog,
-                        pool,
-                        source_model_id,
-                        assoc.local_column_id,
-                        key,
-                    )) return error.ReferentialIntegrityViolation;
-                },
-                .cascade => try cascadeDeleteReferencingRows(
-                    catalog,
-                    pool,
-                    wal,
-                    undo_log,
-                    tx_id,
-                    source_model_id,
-                    assoc.local_column_id,
-                    key,
-                ),
-                .set_null => try setReferencingRowsValue(
-                    catalog,
-                    pool,
-                    wal,
-                    undo_log,
-                    tx_id,
-                    source_model_id,
-                    assoc.local_column_id,
-                    key,
-                    .{ .null_value = {} },
-                ),
-                .set_default => return error.UnsupportedReferentialAction,
-                .unspecified => return error.ReferentialIntegrityViolation,
-            }
-        }
-    }
-}
-
-fn enforceIncomingUpdateReferentialIntegrity(
-    catalog: *const Catalog,
-    pool: *BufferPool,
-    wal: *Wal,
-    undo_log: *UndoLog,
-    tx_id: TxId,
-    target_model_id: ModelId,
-    old_row_values: []const Value,
-    new_row_values: []const Value,
-) MutationError!void {
-    var source_model_id: ModelId = 0;
-    while (source_model_id < catalog.model_count) : (source_model_id += 1) {
-        const source_model = &catalog.models[source_model_id];
-        var assoc_idx: u16 = 0;
-        while (assoc_idx < source_model.association_count) : (assoc_idx += 1) {
-            const assoc = &source_model.associations[assoc_idx];
-            if (assoc.referential_integrity_mode != .with_referential_integrity) continue;
-            if (assoc.target_model_id != target_model_id) continue;
-            if (assoc.local_column_id == catalog_mod.null_column or
-                assoc.foreign_key_column_id == catalog_mod.null_column)
-            {
-                return error.ReferentialIntegrityViolation;
-            }
-
-            const key_idx: usize = assoc.foreign_key_column_id;
-            if (key_idx >= old_row_values.len or key_idx >= new_row_values.len) {
-                return error.ReferentialIntegrityViolation;
-            }
-            const old_key = old_row_values[key_idx];
-            const new_key = new_row_values[key_idx];
-            if (row_mod.compareValues(old_key, new_key) == .eq) continue;
-
-            switch (assoc.on_update) {
-                .restrict => {
-                    if (hasReferencingRows(
-                        catalog,
-                        pool,
-                        source_model_id,
-                        assoc.local_column_id,
-                        old_key,
-                    )) return error.ReferentialIntegrityViolation;
-                },
-                .cascade => try setReferencingRowsValue(
-                    catalog,
-                    pool,
-                    wal,
-                    undo_log,
-                    tx_id,
-                    source_model_id,
-                    assoc.local_column_id,
-                    old_key,
-                    new_key,
-                ),
-                .set_null => try setReferencingRowsValue(
-                    catalog,
-                    pool,
-                    wal,
-                    undo_log,
-                    tx_id,
-                    source_model_id,
-                    assoc.local_column_id,
-                    old_key,
-                    .{ .null_value = {} },
-                ),
-                .set_default => return error.UnsupportedReferentialAction,
-                .unspecified => return error.ReferentialIntegrityViolation,
-            }
-        }
-    }
-}
-
-fn cascadeDeleteReferencingRows(
-    catalog: *const Catalog,
-    pool: *BufferPool,
-    wal: *Wal,
-    undo_log: *UndoLog,
-    tx_id: TxId,
-    source_model_id: ModelId,
-    source_column_id: catalog_mod.ColumnId,
-    key: Value,
-) MutationError!void {
-    const source_model = &catalog.models[source_model_id];
-    var row_ids: [scan_mod.max_result_rows]RowId = undefined;
-    const count = try collectReferencingRows(
-        catalog,
-        pool,
-        source_model_id,
-        source_column_id,
-        key,
-        &row_ids,
-    );
-    var i: u16 = 0;
-    while (i < count) : (i += 1) {
-        try deleteSingleRow(
-            @constCast(catalog),
-            pool,
-            wal,
-            undo_log,
-            tx_id,
-            &source_model.row_schema,
-            row_ids[i],
-        );
-    }
-}
-
-fn setReferencingRowsValue(
-    catalog: *const Catalog,
-    pool: *BufferPool,
-    wal: *Wal,
-    undo_log: *UndoLog,
-    tx_id: TxId,
-    source_model_id: ModelId,
-    source_column_id: catalog_mod.ColumnId,
-    key: Value,
-    new_value: Value,
-) MutationError!void {
-    const source_model = &catalog.models[source_model_id];
-    const schema = &source_model.row_schema;
-    const col_idx: usize = source_column_id;
-    if (col_idx >= schema.column_count) return error.ReferentialIntegrityViolation;
-    if (new_value == .null_value and !schema.columns[col_idx].nullable) {
-        return error.ReferentialIntegrityViolation;
-    }
-    if (new_value != .null_value) {
-        const expected_type = schema.columns[col_idx].column_type;
-        const got_type = new_value.columnType() orelse return error.ReferentialIntegrityViolation;
-        if (expected_type != got_type) return error.ReferentialIntegrityViolation;
-    }
-
-    const total_pages = source_model.total_pages;
-    const first_page = source_model.heap_first_page_id;
-    var page_idx: u32 = 0;
-    while (page_idx < total_pages) : (page_idx += 1) {
-        const page_id: u64 = @as(u64, first_page) + page_idx;
-        const page = pool.pin(page_id) catch |e| return mapPoolError(e);
-        defer pool.unpin(page_id, false);
-
-        const slot_count = HeapPage.slot_count(page);
-        var slot_idx: u16 = 0;
-        while (slot_idx < slot_count) : (slot_idx += 1) {
-            const row_data = HeapPage.read(page, slot_idx) catch continue;
-            var decoded: [max_assignments]Value = undefined;
-            row_mod.decodeRowChecked(schema, row_data, decoded[0..schema.column_count]) catch
-                return error.Corruption;
-
-            if (row_mod.compareValues(decoded[col_idx], key) != .eq) continue;
-
-            decoded[col_idx] = new_value;
-            try updateRowWithValues(
-                @constCast(catalog),
-                pool,
-                wal,
-                undo_log,
-                tx_id,
-                schema,
-                .{ .page_id = page_id, .slot = slot_idx },
-                decoded[0..schema.column_count],
-            );
-        }
-    }
-}
-
-fn hasReferencingRows(
-    catalog: *const Catalog,
-    pool: *BufferPool,
-    source_model_id: ModelId,
-    source_column_id: catalog_mod.ColumnId,
-    key: Value,
-) bool {
-    if (key == .null_value) return false;
-    return rowExistsForValue(
-        catalog,
-        pool,
-        source_model_id,
-        source_column_id,
-        key,
-    );
-}
-
-fn collectReferencingRows(
-    catalog: *const Catalog,
-    pool: *BufferPool,
-    source_model_id: ModelId,
-    source_column_id: catalog_mod.ColumnId,
-    key: Value,
-    out_row_ids: *[scan_mod.max_result_rows]RowId,
-) MutationError!u16 {
-    if (key == .null_value) return 0;
-    const source_model = &catalog.models[source_model_id];
-    const schema = &source_model.row_schema;
-    const col_idx: usize = source_column_id;
-    if (col_idx >= schema.column_count) return error.ReferentialIntegrityViolation;
-
-    var count: u16 = 0;
-    var page_idx: u32 = 0;
-    while (page_idx < source_model.total_pages) : (page_idx += 1) {
-        const page_id: u64 = @as(u64, source_model.heap_first_page_id) + page_idx;
-        const page = pool.pin(page_id) catch |e| return mapPoolError(e);
-        defer pool.unpin(page_id, false);
-
-        const slot_count = HeapPage.slot_count(page);
-        var slot_idx: u16 = 0;
-        while (slot_idx < slot_count) : (slot_idx += 1) {
-            const row_data = HeapPage.read(page, slot_idx) catch continue;
-            var decoded: [max_assignments]Value = undefined;
-            row_mod.decodeRowChecked(schema, row_data, decoded[0..schema.column_count]) catch
-                return error.Corruption;
-            if (row_mod.compareValues(decoded[col_idx], key) != .eq) continue;
-            if (count >= scan_mod.max_result_rows) return error.ResultOverflow;
-            out_row_ids[count] = .{ .page_id = page_id, .slot = slot_idx };
-            count += 1;
-        }
-    }
-    return count;
-}
-
-fn rowExistsForValue(
-    catalog: *const Catalog,
-    pool: *BufferPool,
-    model_id: ModelId,
-    column_id: catalog_mod.ColumnId,
-    key: Value,
-) bool {
-    if (key == .null_value) return false;
-    const model = &catalog.models[model_id];
-    const schema = &model.row_schema;
-    const col_idx: usize = column_id;
-    if (col_idx >= schema.column_count) return false;
-
-    var page_idx: u32 = 0;
-    while (page_idx < model.total_pages) : (page_idx += 1) {
-        const page_id: u64 = @as(u64, model.heap_first_page_id) + page_idx;
-        const page = pool.pin(page_id) catch return false;
-        defer pool.unpin(page_id, false);
-
-        const slot_count = HeapPage.slot_count(page);
-        var slot_idx: u16 = 0;
-        while (slot_idx < slot_count) : (slot_idx += 1) {
-            const row_data = HeapPage.read(page, slot_idx) catch continue;
-            var decoded: [max_assignments]Value = undefined;
-            row_mod.decodeRowChecked(schema, row_data, decoded[0..schema.column_count]) catch
-                return false;
-            if (row_mod.compareValues(decoded[col_idx], key) == .eq) {
-                return true;
-            }
-        }
-    }
-    return false;
-}
-
-fn enforceInsertUniqueness(
-    catalog: *const Catalog,
-    pool: *BufferPool,
-    model_id: ModelId,
-    values: []const Value,
-) MutationError!void {
-    const model = &catalog.models[model_id];
-
-    var col_id: catalog_mod.ColumnId = 0;
-    while (col_id < model.column_count) : (col_id += 1) {
-        if (model.columns[col_id].is_primary_key) {
-            if (rowExistsForValue(catalog, pool, model_id, col_id, values[col_id])) {
-                return error.DuplicateKey;
-            }
-            break;
-        }
-    }
-
-    var idx_id: u16 = 0;
-    while (idx_id < model.index_count) : (idx_id += 1) {
-        const idx = model.indexes[idx_id];
-        if (!idx.is_unique or idx.column_count == 0) continue;
-        if (uniqueKeyHasNull(values, idx.column_ids[0..idx.column_count])) continue;
-        if (rowExistsForUniqueIndex(catalog, pool, model_id, &idx, values)) {
-            return error.DuplicateKey;
-        }
-    }
-}
-
-fn uniqueKeyHasNull(
-    values: []const Value,
-    key_column_ids: []const catalog_mod.ColumnId,
-) bool {
-    for (key_column_ids) |col_id| {
-        if (col_id >= values.len) return true;
-        if (values[col_id] == .null_value) return true;
-    }
-    return false;
-}
-
-fn rowExistsForUniqueIndex(
-    catalog: *const Catalog,
-    pool: *BufferPool,
-    model_id: ModelId,
-    index: *const catalog_mod.IndexInfo,
-    key_values: []const Value,
-) bool {
-    const model = &catalog.models[model_id];
-    const schema = &model.row_schema;
-
-    var page_idx: u32 = 0;
-    while (page_idx < model.total_pages) : (page_idx += 1) {
-        const page_id: u64 = @as(u64, model.heap_first_page_id) + page_idx;
-        const page = pool.pin(page_id) catch return false;
-        defer pool.unpin(page_id, false);
-
-        const slot_count = HeapPage.slot_count(page);
-        var slot_idx: u16 = 0;
-        while (slot_idx < slot_count) : (slot_idx += 1) {
-            const row_data = HeapPage.read(page, slot_idx) catch continue;
-            var decoded: [max_assignments]Value = undefined;
-            row_mod.decodeRowChecked(schema, row_data, decoded[0..schema.column_count]) catch
-                return false;
-
-            var all_match = true;
-            for (index.column_ids[0..index.column_count]) |col_id| {
-                if (col_id >= schema.column_count or col_id >= key_values.len) {
-                    return false;
-                }
-                if (row_mod.compareValues(decoded[col_id], key_values[col_id]) != .eq) {
-                    all_match = false;
-                    break;
-                }
-            }
-            if (all_match) return true;
-        }
-    }
-    return false;
-}
 
 fn resolveVisibleVersion(
     undo_log: *const UndoLog,
@@ -1873,501 +1063,6 @@ fn resolveVisibleVersion(
         tx_manager,
     );
     return vis orelse heap_data;
-}
-
-const ParameterBindingContext = struct {
-    bindings: []const ParameterBinding,
-};
-
-fn resolveParameterBinding(
-    raw_ctx: *const anyopaque,
-    tokens: *const TokenizeResult,
-    source: []const u8,
-    token_index: u16,
-) filter_mod.EvalError!Value {
-    const ctx: *const ParameterBindingContext = @ptrCast(@alignCast(raw_ctx));
-    const parameter_name = tokens.getText(token_index, source);
-    for (ctx.bindings) |binding| {
-        if (std.mem.eql(u8, binding.name, parameter_name)) {
-            return binding.value;
-        }
-    }
-    return error.UndefinedParameter;
-}
-
-/// Build a Value array from an assignment linked list.
-///
-/// Each assignment node has: extra = field name token,
-/// data.unary = expression node. Walks the linked list, evaluates each
-/// expression, and places the result in the correct column position.
-pub fn buildRowFromAssignments(
-    tree: *const Ast,
-    tokens: *const TokenizeResult,
-    source: []const u8,
-    schema: *const RowSchema,
-    first_assignment: NodeIndex,
-    parameter_bindings: []const ParameterBinding,
-    out_values: []Value,
-    out_assigned: []bool,
-    diagnostic: ?*MutationDiagnostic,
-    string_arena: *scan_mod.StringArena,
-    eval_ctx: *const filter_mod.EvalContext,
-) MutationError!void {
-    std.debug.assert(out_values.len >= schema.column_count);
-    std.debug.assert(out_assigned.len >= schema.column_count);
-
-    var current = first_assignment;
-    // Build a local EvalContext that uses the mutation's own parameter
-    // bindings but inherits the statement timestamp from the caller.
-    const parameter_ctx = ParameterBindingContext{
-        .bindings = parameter_bindings,
-    };
-    const parameter_resolver = ParameterResolver{
-        .ctx = &parameter_ctx,
-        .resolve = resolveParameterBinding,
-    };
-    var local_eval_ctx = filter_mod.EvalContext{
-        .statement_timestamp_micros = eval_ctx.statement_timestamp_micros,
-        .parameter_resolver = &parameter_resolver,
-        .string_arena = string_arena,
-    };
-    while (current != null_node) {
-        const node = tree.getNode(current);
-        std.debug.assert(node.tag == .assignment);
-
-        const field_name = tokens.getText(node.extra, source);
-        const col_idx = schema.findColumn(field_name) orelse {
-            setDiagnostic(
-                diagnostic,
-                .ColumnNotFound,
-                node.extra,
-                node.extra,
-                "field does not exist on model; check the schema field name or update the assignment",
-            );
-            return error.ColumnNotFound;
-        };
-
-        const expr_node = node.data.unary;
-        const val = filter_mod.evaluateExpressionFull(
-            tree,
-            tokens,
-            source,
-            expr_node,
-            &.{},
-            schema,
-            null,
-            &local_eval_ctx,
-        ) catch |e| {
-            const mapped = mapFilterError(e);
-            if (mapped == error.NumericOverflow) {
-                setIntegerRangeDiagnosticForColumn(
-                    diagnostic,
-                    schema.columns[col_idx].column_type,
-                    node.extra,
-                    expressionLocationToken(tree, expr_node),
-                );
-            } else if (mapped == error.NullArithmeticOperand) {
-                setNullArithmeticOperandDiagnostic(
-                    diagnostic,
-                    node.extra,
-                    expressionLocationToken(tree, expr_node),
-                );
-            }
-            return mapped;
-        };
-
-        const expected_type = schema.columns[col_idx].column_type;
-        out_values[col_idx] = coerceValueForColumn(
-            val,
-            expected_type,
-            diagnostic,
-            node.extra,
-            expressionLocationToken(tree, expr_node),
-        ) catch |e| return e;
-        out_assigned[col_idx] = true;
-        current = node.next;
-    }
-}
-
-fn applyColumnDefaultsForInsert(
-    catalog: *const Catalog,
-    model_id: ModelId,
-    values: []Value,
-    assigned_columns: []const bool,
-) void {
-    std.debug.assert(model_id < catalog.model_count);
-    const model = &catalog.models[model_id];
-    std.debug.assert(values.len >= model.column_count);
-    std.debug.assert(assigned_columns.len >= model.column_count);
-
-    var col_id: u16 = 0;
-    while (col_id < model.column_count) : (col_id += 1) {
-        if (assigned_columns[col_id]) continue;
-        const default_value = catalog.getColumnDefault(model_id, col_id) orelse continue;
-        values[col_id] = default_value;
-    }
-}
-
-/// Apply assignment values on top of existing values (for UPDATE).
-fn applyAssignments(
-    tree: *const Ast,
-    tokens: *const TokenizeResult,
-    source: []const u8,
-    schema: *const RowSchema,
-    first_assignment: NodeIndex,
-    parameter_bindings: []const ParameterBinding,
-    values: []Value,
-    diagnostic: ?*MutationDiagnostic,
-    string_arena: *scan_mod.StringArena,
-    eval_ctx: *const filter_mod.EvalContext,
-) MutationError!void {
-    std.debug.assert(values.len >= schema.column_count);
-
-    var current = first_assignment;
-    const parameter_ctx = ParameterBindingContext{
-        .bindings = parameter_bindings,
-    };
-    const parameter_resolver = ParameterResolver{
-        .ctx = &parameter_ctx,
-        .resolve = resolveParameterBinding,
-    };
-    var local_eval_ctx = filter_mod.EvalContext{
-        .statement_timestamp_micros = eval_ctx.statement_timestamp_micros,
-        .parameter_resolver = &parameter_resolver,
-        .string_arena = string_arena,
-    };
-    while (current != null_node) {
-        const node = tree.getNode(current);
-        std.debug.assert(node.tag == .assignment);
-
-        const field_name = tokens.getText(node.extra, source);
-        const col_idx = schema.findColumn(field_name) orelse {
-            setDiagnostic(
-                diagnostic,
-                .ColumnNotFound,
-                node.extra,
-                node.extra,
-                "field does not exist on model; check the schema field name or update the assignment",
-            );
-            return error.ColumnNotFound;
-        };
-
-        // Evaluate expression with current row values for context.
-        const expr_node = node.data.unary;
-        const val = filter_mod.evaluateExpressionFull(
-            tree,
-            tokens,
-            source,
-            expr_node,
-            values,
-            schema,
-            null,
-            &local_eval_ctx,
-        ) catch |e| {
-            const mapped = mapFilterError(e);
-            if (mapped == error.NumericOverflow) {
-                setIntegerRangeDiagnosticForColumn(
-                    diagnostic,
-                    schema.columns[col_idx].column_type,
-                    node.extra,
-                    expressionLocationToken(tree, expr_node),
-                );
-            } else if (mapped == error.NullArithmeticOperand) {
-                setNullArithmeticOperandDiagnostic(
-                    diagnostic,
-                    node.extra,
-                    expressionLocationToken(tree, expr_node),
-                );
-            }
-            return mapped;
-        };
-
-        const expected_type = schema.columns[col_idx].column_type;
-        values[col_idx] = coerceValueForColumn(
-            val,
-            expected_type,
-            diagnostic,
-            node.extra,
-            expressionLocationToken(tree, expr_node),
-        ) catch |e| return e;
-        current = node.next;
-    }
-}
-
-fn coerceValueForColumn(
-    value: Value,
-    target: ColumnType,
-    diagnostic: ?*MutationDiagnostic,
-    field_token: u16,
-    location_token: ?u16,
-) MutationError!Value {
-    if (value == .null_value) return value;
-    if (value.columnType()) |actual| {
-        if (actual == target) return value;
-    }
-
-    return switch (target) {
-        .i8 => Value{ .i8 = toI8(value) catch |e| {
-            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
-            return e;
-        } },
-        .i16 => Value{ .i16 = toI16(value) catch |e| {
-            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
-            return e;
-        } },
-        .i32 => Value{ .i32 = toI32(value) catch |e| {
-            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
-            return e;
-        } },
-        .i64 => Value{ .i64 = toI64(value) catch |e| {
-            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
-            return e;
-        } },
-        .u8 => Value{ .u8 = toU8(value) catch |e| {
-            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
-            return e;
-        } },
-        .u16 => Value{ .u16 = toU16(value) catch |e| {
-            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
-            return e;
-        } },
-        .u32 => Value{ .u32 = toU32(value) catch |e| {
-            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
-            return e;
-        } },
-        .u64 => Value{ .u64 = toU64(value) catch |e| {
-            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
-            return e;
-        } },
-        .f64 => Value{ .f64 = toF64(value) catch |e| {
-            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
-            return e;
-        } },
-        .bool => if (value == .bool) value else blk: {
-            annotateCoercionError(diagnostic, error.TypeMismatch, value, target, field_token, location_token);
-            break :blk error.TypeMismatch;
-        },
-        .string => if (value == .string) value else blk: {
-            annotateCoercionError(diagnostic, error.TypeMismatch, value, target, field_token, location_token);
-            break :blk error.TypeMismatch;
-        },
-        .timestamp => Value{ .timestamp = toI64(value) catch |e| {
-            annotateCoercionError(diagnostic, e, value, target, field_token, location_token);
-            return e;
-        } },
-    };
-}
-
-fn annotateCoercionError(
-    diagnostic: ?*MutationDiagnostic,
-    err: MutationError,
-    value: Value,
-    target: ColumnType,
-    field_token: u16,
-    location_token: ?u16,
-) void {
-    if (isIntegerTarget(target) and isIntegerValue(value)) {
-        setIntegerRangeDiagnosticForColumn(
-            diagnostic,
-            target,
-            field_token,
-            location_token,
-        );
-        return;
-    }
-
-    if (err == error.TypeMismatch) {
-        var message_buf: [160]u8 = std.mem.zeroes([160]u8);
-        const message = std.fmt.bufPrint(
-            message_buf[0..],
-            "value type is incompatible with {s}",
-            .{columnTypeName(target)},
-        ) catch "value type is incompatible with target column";
-        setDiagnostic(
-            diagnostic,
-            .TypeMismatch,
-            field_token,
-            location_token,
-            message,
-        );
-    }
-}
-
-fn setIntegerRangeDiagnosticForColumn(
-    diagnostic: ?*MutationDiagnostic,
-    target: ColumnType,
-    field_token: u16,
-    location_token: ?u16,
-) void {
-    var message_buf: [160]u8 = std.mem.zeroes([160]u8);
-    const message = integerRangeMessage(&message_buf, target);
-    setDiagnostic(
-        diagnostic,
-        .IntegerOutOfRange,
-        field_token,
-        location_token,
-        message,
-    );
-}
-
-fn setNullArithmeticOperandDiagnostic(
-    diagnostic: ?*MutationDiagnostic,
-    field_token: u16,
-    location_token: ?u16,
-) void {
-    setDiagnostic(
-        diagnostic,
-        .NullArithmeticOperand,
-        field_token,
-        location_token,
-        "arithmetic operand cannot be null",
-    );
-}
-
-fn integerRangeMessage(buf: *[160]u8, target: ColumnType) []const u8 {
-    return switch (target) {
-        .i8 => std.fmt.bufPrint(buf[0..], "value is out of range (-128 to 127)", .{}) catch "value is out of range for i8",
-        .i16 => std.fmt.bufPrint(buf[0..], "value is out of range (-32768 to 32767)", .{}) catch "value is out of range for i16",
-        .i32 => std.fmt.bufPrint(buf[0..], "value is out of range (-2147483648 to 2147483647)", .{}) catch "value is out of range for i32",
-        .i64 => std.fmt.bufPrint(buf[0..], "value is out of range (-9223372036854775808 to 9223372036854775807)", .{}) catch "value is out of range for i64",
-        .u8 => std.fmt.bufPrint(buf[0..], "value is out of range (0 to 255)", .{}) catch "value is out of range for u8",
-        .u16 => std.fmt.bufPrint(buf[0..], "value is out of range (0 to 65535)", .{}) catch "value is out of range for u16",
-        .u32 => std.fmt.bufPrint(buf[0..], "value is out of range (0 to 4294967295)", .{}) catch "value is out of range for u32",
-        .u64 => std.fmt.bufPrint(buf[0..], "value is out of range (0 to 18446744073709551615)", .{}) catch "value is out of range for u64",
-        else => std.fmt.bufPrint(buf[0..], "value is out of range for {s}", .{columnTypeName(target)}) catch "value is out of range for target column",
-    };
-}
-
-fn setDiagnostic(
-    diagnostic: ?*MutationDiagnostic,
-    code: MutationDiagnosticCode,
-    field_token: ?u16,
-    location_token: ?u16,
-    message: []const u8,
-) void {
-    const diag = diagnostic orelse return;
-    diag.has_value = true;
-    diag.code = code;
-    diag.field_token = field_token;
-    diag.location_token = location_token;
-    @memset(&diag.message, 0);
-    const message_len = @min(message.len, diag.message.len);
-    @memcpy(diag.message[0..message_len], message[0..message_len]);
-}
-
-fn isIntegerTarget(target: ColumnType) bool {
-    return switch (target) {
-        .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64, .timestamp => true,
-        else => false,
-    };
-}
-
-fn isIntegerValue(value: Value) bool {
-    return switch (value) {
-        .i8, .i16, .i32, .i64, .u8, .u16, .u32, .u64 => true,
-        else => false,
-    };
-}
-
-fn columnTypeName(target: ColumnType) []const u8 {
-    return switch (target) {
-        .i8 => "i8",
-        .i16 => "i16",
-        .i32 => "i32",
-        .i64 => "i64",
-        .u8 => "u8",
-        .u16 => "u16",
-        .u32 => "u32",
-        .u64 => "u64",
-        .f64 => "f64",
-        .bool => "bool",
-        .string => "string",
-        .timestamp => "timestamp",
-    };
-}
-
-fn expressionLocationToken(tree: *const Ast, expr_node: NodeIndex) ?u16 {
-    const node = tree.getNode(expr_node);
-    return switch (node.tag) {
-        .expr_literal, .expr_column_ref, .expr_parameter => node.data.token,
-        .expr_function_call, .expr_aggregate => node.extra,
-        .expr_list => expressionLocationToken(tree, node.data.unary),
-        .expr_binary, .expr_unary => node.extra,
-        else => null,
-    };
-}
-
-fn toI8(value: Value) MutationError!i8 {
-    const v = try toI64(value);
-    return std.math.cast(i8, v) orelse error.TypeMismatch;
-}
-
-fn toI16(value: Value) MutationError!i16 {
-    const v = try toI64(value);
-    return std.math.cast(i16, v) orelse error.TypeMismatch;
-}
-
-fn toI32(value: Value) MutationError!i32 {
-    const v = try toI64(value);
-    return std.math.cast(i32, v) orelse error.TypeMismatch;
-}
-
-fn toI64(value: Value) MutationError!i64 {
-    return switch (value) {
-        .i8 => |v| v,
-        .i16 => |v| v,
-        .i32 => |v| v,
-        .i64 => |v| v,
-        .u8 => |v| v,
-        .u16 => |v| v,
-        .u32 => |v| v,
-        .u64 => |v| std.math.cast(i64, v) orelse return error.TypeMismatch,
-        else => error.TypeMismatch,
-    };
-}
-
-fn toU8(value: Value) MutationError!u8 {
-    const v = try toU64(value);
-    return std.math.cast(u8, v) orelse error.TypeMismatch;
-}
-
-fn toU16(value: Value) MutationError!u16 {
-    const v = try toU64(value);
-    return std.math.cast(u16, v) orelse error.TypeMismatch;
-}
-
-fn toU32(value: Value) MutationError!u32 {
-    const v = try toU64(value);
-    return std.math.cast(u32, v) orelse error.TypeMismatch;
-}
-
-fn toU64(value: Value) MutationError!u64 {
-    return switch (value) {
-        .i8 => |v| std.math.cast(u64, v) orelse return error.TypeMismatch,
-        .i16 => |v| std.math.cast(u64, v) orelse return error.TypeMismatch,
-        .i32 => |v| std.math.cast(u64, v) orelse return error.TypeMismatch,
-        .i64 => |v| std.math.cast(u64, v) orelse return error.TypeMismatch,
-        .u8 => |v| v,
-        .u16 => |v| v,
-        .u32 => |v| v,
-        .u64 => |v| v,
-        else => error.TypeMismatch,
-    };
-}
-
-fn toF64(value: Value) MutationError!f64 {
-    return switch (value) {
-        .i8 => |v| @floatFromInt(v),
-        .i16 => |v| @floatFromInt(v),
-        .i32 => |v| @floatFromInt(v),
-        .i64 => |v| @floatFromInt(v),
-        .u8 => |v| @floatFromInt(v),
-        .u16 => |v| @floatFromInt(v),
-        .u32 => |v| @floatFromInt(v),
-        .u64 => |v| @floatFromInt(v),
-        .f64 => |v| v,
-        else => error.TypeMismatch,
-    };
 }
 
 /// Find a heap page with enough free space, or allocate the next page.
@@ -2399,7 +1094,7 @@ fn findPageWithSpace(
     return @as(u64, first_page_id) + total_pages;
 }
 
-fn mapPoolError(err: buffer_pool_mod.BufferPoolError) MutationError {
+pub fn mapPoolError(err: buffer_pool_mod.BufferPoolError) MutationError {
     return switch (err) {
         error.AllFramesPinned => error.AllFramesPinned,
         error.OutOfMemory => error.OutOfMemory,
@@ -2419,14 +1114,14 @@ fn mapEncodeError(err: row_mod.EncodeError) MutationError {
     };
 }
 
-fn mapOverflowAllocatorError(err: overflow_mod.OverflowAllocatorError) MutationError {
+pub fn mapOverflowAllocatorError(err: overflow_mod.OverflowAllocatorError) MutationError {
     return switch (err) {
         error.InvalidRegion => error.Corruption,
         error.RegionExhausted => error.OverflowRegionExhausted,
     };
 }
 
-fn mapOverflowPageError(err: overflow_mod.OverflowError) MutationError {
+pub fn mapOverflowPageError(err: overflow_mod.OverflowError) MutationError {
     return switch (err) {
         error.PageFull => error.RowTooLarge,
         error.InvalidPageFormat => error.Corruption,
@@ -2456,7 +1151,7 @@ fn mapScanError(err: scan_mod.ScanError) MutationError {
     };
 }
 
-fn mapFilterError(err: filter_mod.EvalError) MutationError {
+pub fn mapFilterError(err: filter_mod.EvalError) MutationError {
     return switch (err) {
         error.StackOverflow => error.StackOverflow,
         error.StackUnderflow => error.StackUnderflow,
@@ -2474,7 +1169,7 @@ fn mapFilterError(err: filter_mod.EvalError) MutationError {
     };
 }
 
-fn mapWalAppendError(err: wal_mod.WalError) MutationError {
+pub fn mapWalAppendError(err: wal_mod.WalError) MutationError {
     return switch (err) {
         error.OutOfMemory => error.OutOfMemory,
         error.PayloadTooLarge => error.RowTooLarge,

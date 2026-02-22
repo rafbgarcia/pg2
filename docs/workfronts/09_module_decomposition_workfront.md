@@ -24,7 +24,7 @@ After extraction `executor.zig` retains orchestration, `ExecContext`, `QueryResu
 - `zig build test` passes with zero test modifications.
 - No new public API — extracted modules are `@import`ed only by `executor.zig`.
 
-## Phase 2: Mutation — Subsystem Extraction
+## Phase 2: Mutation — Subsystem Extraction ✅
 ### Scope
 Extract distinct subsystems out of `src/executor/mutation.zig` (2545 prod lines, 6 concerns):
 
