@@ -43,6 +43,7 @@ const TxManager = tx_mod.TxManager;
 const UndoLog = undo_mod.UndoLog;
 const ResultRow = scan_mod.ResultRow;
 const compareValues = row_mod.compareValues;
+pub const ParameterBinding = filter_mod.ParameterBinding;
 const max_sort_keys = capacity_mod.max_sort_keys;
 const max_group_aggregate_exprs = capacity_mod.max_group_aggregate_exprs;
 const sort_key_desc_mask: u16 = 0x0001;
@@ -200,6 +201,7 @@ pub const ExecContext = struct {
     ast: *const Ast,
     tokens: *const TokenizeResult,
     source: []const u8,
+    parameter_bindings: []const ParameterBinding,
     allocator: Allocator,
     result_rows: []ResultRow,
     scratch_rows_a: []ResultRow,
@@ -499,13 +501,16 @@ fn applyFlatColumnProjection(
                     projected[out_idx] = result.rows[row_index].values[descriptor.column_index];
                 },
                 .expression => {
-                    const value = filter_mod.evaluateExpression(
+                    const parameter_resolver = parameterResolverForContext(ctx);
+                    const value = filter_mod.evaluateExpressionWithResolvers(
                         ctx.ast,
                         ctx.tokens,
                         ctx.source,
                         descriptor.expr_node,
                         result.rows[row_index].values[0..result.rows[row_index].column_count],
                         source_schema,
+                        null,
+                        &parameter_resolver,
                     ) catch {
                         setError(result, "select computed expression evaluation failed");
                         return false;
@@ -789,6 +794,7 @@ fn applyWhereFilter(
     if (predicate == null_node) return;
 
     const original_count = result.row_count;
+    const parameter_resolver = parameterResolverForContext(ctx);
     var write_idx: u16 = 0;
     var read_idx: u16 = 0;
     while (read_idx < result.row_count) : (read_idx += 1) {
@@ -801,16 +807,30 @@ fn applyWhereFilter(
                 row.values[0..row.column_count],
                 schema,
                 read_idx,
-            ) catch false
+            ) catch |err| switch (err) {
+                error.UndefinedParameter => {
+                    setError(result, "undefined parameter in where predicate");
+                    return;
+                },
+                else => false,
+            }
         else
-            filter_mod.evaluatePredicate(
+            filter_mod.evaluatePredicateWithResolvers(
                 ctx.ast,
                 ctx.tokens,
                 ctx.source,
                 predicate,
                 row.values[0..row.column_count],
                 schema,
-            ) catch false;
+                null,
+                &parameter_resolver,
+            ) catch |err| switch (err) {
+                error.UndefinedParameter => {
+                    setError(result, "undefined parameter in where predicate");
+                    return;
+                },
+                else => false,
+            };
 
         if (matches) {
             if (write_idx != read_idx) {
@@ -827,6 +847,31 @@ fn applyWhereFilter(
     std.debug.assert(result.row_count <= original_count);
 }
 
+fn parameterResolverForContext(
+    ctx: *const ExecContext,
+) filter_mod.ParameterResolver {
+    return .{
+        .ctx = ctx,
+        .resolve = resolveParameterBinding,
+    };
+}
+
+fn resolveParameterBinding(
+    raw_ctx: *const anyopaque,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    token_index: u16,
+) filter_mod.EvalError!Value {
+    const ctx: *const ExecContext = @ptrCast(@alignCast(raw_ctx));
+    const parameter_name = tokens.getText(token_index, source);
+    for (ctx.parameter_bindings) |binding| {
+        if (std.mem.eql(u8, binding.name, parameter_name)) {
+            return binding.value;
+        }
+    }
+    return error.UndefinedParameter;
+}
+
 /// Truncate result to limit rows.
 fn applyLimit(
     ctx: *const ExecContext,
@@ -837,13 +882,16 @@ fn applyLimit(
     const expr = node.data.unary;
     if (expr == null_node) return;
 
-    const val = filter_mod.evaluateExpression(
+    const parameter_resolver = parameterResolverForContext(ctx);
+    const val = filter_mod.evaluateExpressionWithResolvers(
         ctx.ast,
         ctx.tokens,
         ctx.source,
         expr,
         &.{},
         &RowSchema{},
+        null,
+        &parameter_resolver,
     ) catch return;
 
     const limit = numericToRowCount(val) orelse return;
@@ -865,13 +913,16 @@ fn applyOffset(
     const expr = node.data.unary;
     if (expr == null_node) return;
 
-    const val = filter_mod.evaluateExpression(
+    const parameter_resolver = parameterResolverForContext(ctx);
+    const val = filter_mod.evaluateExpressionWithResolvers(
         ctx.ast,
         ctx.tokens,
         ctx.source,
         expr,
         &.{},
         &RowSchema{},
+        null,
+        &parameter_resolver,
     ) catch return;
 
     const offset = numericToRowCount(val) orelse return;
@@ -1301,13 +1352,16 @@ fn accumulateGroupAggregates(
         const descriptor = group_runtime.aggregate_descriptors[slot];
         if (descriptor.kind == .count_star) continue;
 
-        const arg_value = filter_mod.evaluateExpression(
+        const parameter_resolver = parameterResolverForContext(ctx);
+        const arg_value = filter_mod.evaluateExpressionWithResolvers(
             ctx.ast,
             ctx.tokens,
             ctx.source,
             descriptor.arg_node,
             row_values,
             schema,
+            null,
+            &parameter_resolver,
         ) catch {
             setError(result, "aggregate evaluation failed");
             return false;
@@ -1653,14 +1707,19 @@ fn evaluateSortKeyValue(
                 row_index,
             )
         else
-            filter_mod.evaluateExpression(
+            blk: {
+                const parameter_resolver = parameterResolverForContext(ctx);
+                break :blk filter_mod.evaluateExpressionWithResolvers(
                 ctx.ast,
                 ctx.tokens,
                 ctx.source,
                 key.expr_node,
                 row.values[0..row.column_count],
                 schema,
-            ),
+                null,
+                &parameter_resolver,
+            );
+            },
     };
 }
 
@@ -1687,7 +1746,8 @@ fn evaluateGroupedPredicate(
         .ctx = &agg_ctx,
         .resolve = resolveGroupedAggregate,
     };
-    return filter_mod.evaluatePredicateWithResolver(
+    const parameter_resolver = parameterResolverForContext(ctx);
+    return filter_mod.evaluatePredicateWithResolvers(
         ctx.ast,
         ctx.tokens,
         ctx.source,
@@ -1695,6 +1755,7 @@ fn evaluateGroupedPredicate(
         row_values,
         schema,
         &resolver,
+        &parameter_resolver,
     );
 }
 
@@ -1715,7 +1776,8 @@ fn evaluateGroupedExpression(
         .ctx = &agg_ctx,
         .resolve = resolveGroupedAggregate,
     };
-    return filter_mod.evaluateExpressionWithResolver(
+    const parameter_resolver = parameterResolverForContext(ctx);
+    return filter_mod.evaluateExpressionWithResolvers(
         ctx.ast,
         ctx.tokens,
         ctx.source,
@@ -1723,6 +1785,7 @@ fn evaluateGroupedExpression(
         row_values,
         schema,
         &resolver,
+        &parameter_resolver,
     );
 }
 
@@ -1968,7 +2031,7 @@ fn executeMutation(
     switch (mut_op.kind) {
         .insert_op => {
             const node = ctx.ast.getNode(mut_op.node);
-            const row_id = mutation_mod.executeInsertWithDiagnostic(
+            const row_id = mutation_mod.executeInsertWithDiagnosticAndParameters(
                 ctx.catalog,
                 ctx.pool,
                 ctx.wal,
@@ -1978,6 +2041,7 @@ fn executeMutation(
                 ctx.tokens,
                 ctx.source,
                 node.data.unary,
+                ctx.parameter_bindings,
                 &diagnostic,
             ) catch |err| {
                 setMutationBoundaryError(result, ctx, .insert_op, err, &diagnostic);
@@ -2025,6 +2089,7 @@ fn executeMutation(
                 predicate,
                 node.data.unary,
                 ctx.allocator,
+                ctx.parameter_bindings,
                 capture,
                 &diagnostic,
             ) catch |err| {
@@ -2060,6 +2125,7 @@ fn executeMutation(
                 ctx.source,
                 predicate,
                 ctx.allocator,
+                ctx.parameter_bindings,
                 capture,
             ) catch |err| {
                 setBoundaryError(
@@ -2117,19 +2183,28 @@ fn materializeRowsMatchingPredicate(
 
     if (predicate_node != null_node) {
         const schema = &model.row_schema;
+        const parameter_resolver = parameterResolverForContext(ctx);
         const original_count = out.row_count;
         var write_idx: u16 = 0;
         var read_idx: u16 = 0;
         while (read_idx < out.row_count) : (read_idx += 1) {
             const row = &out.rows[read_idx];
-            const matches = filter_mod.evaluatePredicate(
+            const matches = filter_mod.evaluatePredicateWithResolvers(
                 ctx.ast,
                 ctx.tokens,
                 ctx.source,
                 predicate_node,
                 row.values[0..row.column_count],
                 schema,
-            ) catch false;
+                null,
+                &parameter_resolver,
+            ) catch |err| switch (err) {
+                error.UndefinedParameter => {
+                    setError(out, "undefined parameter in predicate");
+                    return false;
+                },
+                else => false,
+            };
 
             if (matches) {
                 if (write_idx != read_idx) out.rows[write_idx] = out.rows[read_idx];
@@ -2488,6 +2563,7 @@ const ExecTestEnv = struct {
             .ast = ast,
             .tokens = tokens,
             .source = source,
+            .parameter_bindings = &.{},
             .allocator = testing.allocator,
             .result_rows = self.result_rows,
             .scratch_rows_a = self.scratch_rows_a,
@@ -2611,6 +2687,69 @@ test "execute where filter" {
         @as(i64, 1),
         result.rows[0].values[0].i64,
     );
+}
+
+test "execute where filter resolves bound parameter expressions" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const src1 = "User |> insert(id = 1, name = \"Alice\", active = true)";
+    const tok1 = tokenizer_mod.tokenize(src1);
+    const p1 = parser_mod.parse(&tok1, src1);
+    var r1 = try execute(&env.makeCtx(tx, &snap, &p1.ast, &tok1, src1));
+    defer r1.deinit();
+
+    const src2 = "User |> insert(id = 2, name = \"Bob\", active = false)";
+    const tok2 = tokenizer_mod.tokenize(src2);
+    const p2 = parser_mod.parse(&tok2, src2);
+    var r2 = try execute(&env.makeCtx(tx, &snap, &p2.ast, &tok2, src2));
+    defer r2.deinit();
+
+    const src3 = "User |> where(id == $target_id)";
+    const tok3 = tokenizer_mod.tokenize(src3);
+    const p3 = parser_mod.parse(&tok3, src3);
+    const bindings = [_]ParameterBinding{
+        .{ .name = "$target_id", .value = .{ .i64 = 2 } },
+    };
+    var ctx = env.makeCtx(tx, &snap, &p3.ast, &tok3, src3);
+    ctx.parameter_bindings = bindings[0..];
+    var result = try execute(&ctx);
+    defer result.deinit();
+
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(@as(u16, 1), result.row_count);
+    try testing.expectEqual(@as(i64, 2), result.rows[0].values[0].i64);
+}
+
+test "execute where filter fails closed on undefined parameter" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const src1 = "User |> insert(id = 1, name = \"Alice\", active = true)";
+    const tok1 = tokenizer_mod.tokenize(src1);
+    const p1 = parser_mod.parse(&tok1, src1);
+    var r1 = try execute(&env.makeCtx(tx, &snap, &p1.ast, &tok1, src1));
+    defer r1.deinit();
+
+    const src2 = "User |> where(id == $missing)";
+    const tok2 = tokenizer_mod.tokenize(src2);
+    const p2 = parser_mod.parse(&tok2, src2);
+    var result = try execute(&env.makeCtx(tx, &snap, &p2.ast, &tok2, src2));
+    defer result.deinit();
+
+    try testing.expect(result.has_error);
+    const msg = result.getError().?;
+    try testing.expect(std.mem.indexOf(u8, msg, "undefined parameter in where predicate") != null);
 }
 
 test "execute limit" {

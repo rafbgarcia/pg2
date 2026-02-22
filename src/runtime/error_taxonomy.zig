@@ -73,6 +73,7 @@ pub fn classifyMutation(err: mutation_mod.MutationError) ErrorClass {
         error.NullArithmeticOperand => .fatal,
         error.UnknownFunction => .fatal,
         error.NullInPredicate => .fatal,
+        error.UndefinedParameter => .fatal,
         error.ResultOverflow => .resource_exhausted,
         error.ReturningBufferExhausted => .resource_exhausted,
         error.OverflowRegionExhausted => .resource_exhausted,

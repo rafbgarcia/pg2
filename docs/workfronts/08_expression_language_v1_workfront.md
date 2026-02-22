@@ -26,6 +26,8 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 ## Current Gaps Snapshot
 - Expression equality currently uses `=` in parser/evaluator/tests and must be migrated to `==`.
 - Evaluator does not explicitly handle membership function semantics and `expr_parameter`/`expr_list` node semantics in row predicate evaluation paths.
+- ref `P08-02` `expr_parameter` evaluation now exists in core executor/mutation paths, but there is no end-user request/session transport for passing parameter bindings yet.
+  - Current feature tests can assert deterministic undefined-parameter failures, but cannot drive successful bound-parameter flows through the user-facing session API without additional binding-input design.
 - `lower`, `upper`, `trim` are placeholders.
 - `now()` is placeholder and must be wired to injected clock semantics.
 - No dedicated feature files for most expression capabilities.
@@ -97,7 +99,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
   - Type mismatch and null behavior defined and tested.
 - [x] `E08` Implement evaluator semantics for `!in(value, list)`.
 - [x] `E09` Implement evaluator semantics for list literals in function-based membership checks.
-- [ ] `E10` Implement parameter expression evaluation (`expr_parameter`) with explicit binding source.
+- [x] `E10` Implement parameter expression evaluation (`expr_parameter`) with explicit binding source.
   - Undefined parameter must fail closed with deterministic error.
 - [x] `E11` Normalize null-comparison behavior under symbolic boolean operators.
 - [ ] `E12` Add evaluator regressions for removed legacy logical/membership forms.
@@ -153,7 +155,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - [ ] `T14` `test/features/expressions/logical_not_test.zig` (side note: unary logical negation `!` semantics and parse shape)
 - [ ] `T15` `test/features/expressions/logical_and_test.zig` (side note: conjunction `&&` semantics and parse shape)
 - [ ] `T16` `test/features/expressions/logical_or_test.zig` (side note: disjunction `||` semantics and parse shape)
-- [ ] `T17` `test/features/expressions/parameters_test.zig` (side note: parameter binding semantics, undefined-parameter failures, and deterministic diagnostics)
+- [x] `T17` `test/features/expressions/parameters_test.zig` (side note: parameter binding semantics, undefined-parameter failures, and deterministic diagnostics)
 - [ ] `T18` `test/features/expressions/stdlib/abs_test.zig`, `test/features/expressions/stdlib/sqrt_test.zig`, `test/features/expressions/stdlib/round_test.zig` (side note: numeric builtin behavior and type/arity validation; one file per function)
 - [ ] `T19` `test/features/expressions/stdlib/lower_test.zig`, `test/features/expressions/stdlib/upper_test.zig`, `test/features/expressions/stdlib/trim_test.zig`, `test/features/expressions/stdlib/length_test.zig`, `test/features/expressions/stdlib/coalesce_test.zig` (side note: string/null-handling builtins with edge cases; one file per function)
 - [ ] `T20` `test/features/expressions/stdlib/now_test.zig` (side note: deterministic time function behavior via injected clock; no system clock in core code)
@@ -187,12 +189,23 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - Product decision captured explicitly before implementation.
 
 ### Tasks
-- [ ] Evaluate expression-level pipeline syntax for function composition in expressions.
+- [ ] `P07` Evaluate expression-level pipeline syntax for function composition in expressions.
   - Candidate (pending): `status |> in([a, b, c])`.
   - Keep query-level pipeline `|>` behavior unchanged.
   - Do not implement until explicit product sign-off.
+- [ ] `P08-02` Decide user-facing parameter binding input surface for `$param`.
+  - Candidate A: structured runtime/session API payload only (bindings separate from query text).
+  - Candidate B: query-text binding syntax (for example dedicated `params(...)` stage or preamble binding form).
+  - Candidate C: support both, with one documented default path.
+  - Must define deterministic conflict rules (duplicate keys, shadowing, missing keys, and null handling) and fail-closed diagnostics.
+- [ ] `P08-03` After `P08-02` is decided, add session/request integration tests for successful bound-parameter execution.
+  - Cover at minimum: `where`, `update` assignments, computed `select`, `sort(expr)`, and deterministic undefined-parameter errors.
+  - Dependency: do not start this task until `P08-02` is explicitly accepted in product sign-off notes.
+  - Keep one capability file for binding transport behavior in `test/features/expressions/parameters_test.zig`.
 
 ## Implementation Log
+- 2026-02-22: Captured follow-up product decision gap for parameters: core evaluator/executor now supports explicit parameter bindings (`parameter_bindings`) and deterministic undefined-parameter failures, but the end-user session/request surface still lacks a binding transport contract. Added pending product-decision tasks under Phase 8 for binding input shape and conflict/error semantics before adding successful session-path feature coverage.
+- 2026-02-22: Completed `E10` and `T17` by implementing explicit `expr_parameter` evaluator handling with a resolver-backed binding source and deterministic undefined-parameter failures (`UndefinedParameter`) across executor and mutation paths. Added resolver plumbing in execution context (`parameter_bindings`), wired mutation/operator evaluation to pass bindings explicitly, added evaluator/executor regressions for bound and undefined parameters, and introduced `test/features/expressions/parameters_test.zig` for fail-closed feature coverage. Imported in `test/features/features_specs_test.zig`.
 - 2026-02-21: Completed `E22` by wiring explicit `having(...)` operator support end-to-end (tokenizer keyword classification, parser operator parsing to `op_having`, executor plan mapping/labeling) and adding `test/features/expressions/having_test.zig`. The suite covers composed aggregate predicates with boolean/membership logic, null equality semantics in grouped predicates, and fail-closed invalid aggregate operand typing. Imported in `test/features/features_specs_test.zig` and validated via `zig build test`.
 - 2026-02-21: Completed `E20` by implementing runtime projection support for top-level computed select fields (`select_computed`) in `src/executor/executor.zig` and adding `test/features/expressions/computed_select_test.zig`. Coverage includes parity between `where` and computed projection for composed boolean/arithmetic/membership expressions, null equality semantics in computed output (`status == null || status != null`), and fail-closed computed projection errors for incompatible comparison types. Imported in `test/features/features_specs_test.zig` and validated with `zig build test`.
 - 2026-02-21: Completed `E19` by adding `test/features/expressions/update_assignment_test.zig` with dedicated parity coverage for expression evaluation in `update(...)` assignments: composed boolean/arithmetic/membership expressions aligned with `where` outcomes, null equality semantics (`status == null || status != null`) assigned through update paths, fail-closed incompatible comparison typing (`string == i64`), and fail-closed null arithmetic operand diagnostics with assignment path (`path=update.flag`). Imported the file in `test/features/features_specs_test.zig` and validated via `zig build test`.

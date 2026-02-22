@@ -36,6 +36,7 @@ pub const EvalError = error{
     InvalidLiteral,
     UnknownFunction,
     NullInPredicate,
+    UndefinedParameter,
 };
 
 pub const AggregateResolver = struct {
@@ -48,12 +49,28 @@ pub const AggregateResolver = struct {
     ) EvalError!Value,
 };
 
+pub const ParameterBinding = struct {
+    name: []const u8,
+    value: Value,
+};
+
+pub const ParameterResolver = struct {
+    ctx: *const anyopaque,
+    resolve: *const fn (
+        ctx: *const anyopaque,
+        tokens: *const TokenizeResult,
+        source: []const u8,
+        token_index: u16,
+    ) EvalError!Value,
+};
+
 /// Work items for iterative post-order traversal.
 const WorkItem = union(enum) {
     evaluate: NodeIndex,
     apply_binary: u16,
     apply_unary: u16,
     apply_column_ref: u16,
+    apply_parameter: u16,
     apply_literal: u16,
     apply_aggregate: NodeIndex,
     apply_function: struct { token_index: u16, arg_count: u16 },
@@ -69,13 +86,14 @@ pub fn evaluateExpression(
     row_values: []const Value,
     schema: *const RowSchema,
 ) EvalError!Value {
-    return evaluateExpressionWithResolver(
+    return evaluateExpressionWithResolvers(
         tree,
         tokens,
         source,
         node_index,
         row_values,
         schema,
+        null,
         null,
     );
 }
@@ -88,6 +106,28 @@ pub fn evaluateExpressionWithResolver(
     row_values: []const Value,
     schema: *const RowSchema,
     resolver: ?*const AggregateResolver,
+) EvalError!Value {
+    return evaluateExpressionWithResolvers(
+        tree,
+        tokens,
+        source,
+        node_index,
+        row_values,
+        schema,
+        resolver,
+        null,
+    );
+}
+
+pub fn evaluateExpressionWithResolvers(
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    node_index: NodeIndex,
+    row_values: []const Value,
+    schema: *const RowSchema,
+    aggregate_resolver: ?*const AggregateResolver,
+    parameter_resolver: ?*const ParameterResolver,
 ) EvalError!Value {
     var eval_stack: [max_eval_stack]Value = undefined;
     var eval_count: u16 = 0;
@@ -119,6 +159,16 @@ pub fn evaluateExpressionWithResolver(
                 const col = schema.findColumn(name) orelse
                     return error.ColumnNotFound;
                 try evalPush(&eval_stack, &eval_count, row_values[col]);
+            },
+            .apply_parameter => |tok_idx| {
+                const r = parameter_resolver orelse return error.UndefinedParameter;
+                const val = try r.resolve(
+                    r.ctx,
+                    tokens,
+                    source,
+                    tok_idx,
+                );
+                try evalPush(&eval_stack, &eval_count, val);
             },
             .apply_binary => |tok_idx| {
                 const op_type = tokens.tokens[tok_idx].token_type;
@@ -152,7 +202,7 @@ pub fn evaluateExpressionWithResolver(
                 try evalPush(&eval_stack, &eval_count, result);
             },
             .apply_aggregate => |agg_node_idx| {
-                const r = resolver orelse return error.UnknownFunction;
+                const r = aggregate_resolver orelse return error.UnknownFunction;
                 const val = try r.resolve(
                     r.ctx,
                     agg_node_idx,
@@ -195,13 +245,14 @@ pub fn evaluatePredicate(
     row_values: []const Value,
     schema: *const RowSchema,
 ) EvalError!bool {
-    return evaluatePredicateWithResolver(
+    return evaluatePredicateWithResolvers(
         tree,
         tokens,
         source,
         node_index,
         row_values,
         schema,
+        null,
         null,
     );
 }
@@ -215,7 +266,7 @@ pub fn evaluatePredicateWithResolver(
     schema: *const RowSchema,
     resolver: ?*const AggregateResolver,
 ) EvalError!bool {
-    const val = try evaluateExpressionWithResolver(
+    return evaluatePredicateWithResolvers(
         tree,
         tokens,
         source,
@@ -223,6 +274,29 @@ pub fn evaluatePredicateWithResolver(
         row_values,
         schema,
         resolver,
+        null,
+    );
+}
+
+pub fn evaluatePredicateWithResolvers(
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    node_index: NodeIndex,
+    row_values: []const Value,
+    schema: *const RowSchema,
+    aggregate_resolver: ?*const AggregateResolver,
+    parameter_resolver: ?*const ParameterResolver,
+) EvalError!bool {
+    const val = try evaluateExpressionWithResolvers(
+        tree,
+        tokens,
+        source,
+        node_index,
+        row_values,
+        schema,
+        aggregate_resolver,
+        parameter_resolver,
     );
     if (val == .null_value) return error.NullInPredicate;
     if (val != .bool) return error.TypeMismatch;
@@ -250,6 +324,11 @@ fn pushNodeWork(
         .expr_column_ref => {
             try workPush(work_stack, work_count, .{
                 .apply_column_ref = node.data.token,
+            });
+        },
+        .expr_parameter => {
+            try workPush(work_stack, work_count, .{
+                .apply_parameter = node.data.token,
             });
         },
         .expr_binary => {
@@ -909,6 +988,26 @@ fn makeAstLiteral(tree: *Ast, tok_idx: u16) !NodeIndex {
     return tree.addNode(.expr_literal, .{ .token = tok_idx });
 }
 
+const ParameterFixture = struct {
+    bindings: []const ParameterBinding,
+};
+
+fn resolveParameterFromBindings(
+    raw_ctx: *const anyopaque,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    token_index: u16,
+) EvalError!Value {
+    const fixture: *const ParameterFixture = @ptrCast(@alignCast(raw_ctx));
+    const raw_name = tokens.getText(token_index, source);
+    for (fixture.bindings) |binding| {
+        if (std.mem.eql(u8, binding.name, raw_name)) {
+            return binding.value;
+        }
+    }
+    return error.UndefinedParameter;
+}
+
 test "literal integer evaluation" {
     var tree = Ast{};
     const tokens = tokenizer_mod.tokenize("42");
@@ -1115,6 +1214,52 @@ test "column reference evaluation" {
         &schema,
     );
     try testing.expectEqual(@as(i64, 25), result.i64);
+}
+
+test "parameter reference evaluation uses explicit binding resolver" {
+    var tree = Ast{};
+    const source = "$user_id";
+    const tokens = tokenizer_mod.tokenize(source);
+    const node = try tree.addNode(.expr_parameter, .{ .token = 0 });
+    const schema = RowSchema{};
+    const bindings = [_]ParameterBinding{
+        .{ .name = "$user_id", .value = .{ .i64 = 42 } },
+    };
+    const fixture = ParameterFixture{ .bindings = bindings[0..] };
+    const resolver = ParameterResolver{
+        .ctx = &fixture,
+        .resolve = resolveParameterFromBindings,
+    };
+
+    const result = try evaluateExpressionWithResolvers(
+        &tree,
+        &tokens,
+        source,
+        node,
+        &.{},
+        &schema,
+        null,
+        &resolver,
+    );
+    try testing.expectEqual(@as(i64, 42), result.i64);
+}
+
+test "parameter reference fails closed when binding is undefined" {
+    var tree = Ast{};
+    const source = "$missing";
+    const tokens = tokenizer_mod.tokenize(source);
+    const node = try tree.addNode(.expr_parameter, .{ .token = 0 });
+    const schema = RowSchema{};
+
+    const result = evaluateExpression(
+        &tree,
+        &tokens,
+        source,
+        node,
+        &.{},
+        &schema,
+    );
+    try testing.expectError(error.UndefinedParameter, result);
 }
 
 test "function call — abs" {

@@ -47,6 +47,8 @@ const Snapshot = tx_mod.Snapshot;
 const TxManager = tx_mod.TxManager;
 const UndoLog = undo_mod.UndoLog;
 const ResultRow = scan_mod.ResultRow;
+const ParameterBinding = filter_mod.ParameterBinding;
+const ParameterResolver = filter_mod.ParameterResolver;
 
 /// Maximum encoded row size.
 pub const max_row_buf_size = 8000;
@@ -79,6 +81,7 @@ pub const MutationError = error{
     NullArithmeticOperand,
     UnknownFunction,
     NullInPredicate,
+    UndefinedParameter,
     ResultOverflow,
     ReturningBufferExhausted,
     OverflowRegionExhausted,
@@ -208,6 +211,34 @@ pub fn executeInsertWithDiagnostic(
     first_assignment_node: NodeIndex,
     diagnostic: ?*MutationDiagnostic,
 ) MutationError!RowId {
+    return executeInsertWithDiagnosticAndParameters(
+        catalog,
+        pool,
+        wal,
+        tx_id,
+        model_id,
+        tree,
+        tokens,
+        source,
+        first_assignment_node,
+        &.{},
+        diagnostic,
+    );
+}
+
+pub fn executeInsertWithDiagnosticAndParameters(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    tx_id: TxId,
+    model_id: ModelId,
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    first_assignment_node: NodeIndex,
+    parameter_bindings: []const ParameterBinding,
+    diagnostic: ?*MutationDiagnostic,
+) MutationError!RowId {
     std.debug.assert(model_id < catalog.model_count);
     const model = &catalog.models[model_id];
     const schema = &model.row_schema;
@@ -223,6 +254,7 @@ pub fn executeInsertWithDiagnostic(
         source,
         schema,
         first_assignment_node,
+        parameter_bindings,
         &values,
         &assigned_columns,
         diagnostic,
@@ -353,7 +385,7 @@ pub fn executeUpdate(
     first_assignment_node: NodeIndex,
     allocator: Allocator,
 ) MutationError!u32 {
-    return executeUpdateWithDiagnosticAndReturning(
+    return executeUpdateWithDiagnosticAndReturningAndParameters(
         catalog,
         pool,
         wal,
@@ -368,6 +400,7 @@ pub fn executeUpdate(
         predicate_node,
         first_assignment_node,
         allocator,
+        &.{},
         null,
         null,
     );
@@ -390,7 +423,7 @@ pub fn executeUpdateWithDiagnostic(
     allocator: Allocator,
     diagnostic: ?*MutationDiagnostic,
 ) MutationError!u32 {
-    return executeUpdateWithDiagnosticAndReturning(
+    return executeUpdateWithDiagnosticAndReturningAndParameters(
         catalog,
         pool,
         wal,
@@ -405,6 +438,7 @@ pub fn executeUpdateWithDiagnostic(
         predicate_node,
         first_assignment_node,
         allocator,
+        &.{},
         null,
         diagnostic,
     );
@@ -425,6 +459,47 @@ pub fn executeUpdateWithDiagnosticAndReturning(
     predicate_node: NodeIndex,
     first_assignment_node: NodeIndex,
     allocator: Allocator,
+    parameter_bindings: []const ParameterBinding,
+    returning_capture: ?*ReturningCapture,
+    diagnostic: ?*MutationDiagnostic,
+) MutationError!u32 {
+    return executeUpdateWithDiagnosticAndReturningAndParameters(
+        catalog,
+        pool,
+        wal,
+        undo_log,
+        tx_id,
+        snapshot,
+        tx_manager,
+        model_id,
+        tree,
+        tokens,
+        source,
+        predicate_node,
+        first_assignment_node,
+        allocator,
+        parameter_bindings,
+        returning_capture,
+        diagnostic,
+    );
+}
+
+pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    undo_log: *UndoLog,
+    tx_id: TxId,
+    snapshot: *const Snapshot,
+    tx_manager: *const TxManager,
+    model_id: ModelId,
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    predicate_node: NodeIndex,
+    first_assignment_node: NodeIndex,
+    allocator: Allocator,
+    parameter_bindings: []const ParameterBinding,
     returning_capture: ?*ReturningCapture,
     diagnostic: ?*MutationDiagnostic,
 ) MutationError!u32 {
@@ -473,13 +548,22 @@ pub fn executeUpdateWithDiagnosticAndReturning(
 
             // Apply predicate filter.
             if (predicate_node != null_node) {
-                const matches = filter_mod.evaluatePredicate(
+                const parameter_ctx = ParameterBindingContext{
+                    .bindings = parameter_bindings,
+                };
+                const parameter_resolver = ParameterResolver{
+                    .ctx = &parameter_ctx,
+                    .resolve = resolveParameterBinding,
+                };
+                const matches = filter_mod.evaluatePredicateWithResolvers(
                     tree,
                     tokens,
                     source,
                     predicate_node,
                     row.values[0..row.column_count],
                     schema,
+                    null,
+                    &parameter_resolver,
                 ) catch continue;
                 if (!matches) continue;
             }
@@ -494,6 +578,7 @@ pub fn executeUpdateWithDiagnosticAndReturning(
                 source,
                 schema,
                 first_assignment_node,
+                parameter_bindings,
                 new_values[0..row.column_count],
                 diagnostic,
             ) catch |e| return e;
@@ -559,7 +644,7 @@ pub fn executeDelete(
     predicate_node: NodeIndex,
     allocator: Allocator,
 ) MutationError!u32 {
-    return executeDeleteWithReturning(
+    return executeDeleteWithReturningAndParameters(
         catalog,
         pool,
         wal,
@@ -573,6 +658,7 @@ pub fn executeDelete(
         source,
         predicate_node,
         allocator,
+        &.{},
         null,
     );
 }
@@ -591,6 +677,43 @@ pub fn executeDeleteWithReturning(
     source: []const u8,
     predicate_node: NodeIndex,
     allocator: Allocator,
+    parameter_bindings: []const ParameterBinding,
+    returning_capture: ?*ReturningCapture,
+) MutationError!u32 {
+    return executeDeleteWithReturningAndParameters(
+        catalog,
+        pool,
+        wal,
+        undo_log,
+        tx_id,
+        snapshot,
+        tx_manager,
+        model_id,
+        tree,
+        tokens,
+        source,
+        predicate_node,
+        allocator,
+        parameter_bindings,
+        returning_capture,
+    );
+}
+
+pub fn executeDeleteWithReturningAndParameters(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    undo_log: *UndoLog,
+    tx_id: TxId,
+    snapshot: *const Snapshot,
+    tx_manager: *const TxManager,
+    model_id: ModelId,
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    predicate_node: NodeIndex,
+    allocator: Allocator,
+    parameter_bindings: []const ParameterBinding,
     returning_capture: ?*ReturningCapture,
 ) MutationError!u32 {
     std.debug.assert(model_id < catalog.model_count);
@@ -639,13 +762,22 @@ pub fn executeDeleteWithReturning(
 
             // Apply predicate filter.
             if (predicate_node != null_node) {
-                const matches = filter_mod.evaluatePredicate(
+                const parameter_ctx = ParameterBindingContext{
+                    .bindings = parameter_bindings,
+                };
+                const parameter_resolver = ParameterResolver{
+                    .ctx = &parameter_ctx,
+                    .resolve = resolveParameterBinding,
+                };
+                const matches = filter_mod.evaluatePredicateWithResolvers(
                     tree,
                     tokens,
                     source,
                     predicate_node,
                     row.values[0..row.column_count],
                     schema,
+                    null,
+                    &parameter_resolver,
                 ) catch continue;
                 if (!matches) continue;
             }
@@ -1706,6 +1838,26 @@ fn resolveVisibleVersion(
     return vis orelse heap_data;
 }
 
+const ParameterBindingContext = struct {
+    bindings: []const ParameterBinding,
+};
+
+fn resolveParameterBinding(
+    raw_ctx: *const anyopaque,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    token_index: u16,
+) filter_mod.EvalError!Value {
+    const ctx: *const ParameterBindingContext = @ptrCast(@alignCast(raw_ctx));
+    const parameter_name = tokens.getText(token_index, source);
+    for (ctx.bindings) |binding| {
+        if (std.mem.eql(u8, binding.name, parameter_name)) {
+            return binding.value;
+        }
+    }
+    return error.UndefinedParameter;
+}
+
 /// Build a Value array from an assignment linked list.
 ///
 /// Each assignment node has: extra = field name token,
@@ -1717,6 +1869,7 @@ pub fn buildRowFromAssignments(
     source: []const u8,
     schema: *const RowSchema,
     first_assignment: NodeIndex,
+    parameter_bindings: []const ParameterBinding,
     out_values: []Value,
     out_assigned: []bool,
     diagnostic: ?*MutationDiagnostic,
@@ -1725,6 +1878,13 @@ pub fn buildRowFromAssignments(
     std.debug.assert(out_assigned.len >= schema.column_count);
 
     var current = first_assignment;
+    const parameter_ctx = ParameterBindingContext{
+        .bindings = parameter_bindings,
+    };
+    const parameter_resolver = ParameterResolver{
+        .ctx = &parameter_ctx,
+        .resolve = resolveParameterBinding,
+    };
     while (current != null_node) {
         const node = tree.getNode(current);
         std.debug.assert(node.tag == .assignment);
@@ -1742,13 +1902,15 @@ pub fn buildRowFromAssignments(
         };
 
         const expr_node = node.data.unary;
-        const val = filter_mod.evaluateExpression(
+        const val = filter_mod.evaluateExpressionWithResolvers(
             tree,
             tokens,
             source,
             expr_node,
             &.{},
             schema,
+            null,
+            &parameter_resolver,
         ) catch |e| {
             const mapped = mapFilterError(e);
             if (mapped == error.NumericOverflow) {
@@ -1807,12 +1969,20 @@ fn applyAssignments(
     source: []const u8,
     schema: *const RowSchema,
     first_assignment: NodeIndex,
+    parameter_bindings: []const ParameterBinding,
     values: []Value,
     diagnostic: ?*MutationDiagnostic,
 ) MutationError!void {
     std.debug.assert(values.len >= schema.column_count);
 
     var current = first_assignment;
+    const parameter_ctx = ParameterBindingContext{
+        .bindings = parameter_bindings,
+    };
+    const parameter_resolver = ParameterResolver{
+        .ctx = &parameter_ctx,
+        .resolve = resolveParameterBinding,
+    };
     while (current != null_node) {
         const node = tree.getNode(current);
         std.debug.assert(node.tag == .assignment);
@@ -1831,13 +2001,15 @@ fn applyAssignments(
 
         // Evaluate expression with current row values for context.
         const expr_node = node.data.unary;
-        const val = filter_mod.evaluateExpression(
+        const val = filter_mod.evaluateExpressionWithResolvers(
             tree,
             tokens,
             source,
             expr_node,
             values,
             schema,
+            null,
+            &parameter_resolver,
         ) catch |e| {
             const mapped = mapFilterError(e);
             if (mapped == error.NumericOverflow) {
@@ -2243,6 +2415,7 @@ fn mapFilterError(err: filter_mod.EvalError) MutationError {
         error.InvalidLiteral => error.InvalidLiteral,
         error.UnknownFunction => error.UnknownFunction,
         error.NullInPredicate => error.NullInPredicate,
+        error.UndefinedParameter => error.UndefinedParameter,
     };
 }
 

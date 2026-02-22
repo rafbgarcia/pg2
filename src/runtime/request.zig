@@ -28,6 +28,7 @@ pub const ExecuteRequest = struct {
     ast: *const Ast,
     tokens: *const TokenizeResult,
     source: []const u8,
+    parameter_bindings: []const exec_mod.ParameterBinding = &.{},
 };
 
 pub fn executeWithPoolConn(
@@ -53,6 +54,7 @@ fn makeExecContext(
         .ast = request.ast,
         .tokens = request.tokens,
         .source = request.source,
+        .parameter_bindings = request.parameter_bindings,
         .allocator = runtime.static_allocator.allocator(),
         .result_rows = request.pool_conn.query_buffers.result_rows,
         .scratch_rows_a = request.pool_conn.query_buffers.scratch_rows_a,
