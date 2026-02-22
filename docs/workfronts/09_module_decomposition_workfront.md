@@ -52,7 +52,7 @@ After extraction `btree.zig` retains `BTree` struct, find/insert/delete/rangeSca
 - `zig build test` passes with zero test modifications.
 - No new public API — extracted modules are `@import`ed only by `btree.zig`.
 
-## Phase 4: Filter — Operation Extraction
+## Phase 4: Filter — Operation Extraction ✅
 ### Scope
 Extract operator families out of `src/executor/filter.zig` (1132 prod lines, 6 concerns):
 
