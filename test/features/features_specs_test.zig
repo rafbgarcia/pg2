@@ -25,10 +25,10 @@ comptime {
     _ = @import("field_types/f64_test.zig");
     _ = @import("field_types/string_test.zig");
     _ = @import("field_types/timestamp_test.zig");
-    _ = @import("mutations/delete_test.zig");
-    _ = @import("mutations/insert_test.zig");
-    _ = @import("queries/select_test.zig");
-    _ = @import("mutations/update_test.zig");
+    _ = @import("expressions/delete_test.zig");
+    _ = @import("expressions/insert_test.zig");
+    _ = @import("expressions/select_test.zig");
+    _ = @import("expressions/update_test.zig");
     _ = @import("expressions/addition_test.zig");
     _ = @import("expressions/computed_select_test.zig");
     _ = @import("expressions/having_test.zig");
