@@ -11,7 +11,7 @@ Queries should degrade performance under memory pressure before failing, using p
 ## Phase 1: Temp/Spill Storage Foundation
 ### Scope
 - Add temp storage manager and page allocator.
-- Add spill telemetry counters (bytes/pages read/write).
+- Add spill telemetry counters to `ExecStats` (temp pages allocated/reclaimed, temp bytes read/written). These raw counters are the source of truth consumed by Workfront 04's metrics contract.
 
 ### Gate
 - Unit tests for allocation, reclaim, and fault handling.

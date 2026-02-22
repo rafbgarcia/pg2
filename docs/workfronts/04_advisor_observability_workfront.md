@@ -17,7 +17,7 @@ Build an extensible advisor module that consumes runtime/query metrics and emits
   - mutation counts and latency
   - plan characteristics (full scan, join strategy, sort/group)
   - queue/backpressure stats
-  - spill/temp I/O stats
+  - spill/temp I/O stats (raw counters produced by Workfront 03 on `ExecStats`; this phase defines the ingestion contract, not the counters themselves)
 
 ### Gate
 - Deterministic metric unit tests with stable field schema.
