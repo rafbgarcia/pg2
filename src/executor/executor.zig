@@ -10,6 +10,7 @@ const ast_mod = @import("../parser/ast.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
 const heap_storage_mod = @import("../storage/heap.zig");
 const row_mod = @import("../storage/row.zig");
+const io_mod = @import("../storage/io.zig");
 const buffer_pool_mod = @import("../storage/buffer_pool.zig");
 const wal_mod = @import("../storage/wal.zig");
 const catalog_mod = @import("../catalog/catalog.zig");
@@ -31,6 +32,7 @@ const max_tokens = tokenizer_mod.max_tokens;
 const RowId = heap_storage_mod.RowId;
 const Value = row_mod.Value;
 const RowSchema = row_mod.RowSchema;
+const Storage = io_mod.Storage;
 const BufferPool = buffer_pool_mod.BufferPool;
 const Wal = wal_mod.Wal;
 const Catalog = catalog_mod.Catalog;
@@ -156,6 +158,10 @@ pub const ExecStats = struct {
     rows_deleted: u32 = 0,
     pages_read: u32 = 0,
     pages_written: u32 = 0,
+    temp_pages_allocated: u32 = 0,
+    temp_pages_reclaimed: u32 = 0,
+    temp_bytes_written: u64 = 0,
+    temp_bytes_read: u64 = 0,
     plan: PlanStats = .{},
 };
 
@@ -209,6 +215,8 @@ pub const ExecContext = struct {
     scratch_rows_a: []ResultRow,
     scratch_rows_b: []ResultRow,
     string_arena_bytes: []u8,
+    storage: Storage,
+    query_slot_index: u16,
 };
 
 /// Operator kind extracted from the AST.
@@ -281,6 +289,10 @@ fn accumulateStatementStats(total: *ExecStats, current: *const ExecStats) void {
     total.rows_deleted +|= current.rows_deleted;
     total.pages_read +|= current.pages_read;
     total.pages_written +|= current.pages_written;
+    total.temp_pages_allocated +|= current.temp_pages_allocated;
+    total.temp_pages_reclaimed +|= current.temp_pages_reclaimed;
+    total.temp_bytes_written +|= current.temp_bytes_written;
+    total.temp_bytes_read +|= current.temp_bytes_read;
     total.plan = current.plan;
 }
 
@@ -2734,6 +2746,8 @@ const ExecTestEnv = struct {
             .scratch_rows_a = self.scratch_rows_a,
             .scratch_rows_b = self.scratch_rows_b,
             .string_arena_bytes = self.string_arena_bytes,
+            .storage = self.disk.storage(),
+            .query_slot_index = 0,
         };
     }
 };

@@ -41,6 +41,7 @@ pub const BootstrapConfig = struct {
     wal_buffer_capacity_bytes: usize = io_mod.page_size,
     max_query_slots: u16 = 8,
     query_string_arena_bytes_per_slot: usize = 4 * 1024 * 1024,
+    temp_pages_per_query_slot: u64 = 1024,
 };
 
 pub const QueryBuffers = struct {
@@ -55,6 +56,7 @@ pub const QueryBuffers = struct {
 /// runtime operations.
 pub const BootstrappedRuntime = struct {
     static_allocator: StaticAllocator,
+    storage: Storage,
     pool: BufferPool,
     wal: Wal,
     tx_manager: TxManager,
@@ -82,6 +84,7 @@ pub const BootstrappedRuntime = struct {
 
         var runtime: BootstrappedRuntime = undefined;
         runtime.static_allocator = StaticAllocator.init(memory_region);
+        runtime.storage = storage;
         const allocator = runtime.static_allocator.allocator();
 
         runtime.pool = BufferPool.init(

@@ -781,6 +781,15 @@ fn serializeInspectStats(
             overflow_stats.reclaim_failures_total,
         },
     ) catch return error.ResponseTooLarge;
+    writer.print(
+        "INSPECT spill temp_pages_allocated={d} temp_pages_reclaimed={d} temp_bytes_written={d} temp_bytes_read={d}\n",
+        .{
+            exec_stats.temp_pages_allocated,
+            exec_stats.temp_pages_reclaimed,
+            exec_stats.temp_bytes_written,
+            exec_stats.temp_bytes_read,
+        },
+    ) catch return error.ResponseTooLarge;
     writer.writeAll("INSPECT plan source_model=") catch
         return error.ResponseTooLarge;
     writer.writeAll(
@@ -1170,6 +1179,13 @@ test "session inspect appends execution and pool stats" {
             u8,
             output,
             "INSPECT overflow reclaim_queue_depth=0 reclaim_enqueued_total=0 reclaim_dequeued_total=0 reclaim_chains_total=0 reclaim_pages_total=0 reclaim_failures_total=0\n",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "INSPECT spill temp_pages_allocated=0 temp_pages_reclaimed=0 temp_bytes_written=0 temp_bytes_read=0\n",
         ) != null,
     );
     try std.testing.expect(
