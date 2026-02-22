@@ -3441,7 +3441,7 @@ test "execute group supports sum avg min max aggregates" {
     }
 
     const src =
-        "User |> group(active) |> where(max(id) > 1 and min(id) >= 1) |> sort(sum(id) asc, avg(id) asc)";
+        "User |> group(active) |> where(max(id) > 1 && min(id) >= 1) |> sort(sum(id) asc, avg(id) asc)";
     const tok = tokenizer_mod.tokenize(src);
     const p = parser_mod.parse(&tok, src);
     var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
@@ -3494,7 +3494,7 @@ test "execute group enforces aggregate expression capacity contract" {
     defer snap.deinit();
 
     const src =
-        "User |> group(active) |> where(sum(id) > 0 and avg(id) > 0 and min(id) > 0 and max(id) > 0 and sum(id + 1) > 0)";
+        "User |> group(active) |> where(sum(id) > 0 && avg(id) > 0 && min(id) > 0 && max(id) > 0 && sum(id + 1) > 0)";
     const tok = tokenizer_mod.tokenize(src);
     const p = parser_mod.parse(&tok, src);
     var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));

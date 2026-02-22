@@ -31,7 +31,7 @@ User {
 
   reference(posts, id, Post.user_id, withoutReferentialIntegrity)
 
-  scope(active, where(active = true))
+  scope(active, where(active == true))
   index(idx_email, [email], unique)
 }
 
@@ -134,7 +134,7 @@ scope(name, pipeline_expression)
 Example:
 
 ```pg2
-scope(active, where(active = true))
+scope(active, where(active == true))
 scope(recent, where(created_at >= now() - 30.days) |> sort(created_at desc))
 ```
 
@@ -177,7 +177,7 @@ Examples:
 
 ```pg2
 User { id email }
-User |> where(active = true) |> sort(id desc) |> limit(10) { id email }
+User |> where(active == true) |> sort(id desc) |> limit(10) { id email }
 ```
 
 ### Pipeline Operators
@@ -310,13 +310,13 @@ User |> insert(id = 1, email = "a@x.com", active = true) {}
 ### Update
 
 ```pg2
-User |> where(id = 1) |> update(email = "new@x.com") {}
+User |> where(id == 1) |> update(email = "new@x.com") {}
 ```
 
 ### Delete
 
 ```pg2
-User |> where(id = 1) |> delete {}
+User |> where(id == 1) |> delete {}
 ```
 
 ---
@@ -325,9 +325,9 @@ User |> where(id = 1) |> delete {}
 
 Expressions support:
 
-- Comparison: `=`, `!=`, `<`, `<=`, `>`, `>=`
-- Boolean: `and`, `or`, `not`
-- Membership: `in`, `not in`
+- Comparison: `==`, `!=`, `<`, `<=`, `>`, `>=`
+- Boolean: `!`, `&&`, `||`
+- Membership: `in(value, list)`, `!in(value, list)`
 - Arithmetic: `+`, `-`, `*`, `/`
 - Built-ins: `lower`, `upper`, `trim`, `length`, `abs`, `sqrt`, `round`, `coalesce`, `now`
 
@@ -353,8 +353,8 @@ Behavior matrix:
 Examples:
 
 ```pg2
-User |> where(active = true and email != null) { id }
-User |> where(id in [1, 2, 3]) { id }
+User |> where(active == true && email != null) { id }
+User |> where(in(id, [1, 2, 3])) { id }
 User { abs_id: abs(id) }
 ```
 

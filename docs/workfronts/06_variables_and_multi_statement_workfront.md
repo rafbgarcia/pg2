@@ -14,10 +14,10 @@ Support request-scoped variables (`let`) and multiple statements in a single req
 
 ## Proposed Query Shape
 ```pg2
-let userIds = User |> where(active = true) { id }
-User |> where(id in userIds) |> update(active = false) {}
-User |> where(id = 123) |> delete {}
-User |> where(active = true) |> count() { count }
+let userIds = User |> where(active == true) { id }
+User |> where(in(id, userIds)) |> update(active = false) {}
+User |> where(id == 123) |> delete {}
+User |> where(active == true) |> count() { count }
 ```
 
 ## Scope Boundaries
