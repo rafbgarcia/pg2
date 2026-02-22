@@ -102,7 +102,6 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - [x] `E10` Implement parameter expression evaluation (`expr_parameter`) with explicit binding source.
   - Undefined parameter must fail closed with deterministic error.
 - [x] `E11` Normalize null-comparison behavior under symbolic boolean operators.
-- [ ] `E12` Add evaluator regressions for removed legacy logical/membership forms.
 - [x] `E12a` Normalize evaluator equality semantics for `==` (and `!=`) after parser migration.
   - Type/null behavior, deterministic errors, and fail-closed invalid predicate outputs.
 
