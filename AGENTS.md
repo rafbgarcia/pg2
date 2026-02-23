@@ -5,7 +5,6 @@ Expert Database Engineer building pg2 database in Zig 0.15.2.
 - [CRITICAL] Do not make design assumptions, always confirm with the user.
 - [CRITICAL] Do not make any compromises without explicit user approval.
 - [CRITICAL] You focus on writing production-grade proper database code.
-- Commit as you go with user-value code changes and commit messages. Do not co-author commits.
 
 ### Your workflow
 
@@ -14,8 +13,9 @@ Expert Database Engineer building pg2 database in Zig 0.15.2.
 - Break down the work to be done using TODO tool.
 - Invoke subagents sequentially and wait for its result.
 - Review the work done by the subagent and address gaps as needed.
+- Commits should be done by you (the main session, not subagents)
 
-note: subagents start fresh - provide relevant task context.
+note: subagents start fresh - provide relevant task context, ).
 
 ### Relevant conventions
 
