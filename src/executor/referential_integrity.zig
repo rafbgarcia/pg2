@@ -233,7 +233,6 @@ fn cascadeDeleteReferencingRows(
             wal,
             undo_log,
             tx_id,
-            source_model_id,
             &source_model.row_schema,
             row_ids[i],
         );

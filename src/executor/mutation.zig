@@ -80,7 +80,6 @@ const enforceNonPkUniqueness = constraints_mod.enforceNonPkUniqueness;
 const index_maintenance_mod = @import("index_maintenance.zig");
 const openPrimaryKeyIndex = index_maintenance_mod.openPrimaryKeyIndex;
 const insertPrimaryKey = index_maintenance_mod.insertPrimaryKey;
-const deletePrimaryKey = index_maintenance_mod.deletePrimaryKey;
 const primaryKeyExists = index_maintenance_mod.primaryKeyExists;
 const index_key_mod = @import("../storage/index_key.zig");
 
@@ -658,8 +657,6 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                     if (try primaryKeyExists(&pk_btree_update.?, new_pk)) {
                         return error.DuplicateKey;
                     }
-                    // Delete old key before heap update.
-                    try deletePrimaryKey(catalog, &pk_btree_update.?, model_id, old_pk);
                 }
             }
 
@@ -905,7 +902,6 @@ pub fn executeDeleteWithReturningAndParameters(
                 wal,
                 undo_log,
                 tx_id,
-                model_id,
                 schema,
                 row.row_id,
             );
@@ -949,14 +945,13 @@ fn cloneValueForReturning(
     };
 }
 
-/// Delete a single matched row: undo push, tombstone, WAL append, PK index removal.
+/// Delete a single matched row: undo push, tombstone, WAL append.
 pub fn deleteSingleRow(
     catalog: *Catalog,
     pool: *BufferPool,
     wal: *Wal,
     undo_log: *UndoLog,
     tx_id: TxId,
-    model_id: ModelId,
     schema: *const RowSchema,
     row_id: RowId,
 ) MutationError!void {
@@ -966,17 +961,6 @@ pub fn deleteSingleRow(
     // Read old data for undo.
     const old_data = HeapPage.read(pinned.page, row_id.slot) catch
         return error.StorageRead;
-
-    // Remove from PK B+ tree index before tombstoning.
-    // Decode only the PK column — not the full row — so that overflow strings
-    // in other columns don't cause a spurious Corruption error.
-    var pk_btree = openPrimaryKeyIndex(catalog, pool, wal, model_id);
-    if (pk_btree) |*btree| {
-        const pk_col = catalog_mod.findPrimaryKeyColumnId(catalog, model_id).?;
-        const pk_value = row_mod.decodeColumnChecked(schema, old_data, pk_col) catch
-            return error.Corruption;
-        try deletePrimaryKey(catalog, btree, model_id, pk_value);
-    }
 
     _ = undo_log.push(
         tx_id,
