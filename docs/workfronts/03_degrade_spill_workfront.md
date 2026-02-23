@@ -24,26 +24,71 @@ Queries should degrade performance under memory pressure before failing, using p
 - Simulation replay determinism for spill operations and fault injection (`test/internals/spill/temp_spill_determinism_test.zig`).
 
 ## Phase 2: Scan/Materialization Degrade Path
+
+### Design Decisions Locked
+- **Byte-budget spill, not row-count spill.** The current `max_result_rows = 4096` hard cap is a row-count proxy for memory. The real constraint is bytes. Spill triggers when the accumulated *serialized* data size of result rows exceeds the per-slot work memory budget, OR when the physical result buffer (4096 slots) is full — whichever comes first. Narrow rows hit the physical buffer limit first (common OLTP case, efficient). Wide rows hit the byte budget first (protects against memory blowout on wide schemas).
+- **Chunk-and-filter-then-spill.** Scan fills the physical buffer in chunks of up to 4096 rows. Each chunk runs through WHERE/project in-place. Only surviving rows are serialized and spilled to temp pages. This avoids wasting the temp page budget on rows the filter will discard — critical since temp pages per slot are finite (default 1024 pages = 8 MB).
+- **`work_memory_bytes_per_slot` config field.** Added to `BootstrapConfig` with a hardcoded default of 4 MB (matching PostgreSQL's `work_mem`). Workfront 02's planner will later derive this from `--memory` and `--concurrency`. The spill mechanism is agnostic to the source of the budget.
+
 ### Scope
-- Replace fixed-result hard cap behavior in scan/materialization path with chunking/spill continuation.
+
+#### 2a: Compact Row Serialization for Temp Pages
+- Define a serialization format for writing `ResultRow` data to temp pages compactly (only actual column values, not 128-slot fixed structs). Multiple rows per 8 KB temp page. Includes string data inline. Round-trip serialize/deserialize must be deterministic for simulation replay.
+- Track serialized byte size per row so the byte budget can be enforced accurately.
+
+#### 2b: `SpillingResultCollector`
+- New module `src/executor/spill_collector.zig`.
+- Wraps the existing pre-allocated `result_rows` buffer (as a "hot batch") + a `TempStorageManager` for overflow.
+- Accepts rows via `appendRow()`. Tracks accumulated serialized bytes against `work_memory_bytes_per_slot`. When the hot batch is full or byte budget exceeded, serializes the batch to temp pages via 2a's format, resets the buffer, continues accepting.
+- Provides `iterator()` to read back all rows: spilled batches (in spill order) then in-memory remainder. Iterator deserializes from temp pages on demand.
+- `reset()` reclaims all temp pages via `TempPageAllocator.reset()`.
+- String data that overflows the string arena is spilled to dedicated temp pages (string spill path).
+
+#### 2c: Chunked Scan Loop
+- Rename `max_result_rows` to `scan_batch_size` to reflect its new role: it is the physical working buffer size for a single scan chunk, NOT a cap on total query results. Total result size is bounded by the byte budget + temp page budget.
+- Modify `tableScanInto()` and `indexRange()` in `scan.zig`: instead of `break` when the buffer is full, yield the current batch to a caller-provided callback/collector, reset the buffer, continue scanning.
+- The executor's `executeReadPipeline()` drives the chunk loop: scan chunk → apply WHERE/project → feed survivors to `SpillingResultCollector` → next chunk.
+- For queries without sort/group/join, the collector holds the complete result after all chunks.
+- For queries with sort/group/join, the scan still produces all input rows (no silent truncation), but operator capacity limits remain until Phase 3 adds operator-specific spill.
+
+#### 2d: ExecContext and Pipeline Integration
+- Add `work_memory_bytes_per_slot` to `BootstrapConfig` (default `4 * 1024 * 1024`).
+- Plumb through `QueryBuffers` → `ExecContext` so operators can construct a `SpillingResultCollector`.
+- Response serialization (`serializeQueryResult`) consumes from the collector's iterator instead of a flat `result_rows` slice.
+
+#### 2e: Telemetry
+- `ExecStats` gains `spill_triggered: bool` and `result_bytes_accumulated: u64`.
+- `INSPECT spill` output includes whether the query degraded and total bytes accumulated.
+- Existing temp page counters (`temp_pages_allocated`, `temp_bytes_written`, etc.) track spill volume.
 
 ### Gate
-- Queries exceeding in-memory row buffer limits return complete results (or bounded paged protocol behavior), not resource errors.
+- Unit tests: row serialization round-trip, collector flush/iterate, byte budget enforcement, string spill.
+- Integration: `SELECT *` on table with >4096 rows returns complete correct results.
+- Integration: query with large string columns exceeding 4 MB arena completes via string spill.
+- Integration: selective `WHERE` on large table does NOT spill (survivors fit in memory).
+- Determinism: spill replay from same seed produces identical results.
+- Telemetry: `INSPECT spill` correctly reports degraded execution and byte counts.
+- Regression: existing queries under 4096 rows / 4 MB show no behavior change.
 
 ## Phase 3: Sort/Group/Join Spill
 ### Scope
-- Add external/partitioned algorithms:
-  - sort run generation + merge
-  - grouped aggregation with spill partitions
-  - join build-side spill with partition strategy
+- Extend Phase 2's `SpillingResultCollector` pattern to operators that require full-input materialization:
+  - **Sort**: external sort — generate sorted runs (each up to `work_memory_bytes_per_slot`), spill runs to temp pages, k-way merge.
+  - **Group/Aggregate**: hash-based aggregation with spill partitions — when hash table exceeds byte budget, partition and spill, process partitions sequentially.
+  - **Join**: build-side spill — when build side exceeds byte budget, partition both sides, spill, process partition pairs.
+- Replace compile-time capacity constants in `capacity.zig` (`max_sort_rows`, `max_aggregate_groups`, `max_join_build_rows`) with byte-budget-derived runtime limits.
+- All operator spill paths consume from Phase 2's chunked scan iterator (no separate scan mechanism needed).
 
 ### Gate
 - Deterministic tests for large datasets under low memory profiles.
 - Failure only on injected storage hard failures.
+- Operators that previously failed at 4096 rows now complete via spill.
 
 ## Phase 4: Response Streaming
 ### Scope
 - Move from fixed response buffer constraints to streaming writes where feasible.
+- Response serialization reads from `SpillingResultCollector.iterator()` and writes to the wire incrementally, bounded by transport buffer size rather than total result size.
 
 ### Gate
 - Large result sets do not fail with response-size errors under normal storage/network conditions.
+- Memory usage during response serialization is O(transport buffer), not O(result size).
