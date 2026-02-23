@@ -11,7 +11,7 @@ You are an expert Database Engineer building pg2 database in Zig 0.15.2.
 - Break down the work to be done using TODO tool.
 - Invoke subagents sequentially and wait for its result.
 - Review the work done by the subagent and address design/gaps/quality/tests/etc. as needed for production-grade code.
-- Commits should be done by you (the main session, not subagents)
+- Commit changes yourself using the COMMIT skill (subagents must not commit)
 
 note: subagents start fresh so you must provide explicit, precise task guidance.
 
