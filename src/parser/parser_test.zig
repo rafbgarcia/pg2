@@ -111,6 +111,50 @@ test "parse mutation insert" {
 
     const insert_op = result.ast.getNode(pipeline.data.binary.rhs);
     try testing.expectEqual(NodeTag.op_insert, insert_op.tag);
+    const first_assignment = result.ast.getNode(insert_op.data.unary);
+    try testing.expectEqual(NodeTag.assignment, first_assignment.tag);
+}
+
+test "parse multi-row mutation insert produces row-group chain" {
+    const source =
+        \\User |> insert((id = 1, name = "Alice"), (id = 2, name = "Bob")) { id name }
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(!result.has_error);
+
+    const root = result.ast.getNode(result.ast.root);
+    const pipeline = result.ast.getNode(root.data.unary);
+    const insert_op = result.ast.getNode(pipeline.data.binary.rhs);
+    try testing.expectEqual(NodeTag.op_insert, insert_op.tag);
+
+    const row_group_a_idx = insert_op.data.unary;
+    try testing.expect(row_group_a_idx != null_node);
+    const row_group_a = result.ast.getNode(row_group_a_idx);
+    try testing.expectEqual(NodeTag.insert_row_group, row_group_a.tag);
+    try testing.expectEqual(@as(u16, 2), result.ast.listLen(row_group_a.data.unary));
+
+    const row_group_b_idx = row_group_a.next;
+    try testing.expect(row_group_b_idx != null_node);
+    const row_group_b = result.ast.getNode(row_group_b_idx);
+    try testing.expectEqual(NodeTag.insert_row_group, row_group_b.tag);
+    try testing.expectEqual(@as(u16, 2), result.ast.listLen(row_group_b.data.unary));
+}
+
+test "parse single-row insert with parenthesized expression stays single-row" {
+    const source = "User |> insert(id = (1 + 2), name = \"Alice\") { id }";
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(!result.has_error);
+
+    const root = result.ast.getNode(result.ast.root);
+    const pipeline = result.ast.getNode(root.data.unary);
+    const insert_op = result.ast.getNode(pipeline.data.binary.rhs);
+    try testing.expectEqual(NodeTag.op_insert, insert_op.tag);
+    try testing.expect(insert_op.data.unary != null_node);
+
+    const first = result.ast.getNode(insert_op.data.unary);
+    try testing.expectEqual(NodeTag.assignment, first.tag);
 }
 
 test "parse mutation delete" {

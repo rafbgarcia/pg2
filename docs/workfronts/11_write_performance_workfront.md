@@ -6,7 +6,7 @@ Eliminate O(n²) insert degradation by wiring B+ tree indexes into constraint en
 ## Current State
 - **Phases 1-4 complete.** PK B+ tree indexes are auto-created and used for uniqueness checks (O(log n) vs O(n²) heap scan), PK index-assisted point/range scans work, WAL group commit reduces fsyncs from N to ~1 for N sequential inserts, and all unique indexes (PK and non-PK) now have B+ trees for O(log n) constraint enforcement including FK checks.
 - **Phase 4 follow-up fix complete.** Non-PK unique checks are now MVCC-aware when using B+ trees (dead entries from deleted/invisible rows no longer cause false duplicates), and dedicated Phase 4 feature coverage is in place.
-- **Phase 5 next.** Multi-row INSERT syntax and bulk insert path.
+- **Phase 5 in progress.** Parser/AST support for multi-row INSERT syntax has landed (new `insert_row_group` AST node, disambiguation lookahead, AST capacity raised to 8192, parser coverage added). Executor bulk insert dispatch/path is next.
 
 ## Why (original motivation, for context)
 - INSERT used to perform a full heap scan per row to enforce PK uniqueness. Inserting N rows cost O(N²). 4200 inserts triggered ~8.8M row comparisons. **Fixed by Phase 1.**
@@ -225,11 +225,13 @@ This maintains the clean separation: `loadSchema()` = AST → catalog metadata (
 **`src/parser/ast.zig`**:
 - Add `insert_row_group` to `NodeTag` enum: `data.unary` = first assignment (linked by `.next`); row groups linked to each other via `.next`.
 - Raise `max_ast_nodes` from 1024 to 8192.
+  - **Status:** ✅ complete.
 
 **`src/parser/parser_ops.zig`**:
 - Extract `parseAssignmentList()` helper from existing `parseMutationOp()` code (lines 260-294) to share between single-row and multi-row paths.
 - Add multi-row detection in `parseMutationOp()`: after consuming `insert(`, 2-token lookahead (`(` + identifier + `=`) disambiguates multi-row from single-row.
 - New `parseMultiRowInsert()`: loop over `(assignment_list)` groups separated by commas, each producing an `insert_row_group` node. Final `op_insert` node's `data.unary` points to first row group.
+  - **Status:** ✅ complete.
 
 **`src/executor/executor.zig`**:
 - In `.insert_op` branch: check if `node.data.unary` points to `insert_row_group` tag → dispatch to `mutation_mod.executeBulkInsert()`. Collect row count and RowId array. RETURNING: `materializeRowsById()` with all collected RowIds.
@@ -243,7 +245,7 @@ This maintains the clean separation: `loadSchema()` = AST → catalog metadata (
 - Extend to insert into all unique indexes in sorted order (not just PK).
 
 ### Gate
-- Unit tests: parser produces `op_insert` → `insert_row_group` chain for multi-row syntax; single-row syntax unchanged; parenthesized expressions `insert(id = (1+2))` stay single-row.
+- Unit tests: parser produces `op_insert` → `insert_row_group` chain for multi-row syntax; single-row syntax unchanged; parenthesized expressions `insert(id = (1+2))` stay single-row. **✅ complete**
 - Integration: multi-row insert of 3 rows returns correct `inserted_rows=3`.
 - Integration: multi-row insert with RETURNING (`{ id name }`) returns all inserted rows.
 - Integration: in-batch PK duplicate `(id=1), (id=1)` rejected with `DuplicateKey`.

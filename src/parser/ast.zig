@@ -8,7 +8,7 @@
 const std = @import("std");
 
 /// Maximum number of AST nodes in a single parse.
-pub const max_ast_nodes = 1024;
+pub const max_ast_nodes = 8192;
 
 /// Index into the AST node array.
 pub const NodeIndex = u16;
@@ -35,7 +35,7 @@ pub const NodeTag = enum(u8) {
     op_group, // data.unary = first group field (linked by next)
     op_unique,
     op_delete,
-    op_insert, // data.unary = first assignment (linked by next)
+    op_insert, // data.unary = first assignment OR first insert_row_group (linked by next)
     op_update, // data.unary = first assignment (linked by next)
     op_inspect,
     op_scope_ref, // reference to a named scope; data.token = scope name
@@ -64,6 +64,7 @@ pub const NodeTag = enum(u8) {
     sort_key,
 
     // Assignment (for insert/update)
+    insert_row_group, // data.unary = first assignment in this row (linked by next)
     assignment, // data.token = field name, data.unary = expression
 
     // Schema constructs

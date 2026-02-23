@@ -257,25 +257,109 @@ fn parseMutationOp(
     }
     pos += 1;
 
-    var first_assign: NodeIndex = null_node;
-    var last_assign: NodeIndex = null_node;
+    if (tag == .op_insert and isMultiRowInsertStart(tokens, pos)) {
+        return parseMultiRowInsert(ast, tokens, source, pos, tag);
+    }
+
+    const first_assign = try parseAssignmentList(
+        ast,
+        tokens,
+        source,
+        &pos,
+        .right_paren,
+    );
+
+    if (pos < tokens.count and tokens.tokens[pos].token_type == .right_paren) pos += 1;
+
+    const node = try ast.addNode(tag, .{ .unary = first_assign });
+    return .{ .node = node, .pos = pos };
+}
+
+fn isMultiRowInsertStart(tokens: *const TokenizeResult, pos: u16) bool {
+    if (pos + 2 >= tokens.count) return false;
+    if (tokens.tokens[pos].token_type != .left_paren) return false;
+    if (!tokenizer_mod.isContextualIdentifier(tokens.tokens[pos + 1].token_type)) return false;
+    return tokens.tokens[pos + 2].token_type == .equal;
+}
+
+fn parseMultiRowInsert(
+    ast: *Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    start_pos: u16,
+    tag: NodeTag,
+) ParseError!NodeResult {
+    var pos = start_pos;
+    var first_group: NodeIndex = null_node;
+    var last_group: NodeIndex = null_node;
 
     while (pos < tokens.count and tokens.tokens[pos].token_type != .right_paren) {
-        if (first_assign != null_node) {
+        if (first_group != null_node) {
             if (tokens.tokens[pos].token_type != .comma) break;
             pos += 1;
         }
-        if (!tokenizer_mod.isContextualIdentifier(tokens.tokens[pos].token_type)) return error.UnexpectedToken;
-        const field_tok = pos;
-        pos += 1;
 
-        if (pos >= tokens.count or tokens.tokens[pos].token_type != .equal) {
+        if (pos >= tokens.count or tokens.tokens[pos].token_type != .left_paren) {
             return error.UnexpectedToken;
         }
         pos += 1;
 
-        const expr = try expression_mod.parseExpression(ast, tokens, source, pos);
-        pos = expr.pos;
+        const first_assign = try parseAssignmentList(
+            ast,
+            tokens,
+            source,
+            &pos,
+            .right_paren,
+        );
+        if (first_assign == null_node) return error.UnexpectedToken;
+
+        if (pos >= tokens.count or tokens.tokens[pos].token_type != .right_paren) {
+            return error.UnexpectedToken;
+        }
+        pos += 1;
+
+        const row_group = try ast.addNode(.insert_row_group, .{ .unary = first_assign });
+        if (first_group == null_node) {
+            first_group = row_group;
+            last_group = row_group;
+        } else {
+            ast.setNext(last_group, row_group);
+            last_group = row_group;
+        }
+    }
+
+    if (pos < tokens.count and tokens.tokens[pos].token_type == .right_paren) pos += 1;
+
+    const node = try ast.addNode(tag, .{ .unary = first_group });
+    return .{ .node = node, .pos = pos };
+}
+
+fn parseAssignmentList(
+    ast: *Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    pos: *u16,
+    terminator: TokenType,
+) ParseError!NodeIndex {
+    var first_assign: NodeIndex = null_node;
+    var last_assign: NodeIndex = null_node;
+
+    while (pos.* < tokens.count and tokens.tokens[pos.*].token_type != terminator) {
+        if (first_assign != null_node) {
+            if (tokens.tokens[pos.*].token_type != .comma) break;
+            pos.* += 1;
+        }
+        if (!tokenizer_mod.isContextualIdentifier(tokens.tokens[pos.*].token_type)) return error.UnexpectedToken;
+        const field_tok = pos.*;
+        pos.* += 1;
+
+        if (pos.* >= tokens.count or tokens.tokens[pos.*].token_type != .equal) {
+            return error.UnexpectedToken;
+        }
+        pos.* += 1;
+
+        const expr = try expression_mod.parseExpression(ast, tokens, source, pos.*);
+        pos.* = expr.pos;
 
         const assign_node = try ast.addNodeFull(
             .assignment,
@@ -293,10 +377,7 @@ fn parseMutationOp(
         }
     }
 
-    if (pos < tokens.count and tokens.tokens[pos].token_type == .right_paren) pos += 1;
-
-    const node = try ast.addNode(tag, .{ .unary = first_assign });
-    return .{ .node = node, .pos = pos };
+    return first_assign;
 }
 
 pub fn isAggOrFn(tok_type: TokenType) bool {
