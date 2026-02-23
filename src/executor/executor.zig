@@ -26,6 +26,7 @@ const sorting_mod = @import("sorting.zig");
 const joins_mod = @import("joins.zig");
 const projections_mod = @import("projections.zig");
 const spill_collector_mod = @import("spill_collector.zig");
+const external_sort_mod = @import("external_sort.zig");
 const temp_mod = @import("../storage/temp.zig");
 
 const SpillingResultCollector = spill_collector_mod.SpillingResultCollector;
@@ -93,6 +94,7 @@ pub const SortStrategy = enum {
     none,
     in_place_insertion,
     in_memory_merge,
+    external_merge,
 };
 
 pub const GroupStrategy = enum {
@@ -511,8 +513,29 @@ fn executeReadPipeline(
             scan_mod.scan_batch_size,
         ));
         result.collector = ctx.collector;
+    } else if (findSortOpNode(ops, op_count) != null and !hasGroupOp(ops, op_count)) {
+        // Spill + sort (no GROUP): external merge sort reads from collector
+        // directly, avoiding the scan_batch_size reload truncation.
+        const sort_node = findSortOpNode(ops, op_count).?;
+        const schema = &ctx.catalog.models[model_id].row_schema;
+        if (!external_sort_mod.applyExternalSort(ctx, result, sort_node, schema, string_arena)) {
+            captureTempStats(result, ctx.collector);
+            return;
+        }
+        // Apply remaining post-sort operators (HAVING, LIMIT, OFFSET).
+        // Sort is done; skip WHERE (already per-chunk) and SORT.
+        if (!applyPostExternalSortOperators(ctx, result, model_id, ops, op_count, &caps, string_arena)) {
+            captureTempStats(result, ctx.collector);
+            return;
+        }
+        if (!applyNestedSelectionJoin(ctx, result, pipeline_node, model_id, &caps, string_arena)) {
+            captureTempStats(result, ctx.collector);
+            return;
+        }
     } else {
-        // Spill + full-input operators: reload from collector into result.rows.
+        // Spill + GROUP (with or without sort): reload from collector into
+        // result.rows. Limited to scan_batch_size until Phase 3c adds
+        // hash aggregation with partition spill.
         string_arena.reset();
         var iter = ctx.collector.iterator();
         var reload_count: u16 = 0;
@@ -766,6 +789,67 @@ fn hasFullInputOperators(
         }
     }
     return false;
+}
+
+/// Find the AST node for the sort operator, if present.
+fn findSortOpNode(
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+) ?NodeIndex {
+    var i: u16 = 0;
+    while (i < op_count) : (i += 1) {
+        if (ops[i].kind == .sort_op) return ops[i].node;
+    }
+    return null;
+}
+
+/// Returns true if the operator list contains a GROUP operator.
+fn hasGroupOp(
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+) bool {
+    var i: u16 = 0;
+    while (i < op_count) : (i += 1) {
+        if (ops[i].kind == .group_op) return true;
+    }
+    return false;
+}
+
+/// Apply post-external-sort operators: HAVING, LIMIT, OFFSET.
+/// Skips WHERE (already applied per-chunk) and SORT (already done by
+/// external sort).
+fn applyPostExternalSortOperators(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    model_id: ModelId,
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+    caps: *const capacity_mod.OperatorCapacities,
+    string_arena: *scan_mod.StringArena,
+) bool {
+    _ = caps;
+    var group_runtime = GroupRuntime{};
+    const schema = &ctx.catalog.models[model_id].row_schema;
+    var i: u16 = 0;
+    while (i < op_count) : (i += 1) {
+        const op = ops[i];
+        switch (op.kind) {
+            .where_filter, .sort_op, .group_op => {}, // Already handled.
+            .having_filter => applyWhereFilter(
+                ctx,
+                result,
+                op.node,
+                schema,
+                &group_runtime,
+                string_arena,
+            ),
+            .limit_op => applyLimit(ctx, result, op.node, string_arena),
+            .offset_op => applyOffset(ctx, result, op.node, &group_runtime, string_arena),
+            .inspect_op => {},
+            .insert_op, .update_op, .delete_op => {},
+        }
+    }
+    return true;
 }
 
 fn applyNestedSelectionJoin(

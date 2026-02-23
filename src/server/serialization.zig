@@ -226,6 +226,7 @@ fn sortStrategyExplain(strategy: exec_mod.SortStrategy) []const u8 {
         .none => "not_applied",
         .in_place_insertion => "rows sorted in place with insertion order swaps",
         .in_memory_merge => "rows sorted with stable bottom-up merge sort",
+        .external_merge => "rows sorted with external merge sort via temp pages",
     };
 }
 

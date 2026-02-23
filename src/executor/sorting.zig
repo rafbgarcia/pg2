@@ -62,10 +62,9 @@ pub fn applySort(
         setError(result, "sort capacity exceeded");
         return false;
     }
-    if (@as(usize, result.row_count) > caps.sort_rows) {
-        setError(result, "sort row capacity exceeded");
-        return false;
-    }
+    // max_sort_rows is no longer enforced as a hard error (Phase 3b).
+    // In-memory sort handles up to scan_batch_size rows; larger inputs
+    // are routed to external merge sort by the executor pipeline.
 
     var sort_keys: [max_sort_keys]SortKeyDescriptor = undefined;
     if (!buildSortKeyDescriptors(
@@ -93,7 +92,7 @@ pub fn applySort(
     return true;
 }
 
-fn buildSortKeyDescriptors(
+pub fn buildSortKeyDescriptors(
     ctx: *const ExecContext,
     result: *QueryResult,
     first_key: NodeIndex,
@@ -148,7 +147,7 @@ fn buildSortKeyDescriptors(
     return true;
 }
 
-const SortEvalError = error{
+pub const SortEvalError = error{
     EvalFailed,
 };
 
@@ -161,7 +160,7 @@ const SortEvalError = error{
 /// Group counts are kept in sync with rows so that `COUNT(*)` resolution
 /// via `group_runtime.group_counts[row_index]` remains correct after
 /// sorting.
-fn sortRowsMerge(
+pub fn sortRowsMerge(
     ctx: *const ExecContext,
     result: *QueryResult,
     schema: *const RowSchema,
@@ -299,7 +298,7 @@ fn mergeAdjacentRuns(
     }
 }
 
-fn compareRowsBySortKeys(
+pub fn compareRowsBySortKeys(
     ctx: *const ExecContext,
     schema: *const RowSchema,
     group_runtime: *const GroupRuntime,

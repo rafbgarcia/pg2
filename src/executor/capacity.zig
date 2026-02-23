@@ -60,7 +60,8 @@ pub const OperatorCapacities = struct {
 comptime {
     std.debug.assert(max_pipeline_operators > 0);
     std.debug.assert(max_sort_rows > 0);
-    std.debug.assert(max_sort_rows <= scan_mod.scan_batch_size);
+    // max_sort_rows is the in-memory batch size, not a hard cap.
+    // External merge sort (Phase 3b) handles larger inputs via spill.
     std.debug.assert(max_sort_keys > 0);
     std.debug.assert(max_aggregate_groups > 0);
     std.debug.assert(max_group_keys > 0);
@@ -71,7 +72,7 @@ comptime {
 
 test "default capacity contracts remain bounded by scan result ceiling" {
     const c = OperatorCapacities.defaults();
-    try std.testing.expect(c.sort_rows <= scan_mod.scan_batch_size);
+    try std.testing.expect(c.sort_rows > 0);
     try std.testing.expect(c.join_build_rows <= scan_mod.scan_batch_size);
     try std.testing.expect(c.join_output_rows <= scan_mod.scan_batch_size);
     try std.testing.expect(c.sort_keys >= 1);

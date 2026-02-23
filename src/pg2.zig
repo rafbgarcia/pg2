@@ -44,6 +44,7 @@ pub const executor = struct {
     pub const filter = @import("executor/filter.zig");
     pub const mutation = @import("executor/mutation.zig");
     pub const spill_collector = @import("executor/spill_collector.zig");
+    pub const external_sort = @import("executor/external_sort.zig");
 };
 
 pub const simulator = struct {
@@ -97,6 +98,7 @@ comptime {
     _ = executor.filter;
     _ = executor.mutation;
     _ = executor.spill_collector;
+    _ = executor.external_sort;
     _ = simulator.disk;
     _ = simulator.clock;
     _ = simulator.fault_matrix;
