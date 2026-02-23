@@ -16,6 +16,7 @@ Each workfront has phased gates so fresh Codex sessions can resume safely.
 10. `docs/workfronts/10_iterator_execution_model_workfront.md`
 11. `docs/workfronts/11_write_performance_workfront.md`
 12. `docs/workfronts/12_storage_reclamation_workfront.md`
+13. `docs/workfronts/13_nested_spill_hash_join_workfront.md`
 
 ## Recommended Execution Order
 1. Server concurrency foundation.
@@ -30,6 +31,7 @@ Each workfront has phased gates so fresh Codex sessions can resume safely.
 10. Module decomposition (can run in parallel with any workfront).
 11. Iterator execution model (deferred — needed when subqueries, CTEs, or window functions are prioritized).
 12. Storage reclamation without VACUUM (after write performance and iterator execution model — depends on B+ tree index maintenance patterns from WF11).
+13. Nested selection performance-first hash join spill path (after WF03 foundations; can run in parallel with WF11/WF12 once row-set contract is stable).
 
 ## Cross-Workfront Rules
 1. Core code continues to use `Storage`/`Network` abstractions.
