@@ -314,9 +314,9 @@ pub fn executeInsertWithDiagnosticAndParameters(
             return error.DuplicateKey;
         }
         // Non-PK unique indexes still need heap scan.
-        try enforceNonPkUniqueness(catalog, pool, wal, model_id, values[0..schema.column_count]);
+        try enforceNonPkUniqueness(catalog, pool, wal, model_id, values[0..schema.column_count], undo_log, snapshot, tx_manager);
     } else {
-        try enforceInsertUniqueness(catalog, pool, wal, model_id, values[0..schema.column_count]);
+        try enforceInsertUniqueness(catalog, pool, wal, model_id, values[0..schema.column_count], undo_log, snapshot, tx_manager);
     }
     try enforceOutgoingReferentialIntegrity(
         catalog,

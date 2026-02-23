@@ -10,6 +10,7 @@ comptime {
     _ = @import("constraints/nullable_test.zig");
     _ = @import("constraints/not_null_test.zig");
     _ = @import("constraints/type_sensitive_defaults_test.zig");
+    _ = @import("constraints/index_backed_constraints_test.zig");
     _ = @import("schema_definition/reference_test.zig");
     _ = @import("semantic_validations/type_mismatch_test.zig");
     _ = @import("semantic_validations/unknown_field_test.zig");

@@ -96,6 +96,83 @@ pub fn insertIndexKey(
     syncIndexBTreeState(catalog, model_id, index_id, btree);
 }
 
+/// Delete a key from any index's B+ tree. Silently succeeds if the key is
+/// not found (e.g., rows inserted before the index existed).
+pub fn deleteIndexKey(
+    catalog: *Catalog,
+    btree: *BTree,
+    model_id: ModelId,
+    index_id: IndexId,
+    key_value: Value,
+) MutationError!void {
+    var key_buf: [max_row_buf_size]u8 = undefined;
+    const key = index_key_mod.encodeValue(key_value, &key_buf);
+    btree.delete(key) catch |e| switch (e) {
+        error.KeyNotFound => return, // Tolerate missing entries.
+        else => return mapBTreeError(e),
+    };
+    syncIndexBTreeState(catalog, model_id, index_id, btree);
+}
+
+/// MVCC-aware uniqueness check for any index.
+///
+/// Looks up the key in the B+ tree. If found, follows the pointer to the
+/// heap and checks MVCC visibility. Returns `true` when the key belongs to
+/// a row that is visible to the current snapshot (genuine duplicate).
+/// Returns `false` when the key is absent or belongs to a deleted/invisible
+/// row — in the latter case the dead B+ tree entry is cleaned up so that
+/// future inserts don't collide.
+///
+/// When any of the optional MVCC parameters is null, falls back to the
+/// non-MVCC behavior: key present in B+ tree = duplicate.
+pub fn indexKeyVisibleInIndex(
+    catalog: *Catalog,
+    btree: *BTree,
+    model_id: ModelId,
+    index_id: IndexId,
+    key_value: Value,
+    pool: *BufferPool,
+    undo_log: ?*const UndoLog,
+    snapshot: ?*const Snapshot,
+    tx_manager: ?*const TxManager,
+) MutationError!bool {
+    var key_buf: [max_row_buf_size]u8 = undefined;
+    const key = index_key_mod.encodeValue(key_value, &key_buf);
+    const row_id_opt = btree.find(key) catch |e| return mapBTreeError(e);
+    const row_id = row_id_opt orelse return false;
+
+    // Without full MVCC context, fall back to: key exists = duplicate.
+    if (undo_log == null or snapshot == null or tx_manager == null) {
+        return true;
+    }
+
+    // Pin the heap page and check MVCC visibility.
+    const page = pool.pin(row_id.page_id) catch |e| return mapPoolError(e);
+    defer pool.unpin(row_id.page_id, false);
+
+    const heap_data_opt: ?[]const u8 = HeapPage.read(page, row_id.slot) catch null;
+    const head = undo_log.?.getHead(row_id.page_id, row_id.slot);
+    const visible: ?[]const u8 = if (head == null)
+        heap_data_opt
+    else
+        undo_log.?.findVisible(
+            row_id.page_id,
+            row_id.slot,
+            snapshot.?,
+            tx_manager.?,
+        ) orelse heap_data_opt;
+
+    if (visible != null) {
+        // Row is visible — genuine duplicate.
+        return true;
+    }
+
+    // Row is invisible (committed delete). Clean up the dead B+ tree entry
+    // so future inserts don't collide with the stale key.
+    deleteIndexKey(catalog, btree, model_id, index_id, key_value) catch {};
+    return false;
+}
+
 // ---------------------------------------------------------------------------
 // Primary-key wrappers (delegate to generic functions)
 // ---------------------------------------------------------------------------

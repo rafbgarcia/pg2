@@ -13,7 +13,12 @@ const index_maintenance_mod = @import("index_maintenance.zig");
 const index_key_mod = @import("../storage/index_key.zig");
 const wal_mod = @import("../storage/wal.zig");
 const btree_mod = @import("../storage/btree.zig");
+const undo_mod = @import("../mvcc/undo.zig");
+const tx_mod = @import("../mvcc/transaction.zig");
 const Wal = wal_mod.Wal;
+const UndoLog = undo_mod.UndoLog;
+const Snapshot = tx_mod.Snapshot;
+const TxManager = tx_mod.TxManager;
 
 const mutation = @import("mutation.zig");
 const MutationError = mutation.MutationError;
@@ -30,11 +35,14 @@ const Catalog = catalog_mod.Catalog;
 const ModelId = catalog_mod.ModelId;
 
 pub fn enforceInsertUniqueness(
-    catalog: *const Catalog,
+    catalog: *Catalog,
     pool: *BufferPool,
     wal: *Wal,
     model_id: ModelId,
     values: []const Value,
+    undo_log: ?*const UndoLog,
+    snapshot: ?*const Snapshot,
+    tx_manager: ?*const TxManager,
 ) MutationError!void {
     const model = &catalog.models[model_id];
 
@@ -48,18 +56,21 @@ pub fn enforceInsertUniqueness(
         }
     }
 
-    try enforceNonPkUniqueness(catalog, pool, wal, model_id, values);
+    try enforceNonPkUniqueness(catalog, pool, wal, model_id, values, undo_log, snapshot, tx_manager);
 }
 
 /// Enforce uniqueness for non-PK unique indexes only. Used when the PK is
 /// already checked via B+ tree lookup, so only secondary unique indexes
 /// need the heap scan fallback.
 pub fn enforceNonPkUniqueness(
-    catalog: *const Catalog,
+    catalog: *Catalog,
     pool: *BufferPool,
     wal: *Wal,
     model_id: ModelId,
     values: []const Value,
+    undo_log: ?*const UndoLog,
+    snapshot: ?*const Snapshot,
+    tx_manager: ?*const TxManager,
 ) MutationError!void {
     const model = &catalog.models[model_id];
     const pk_col = catalog_mod.findPrimaryKeyColumnId(catalog, model_id);
@@ -81,10 +92,18 @@ pub fn enforceNonPkUniqueness(
                 idx_id,
             );
             if (btree != null) {
-                var key_buf: [mutation.max_row_buf_size]u8 = undefined;
-                const key = index_key_mod.encodeValue(values[idx.column_ids[0]], &key_buf);
-                const found = btree.?.find(key) catch |e| return index_maintenance_mod.mapBTreeError(e);
-                if (found != null) return error.DuplicateKey;
+                const is_visible = try index_maintenance_mod.indexKeyVisibleInIndex(
+                    catalog,
+                    &btree.?,
+                    model_id,
+                    idx_id,
+                    values[idx.column_ids[0]],
+                    pool,
+                    undo_log,
+                    snapshot,
+                    tx_manager,
+                );
+                if (is_visible) return error.DuplicateKey;
                 continue;
             }
         }
