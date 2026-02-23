@@ -94,7 +94,7 @@ Queries should degrade performance under memory pressure before failing, using p
 
 ### Scope
 
-#### 3a: In-Memory Sort Upgrade
+#### 3a: In-Memory Sort Upgrade ✅
 - Replace O(n²) insertion sort in `src/executor/sorting.zig` with O(n log n) bottom-up merge sort.
 - Use `scratch_rows_b` (currently unused, 4096 slots) as the merge auxiliary buffer. The merge alternates between `result.rows` and `scratch_rows_b`, copying back to `result.rows` at the end.
 - Stable: equal-key rows preserve their original order.
@@ -102,7 +102,7 @@ Queries should degrade performance under memory pressure before failing, using p
 - `plan.sort_strategy` gains a new variant: `.in_memory_merge`.
 - No spill path yet; row count still bounded by `scan_batch_size` in this sub-phase.
 
-#### 3b: External Merge Sort
+#### 3b: External Merge Sort ✅
 - `src/executor/external_sort.zig`: external merge sort with sorted run generation, temp page spill, and k-way merge.
 - **Run generation**: Read input in batches (up to `scan_batch_size` rows or `work_memory_bytes_per_slot` serialized bytes, whichever is smaller). Sort each batch in memory via 3a's merge sort. Serialize the sorted batch to temp pages as a contiguous "run" (sequence of pages). Track run metadata: first page ID, page count, row count.
 - **K-way merge**: Maintain one `SpillPageReader` per run plus a min-heap of size K (one entry per active run). Each heap entry holds the current row and run index. Pop min, emit, advance that run's reader. Ties broken by run index (stability). Heap comparisons reuse `compareRowsBySortKeys()`.
