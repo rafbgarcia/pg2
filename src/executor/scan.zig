@@ -31,14 +31,32 @@ const Snapshot = tx_mod.Snapshot;
 const TxManager = tx_mod.TxManager;
 const UndoLog = undo_mod.UndoLog;
 
-/// Maximum rows in a single scan result.
-pub const max_result_rows = 4096;
+/// Physical scan batch size: number of rows in a single working buffer.
+/// This is a batch/chunk size, not a query result cap. The executor loops
+/// over batches, feeding post-filter survivors into the SpillingResultCollector
+/// which handles overflow to temp pages.
+pub const scan_batch_size = 4096;
 /// Maximum byte size for a single row.
 pub const max_row_size_bytes = 8000;
 /// Maximum columns per row.
 pub const max_columns = 128;
 /// Default temporary bytes for string materialization in allocator-based scans.
 pub const default_string_arena_bytes: usize = 4 * 1024 * 1024;
+
+/// Resumable cursor for chunked table scans.
+///
+/// When passed to `tableScanInto()`, the scan resumes from the cursor's
+/// position and writes back the position when the output buffer fills.
+/// `done` is set to `true` when all pages have been exhausted.
+pub const ScanCursor = struct {
+    page_idx: u32,
+    slot_idx: u16,
+    done: bool,
+
+    pub fn init() ScanCursor {
+        return .{ .page_idx = 0, .slot_idx = 0, .done = false };
+    }
+};
 
 pub const ScanError = error{
     AllFramesPinned,
@@ -78,7 +96,7 @@ pub const ScanResult = struct {
     string_storage: []u8,
 
     pub fn init(allocator: Allocator) ScanError!ScanResult {
-        const rows = allocator.alloc(ResultRow, max_result_rows) catch
+        const rows = allocator.alloc(ResultRow, scan_batch_size) catch
             return error.OutOfMemory;
         const result = ScanResult{
             .rows = rows,
@@ -88,7 +106,7 @@ pub const ScanResult = struct {
             .string_storage = &.{},
         };
         std.debug.assert(result.row_count == 0);
-        std.debug.assert(result.rows.len == max_result_rows);
+        std.debug.assert(result.rows.len == scan_batch_size);
         return result;
     }
 
@@ -104,7 +122,7 @@ pub const ScanResult = struct {
     /// Asserts capacity is not exceeded — exceeding the bound is an
     /// invariant violation (callers must check before calling).
     pub fn appendRow(self: *ScanResult, row: ResultRow) void {
-        std.debug.assert(self.row_count < max_result_rows);
+        std.debug.assert(self.row_count < scan_batch_size);
         self.rows[self.row_count] = row;
         self.row_count += 1;
     }
@@ -186,16 +204,26 @@ pub fn tableScan(
         model_id,
         result.rows,
         &string_arena,
+        null,
     );
     result.row_count = scan_into.row_count;
     result.pages_read = scan_into.pages_read;
     return result;
 }
 
-/// Full table scan into caller-owned row storage.
+/// Table scan into caller-owned row storage with optional cursor.
 ///
 /// This bounded path avoids scan-time heap allocation and enforces an
 /// explicit row-capacity contract through `out_rows.len`.
+///
+/// When `cursor` is non-null the scan resumes from the cursor's saved
+/// position.  On return the cursor is updated:
+///   - If the buffer filled before all pages were exhausted, the cursor
+///     records the resume position and `done` remains false.
+///   - If all pages were exhausted, `done` is set to true.
+///
+/// When `cursor` is null the scan starts from the beginning and stops
+/// when the buffer is full (existing behavior).
 pub fn tableScanInto(
     catalog: *const Catalog,
     pool: *BufferPool,
@@ -205,6 +233,7 @@ pub fn tableScanInto(
     model_id: ModelId,
     out_rows: []ResultRow,
     string_arena: *StringArena,
+    cursor: ?*ScanCursor,
 ) ScanError!ScanIntoResult {
     std.debug.assert(model_id < catalog.model_count);
     std.debug.assert(out_rows.len <= std.math.maxInt(u16));
@@ -215,12 +244,17 @@ pub fn tableScanInto(
     const total_pages = model.total_pages;
 
     if (total_pages == 0) {
+        if (cursor) |c| c.done = true;
         return .{ .row_count = 0, .pages_read = 0 };
     }
 
     var row_count: u16 = 0;
     var pages_read: u32 = 0;
-    var page_idx: u32 = 0;
+    // Resume position from cursor, or start at the beginning.
+    var page_idx: u32 = if (cursor) |c| c.page_idx else 0;
+    const start_slot: u16 = if (cursor) |c| c.slot_idx else 0;
+    var is_first_page = true;
+
     while (page_idx < total_pages) : (page_idx += 1) {
         const page_id: u64 = @as(u64, first_page) + page_idx;
         const page = pool.pin(page_id) catch |e| return mapPoolError(e);
@@ -228,9 +262,20 @@ pub fn tableScanInto(
         pages_read += 1;
 
         const slot_count = HeapPage.slot_count(page);
-        var slot_idx: u16 = 0;
+        // On the first page of a resumed scan, skip to the saved slot.
+        var slot_idx: u16 = if (is_first_page) start_slot else 0;
+        is_first_page = false;
+
         while (slot_idx < slot_count) : (slot_idx += 1) {
-            if (@as(usize, row_count) >= out_rows.len) break;
+            if (@as(usize, row_count) >= out_rows.len) {
+                // Buffer full. Save resume position if cursor is present.
+                if (cursor) |c| {
+                    c.page_idx = page_idx;
+                    c.slot_idx = slot_idx;
+                    c.done = false;
+                }
+                return .{ .row_count = row_count, .pages_read = pages_read };
+            }
             try scanSlotInto(
                 catalog,
                 pool,
@@ -248,6 +293,8 @@ pub fn tableScanInto(
         }
     }
 
+    // All pages exhausted.
+    if (cursor) |c| c.done = true;
     std.debug.assert(@as(usize, row_count) <= out_rows.len);
     return .{ .row_count = row_count, .pages_read = pages_read };
 }
@@ -376,7 +423,7 @@ pub fn indexRange(
     while (true) {
         const entry_opt = iter.next() catch |e| return mapBTreeError(e);
         const entry = entry_opt orelse break;
-        if (result.row_count >= max_result_rows) break;
+        if (result.row_count >= scan_batch_size) break;
 
         const row_id = entry.row_id;
         const page = pool.pin(row_id.page_id) catch |e| {
@@ -408,7 +455,7 @@ pub fn indexRange(
         result.appendRow(row);
     }
 
-    std.debug.assert(result.row_count <= max_result_rows);
+    std.debug.assert(result.row_count <= scan_batch_size);
     return result;
 }
 
@@ -660,6 +707,7 @@ test "tableScanInto respects caller row capacity" {
         model_id,
         &out_rows,
         &string_arena,
+        null,
     );
 
     try testing.expectEqual(@as(u16, 1), out.row_count);
@@ -761,4 +809,245 @@ test "scan pages_read tracks correctly" {
 
     try testing.expectEqual(@as(u32, 3), result.pages_read);
     try testing.expectEqual(@as(u16, 0), result.row_count);
+}
+
+test "cursor scan yields all rows across multiple chunks" {
+    var disk = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk.deinit();
+    var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
+    defer pool.deinit();
+    var tm = TxManager.init(testing.allocator);
+    defer tm.deinit();
+    var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
+    defer undo_log.deinit();
+
+    var catalog = Catalog{};
+    const model_id = try catalog.addModel("Cur");
+    _ = try catalog.addColumn(model_id, "id", .i64, false);
+    catalog.models[model_id].heap_first_page_id = 50;
+    catalog.models[model_id].total_pages = 1;
+
+    const page = try pool.pin(50);
+    HeapPage.init(page);
+    const schema = &catalog.models[model_id].row_schema;
+    var buf: [256]u8 = undefined;
+    // Insert 5 rows.
+    var i: i64 = 1;
+    while (i <= 5) : (i += 1) {
+        const vals = [_]Value{.{ .i64 = i }};
+        const len = try row_mod.encodeRow(schema, &vals, &buf);
+        _ = try HeapPage.insert(page, buf[0..len]);
+    }
+    pool.unpin(50, true);
+
+    const tx = try tm.begin();
+    var snap = try tm.snapshot(tx);
+    defer snap.deinit();
+
+    // Use a 2-row buffer to force multiple chunks.
+    var out_rows: [2]ResultRow = .{ ResultRow.init(), ResultRow.init() };
+    var arena_buf: [4096]u8 = undefined;
+    var string_arena = StringArena.init(arena_buf[0..]);
+    var cursor = ScanCursor.init();
+
+    var all_ids: [5]i64 = undefined;
+    var total: usize = 0;
+
+    while (!cursor.done) {
+        const res = try tableScanInto(
+            &catalog,
+            &pool,
+            &undo_log,
+            &snap,
+            &tm,
+            model_id,
+            &out_rows,
+            &string_arena,
+            &cursor,
+        );
+        var j: u16 = 0;
+        while (j < res.row_count) : (j += 1) {
+            all_ids[total] = out_rows[j].values[0].i64;
+            total += 1;
+        }
+    }
+
+    try testing.expectEqual(@as(usize, 5), total);
+    try testing.expectEqual(@as(i64, 1), all_ids[0]);
+    try testing.expectEqual(@as(i64, 2), all_ids[1]);
+    try testing.expectEqual(@as(i64, 3), all_ids[2]);
+    try testing.expectEqual(@as(i64, 4), all_ids[3]);
+    try testing.expectEqual(@as(i64, 5), all_ids[4]);
+}
+
+test "cursor with null preserves stop-at-full behavior" {
+    var disk = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk.deinit();
+    var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
+    defer pool.deinit();
+    var tm = TxManager.init(testing.allocator);
+    defer tm.deinit();
+    var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
+    defer undo_log.deinit();
+
+    var catalog = Catalog{};
+    const model_id = try catalog.addModel("Null");
+    _ = try catalog.addColumn(model_id, "id", .i64, false);
+    catalog.models[model_id].heap_first_page_id = 60;
+    catalog.models[model_id].total_pages = 1;
+
+    const page = try pool.pin(60);
+    HeapPage.init(page);
+    const schema = &catalog.models[model_id].row_schema;
+    var buf: [256]u8 = undefined;
+    var i: i64 = 1;
+    while (i <= 4) : (i += 1) {
+        const vals = [_]Value{.{ .i64 = i }};
+        const len = try row_mod.encodeRow(schema, &vals, &buf);
+        _ = try HeapPage.insert(page, buf[0..len]);
+    }
+    pool.unpin(60, true);
+
+    const tx = try tm.begin();
+    var snap = try tm.snapshot(tx);
+    defer snap.deinit();
+
+    // Buffer of 2 rows, null cursor — should stop at 2 rows.
+    var out_rows: [2]ResultRow = .{ ResultRow.init(), ResultRow.init() };
+    var arena_buf: [4096]u8 = undefined;
+    var string_arena = StringArena.init(arena_buf[0..]);
+
+    const res = try tableScanInto(
+        &catalog,
+        &pool,
+        &undo_log,
+        &snap,
+        &tm,
+        model_id,
+        &out_rows,
+        &string_arena,
+        null,
+    );
+
+    try testing.expectEqual(@as(u16, 2), res.row_count);
+    try testing.expectEqual(@as(i64, 1), out_rows[0].values[0].i64);
+    try testing.expectEqual(@as(i64, 2), out_rows[1].values[0].i64);
+}
+
+test "cursor scan across page boundaries" {
+    var disk = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk.deinit();
+    var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
+    defer pool.deinit();
+    var tm = TxManager.init(testing.allocator);
+    defer tm.deinit();
+    var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
+    defer undo_log.deinit();
+
+    var catalog = Catalog{};
+    const model_id = try catalog.addModel("Multi");
+    _ = try catalog.addColumn(model_id, "id", .i64, false);
+    catalog.models[model_id].heap_first_page_id = 70;
+    catalog.models[model_id].total_pages = 3;
+
+    const schema = &catalog.models[model_id].row_schema;
+    var buf: [256]u8 = undefined;
+    // Put 2 rows on each of 3 pages = 6 rows total.
+    var pg: u32 = 0;
+    while (pg < 3) : (pg += 1) {
+        const pid: u64 = 70 + pg;
+        const page = try pool.pin(pid);
+        HeapPage.init(page);
+        var r: i64 = 0;
+        while (r < 2) : (r += 1) {
+            const id_val: i64 = @as(i64, pg) * 10 + r + 1;
+            const vals = [_]Value{.{ .i64 = id_val }};
+            const len = try row_mod.encodeRow(schema, &vals, &buf);
+            _ = try HeapPage.insert(page, buf[0..len]);
+        }
+        pool.unpin(pid, true);
+    }
+
+    const tx = try tm.begin();
+    var snap = try tm.snapshot(tx);
+    defer snap.deinit();
+
+    // Buffer of 2 rows — exactly one page worth.
+    var out_rows: [2]ResultRow = .{ ResultRow.init(), ResultRow.init() };
+    var arena_buf: [4096]u8 = undefined;
+    var string_arena = StringArena.init(arena_buf[0..]);
+    var cursor = ScanCursor.init();
+
+    var all_ids: [6]i64 = undefined;
+    var total: usize = 0;
+    var chunks: u32 = 0;
+
+    while (!cursor.done) {
+        const res = try tableScanInto(
+            &catalog,
+            &pool,
+            &undo_log,
+            &snap,
+            &tm,
+            model_id,
+            &out_rows,
+            &string_arena,
+            &cursor,
+        );
+        chunks += 1;
+        var j: u16 = 0;
+        while (j < res.row_count) : (j += 1) {
+            all_ids[total] = out_rows[j].values[0].i64;
+            total += 1;
+        }
+    }
+
+    try testing.expectEqual(@as(usize, 6), total);
+    try testing.expect(chunks >= 3); // At least 3 chunks (one per page).
+    try testing.expectEqual(@as(i64, 1), all_ids[0]);
+    try testing.expectEqual(@as(i64, 2), all_ids[1]);
+    try testing.expectEqual(@as(i64, 11), all_ids[2]);
+    try testing.expectEqual(@as(i64, 12), all_ids[3]);
+    try testing.expectEqual(@as(i64, 21), all_ids[4]);
+    try testing.expectEqual(@as(i64, 22), all_ids[5]);
+}
+
+test "cursor on empty table sets done immediately" {
+    var disk = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk.deinit();
+    var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
+    defer pool.deinit();
+    var tm = TxManager.init(testing.allocator);
+    defer tm.deinit();
+    var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
+    defer undo_log.deinit();
+
+    var catalog = Catalog{};
+    const model_id = try catalog.addModel("Empty");
+    _ = try catalog.addColumn(model_id, "id", .i64, false);
+    // total_pages = 0 by default.
+
+    const tx = try tm.begin();
+    var snap = try tm.snapshot(tx);
+    defer snap.deinit();
+
+    var out_rows: [2]ResultRow = .{ ResultRow.init(), ResultRow.init() };
+    var arena_buf: [1024]u8 = undefined;
+    var string_arena = StringArena.init(arena_buf[0..]);
+    var cursor = ScanCursor.init();
+
+    const res = try tableScanInto(
+        &catalog,
+        &pool,
+        &undo_log,
+        &snap,
+        &tm,
+        model_id,
+        &out_rows,
+        &string_arena,
+        &cursor,
+    );
+
+    try testing.expect(cursor.done);
+    try testing.expectEqual(@as(u16, 0), res.row_count);
 }

@@ -59,14 +59,14 @@ pub const GroupRuntime = struct {
     active: bool = false,
     group_key_count: u16 = 0,
     group_key_indices: [capacity_mod.max_group_keys]u16 = undefined,
-    group_counts: [scan_mod.max_result_rows]u32 =
-        [_]u32{0} ** scan_mod.max_result_rows,
+    group_counts: [scan_mod.scan_batch_size]u32 =
+        [_]u32{0} ** scan_mod.scan_batch_size,
     aggregate_count: u16 = 0,
     aggregate_descriptors: [max_group_aggregate_exprs]AggregateDescriptor =
         undefined,
     aggregate_slot_by_node: [ast_mod.max_ast_nodes]u8 =
         [_]u8{invalid_aggregate_slot} ** ast_mod.max_ast_nodes,
-    aggregate_states: [max_group_aggregate_exprs][scan_mod.max_result_rows]AggregateState =
+    aggregate_states: [max_group_aggregate_exprs][scan_mod.scan_batch_size]AggregateState =
         undefined,
 };
 

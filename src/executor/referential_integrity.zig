@@ -216,7 +216,7 @@ fn cascadeDeleteReferencingRows(
     key: Value,
 ) MutationError!void {
     const source_model = &catalog.models[source_model_id];
-    var row_ids: [scan_mod.max_result_rows]RowId = undefined;
+    var row_ids: [scan_mod.scan_batch_size]RowId = undefined;
     const count = try collectReferencingRows(
         catalog,
         pool,
@@ -353,7 +353,7 @@ fn collectReferencingRows(
     source_model_id: ModelId,
     source_column_id: catalog_mod.ColumnId,
     key: Value,
-    out_row_ids: *[scan_mod.max_result_rows]RowId,
+    out_row_ids: *[scan_mod.scan_batch_size]RowId,
 ) MutationError!u16 {
     if (key == .null_value) return 0;
     const source_model = &catalog.models[source_model_id];
@@ -376,7 +376,7 @@ fn collectReferencingRows(
             row_mod.decodeRowChecked(schema, row_data, decoded[0..schema.column_count]) catch
                 return error.Corruption;
             if (row_mod.compareValues(decoded[col_idx], key) != .eq) continue;
-            if (count >= scan_mod.max_result_rows) return error.ResultOverflow;
+            if (count >= scan_mod.scan_batch_size) return error.ResultOverflow;
             out_row_ids[count] = .{ .page_id = page_id, .slot = slot_idx };
             count += 1;
         }

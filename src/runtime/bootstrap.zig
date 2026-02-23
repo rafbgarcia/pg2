@@ -14,6 +14,7 @@ const undo_mod = @import("../mvcc/undo.zig");
 const static_alloc_mod = @import("static_allocator.zig");
 const disk_mod = @import("../simulator/disk.zig");
 const scan_mod = @import("../executor/scan.zig");
+const spill_collector_mod = @import("../executor/spill_collector.zig");
 
 const Storage = io_mod.Storage;
 const BufferPool = buffer_pool_mod.BufferPool;
@@ -22,7 +23,8 @@ const TxManager = tx_mod.TxManager;
 const UndoLog = undo_mod.UndoLog;
 const StaticAllocator = static_alloc_mod.StaticAllocator;
 const ResultRow = scan_mod.ResultRow;
-const max_result_rows = scan_mod.max_result_rows;
+const scan_batch_size = scan_mod.scan_batch_size;
+const SpillingResultCollector = spill_collector_mod.SpillingResultCollector;
 
 pub const BootstrapError = error{
     OutOfMemory,
@@ -42,6 +44,10 @@ pub const BootstrapConfig = struct {
     max_query_slots: u16 = 8,
     query_string_arena_bytes_per_slot: usize = 4 * 1024 * 1024,
     temp_pages_per_query_slot: u64 = 1024,
+    /// Per-slot byte budget for in-memory result accumulation before spilling
+    /// to temp pages. When a query's accumulated result bytes exceed this
+    /// threshold, the SpillingResultCollector flushes its hot batch to disk.
+    work_memory_bytes_per_slot: u64 = 4 * 1024 * 1024,
 };
 
 pub const QueryBuffers = struct {
@@ -50,6 +56,8 @@ pub const QueryBuffers = struct {
     scratch_rows_a: []ResultRow,
     scratch_rows_b: []ResultRow,
     string_arena_bytes: []u8,
+    collector: *SpillingResultCollector,
+    work_memory_bytes_per_slot: u64,
 };
 
 /// Core runtime composition built in allocator init phase and sealed before
@@ -66,7 +74,9 @@ pub const BootstrappedRuntime = struct {
     query_scratch_rows_a: []ResultRow,
     query_scratch_rows_b: []ResultRow,
     query_string_arenas: []u8,
+    query_collectors: []SpillingResultCollector,
     max_query_slots: u16,
+    work_memory_bytes_per_slot: u64,
 
     pub fn init(
         memory_region: []u8,
@@ -110,7 +120,7 @@ pub const BootstrappedRuntime = struct {
         const total_rows = std.math.mul(
             usize,
             @as(usize, config.max_query_slots),
-            max_result_rows,
+            scan_batch_size,
         ) catch return error.InvalidConfig;
         runtime.query_slot_in_use = allocator.alloc(
             bool,
@@ -145,6 +155,14 @@ pub const BootstrappedRuntime = struct {
         ) catch return error.OutOfMemory;
         errdefer allocator.free(runtime.query_string_arenas);
 
+        runtime.query_collectors = allocator.alloc(
+            SpillingResultCollector,
+            config.max_query_slots,
+        ) catch return error.OutOfMemory;
+        errdefer allocator.free(runtime.query_collectors);
+
+        runtime.work_memory_bytes_per_slot = config.work_memory_bytes_per_slot;
+
         runtime.tx_manager = TxManager.init(allocator);
 
         runtime.static_allocator.seal();
@@ -174,6 +192,8 @@ pub const BootstrappedRuntime = struct {
                         slot_index,
                     ),
                     .string_arena_bytes = self.stringArenaForSlot(slot_index),
+                    .collector = &self.query_collectors[slot_index],
+                    .work_memory_bytes_per_slot = self.work_memory_bytes_per_slot,
                 };
             }
         }
@@ -196,6 +216,7 @@ pub const BootstrappedRuntime = struct {
 
     pub fn deinit(self: *BootstrappedRuntime) void {
         const allocator = self.static_allocator.allocator();
+        allocator.free(self.query_collectors);
         allocator.free(self.query_scratch_rows_b);
         allocator.free(self.query_scratch_rows_a);
         allocator.free(self.query_result_rows);
@@ -214,8 +235,8 @@ pub const BootstrappedRuntime = struct {
         slot_index: u16,
     ) []ResultRow {
         std.debug.assert(slot_index < self.max_query_slots);
-        const start = @as(usize, slot_index) * max_result_rows;
-        const end = start + max_result_rows;
+        const start = @as(usize, slot_index) * scan_batch_size;
+        const end = start + scan_batch_size;
         std.debug.assert(end <= rows.len);
         return rows[start..end];
     }
@@ -268,7 +289,7 @@ fn validateMemoryBudget(
     const total_rows = std.math.mul(
         usize,
         @as(usize, config.max_query_slots),
-        max_result_rows,
+        scan_batch_size,
     ) catch return error.InvalidConfig;
     _ = allocator.alloc(bool, config.max_query_slots) catch
         return error.InsufficientMemoryBudget;
@@ -284,6 +305,8 @@ fn validateMemoryBudget(
         config.query_string_arena_bytes_per_slot,
     ) catch return error.InvalidConfig;
     _ = allocator.alloc(u8, total_string_arena_bytes) catch
+        return error.InsufficientMemoryBudget;
+    _ = allocator.alloc(SpillingResultCollector, config.max_query_slots) catch
         return error.InsufficientMemoryBudget;
 }
 

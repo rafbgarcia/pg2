@@ -14,7 +14,7 @@ const scan_mod = @import("scan.zig");
 pub const max_pipeline_operators: usize = 32;
 
 // Sort operator contracts (for upcoming implementation).
-pub const max_sort_rows: usize = scan_mod.max_result_rows;
+pub const max_sort_rows: usize = scan_mod.scan_batch_size;
 pub const max_sort_keys: usize = 8;
 pub const max_sort_scratch_bytes: usize = 256 * 1024;
 
@@ -25,8 +25,8 @@ pub const max_group_aggregate_exprs: usize = 4;
 pub const max_aggregate_state_bytes: usize = 256 * 1024;
 
 // Join operator contracts.
-pub const max_join_build_rows: usize = scan_mod.max_result_rows;
-pub const max_join_output_rows: usize = scan_mod.max_result_rows;
+pub const max_join_build_rows: usize = scan_mod.scan_batch_size;
+pub const max_join_output_rows: usize = scan_mod.scan_batch_size;
 pub const max_join_state_bytes: usize = 512 * 1024;
 
 pub const OperatorCapacities = struct {
@@ -60,7 +60,7 @@ pub const OperatorCapacities = struct {
 comptime {
     std.debug.assert(max_pipeline_operators > 0);
     std.debug.assert(max_sort_rows > 0);
-    std.debug.assert(max_sort_rows <= scan_mod.max_result_rows);
+    std.debug.assert(max_sort_rows <= scan_mod.scan_batch_size);
     std.debug.assert(max_sort_keys > 0);
     std.debug.assert(max_aggregate_groups > 0);
     std.debug.assert(max_group_keys > 0);
@@ -71,9 +71,9 @@ comptime {
 
 test "default capacity contracts remain bounded by scan result ceiling" {
     const c = OperatorCapacities.defaults();
-    try std.testing.expect(c.sort_rows <= scan_mod.max_result_rows);
-    try std.testing.expect(c.join_build_rows <= scan_mod.max_result_rows);
-    try std.testing.expect(c.join_output_rows <= scan_mod.max_result_rows);
+    try std.testing.expect(c.sort_rows <= scan_mod.scan_batch_size);
+    try std.testing.expect(c.join_build_rows <= scan_mod.scan_batch_size);
+    try std.testing.expect(c.join_output_rows <= scan_mod.scan_batch_size);
     try std.testing.expect(c.sort_keys >= 1);
     try std.testing.expect(c.aggregate_groups >= 1);
     try std.testing.expect(c.group_keys >= 1);

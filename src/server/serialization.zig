@@ -7,11 +7,16 @@ const catalog_mod = @import("../catalog/catalog.zig");
 const pool_mod = @import("pool.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
 const ast_mod = @import("../parser/ast.zig");
+const scan_mod = @import("../executor/scan.zig");
+const spill_collector_mod = @import("../executor/spill_collector.zig");
 
 const Catalog = catalog_mod.Catalog;
 const OverflowReclaimStatsSnapshot = catalog_mod.OverflowReclaimStatsSnapshot;
 const PoolStats = pool_mod.PoolStats;
 const Ast = ast_mod.Ast;
+const ResultRow = scan_mod.ResultRow;
+const StringArena = scan_mod.StringArena;
+const SpillingResultCollector = spill_collector_mod.SpillingResultCollector;
 const serializeValue = session.serializeValue;
 const buildTreeProjection = tree_protocol.buildTreeProjection;
 const countProtocolRootRows = tree_protocol.countProtocolRootRows;
@@ -34,8 +39,13 @@ pub fn serializeQueryResult(
     }
 
     const tree_projection = buildTreeProjection(ast, tokens, source, catalog);
-    const returned_rows: u16 = if (tree_projection) |projection|
+
+    // Determine returned row count: when a spill collector is active,
+    // use its total count; otherwise fall back to the flat row_count.
+    const returned_rows: u32 = if (tree_projection) |projection|
         countProtocolRootRows(result, &projection)
+    else if (result.collector) |collector|
+        @intCast(@min(collector.totalRowCount(), std.math.maxInt(u32)))
     else
         result.row_count;
 
@@ -50,6 +60,7 @@ pub fn serializeQueryResult(
     ) catch return error.ResponseTooLarge;
 
     if (tree_projection) |projection| {
+        // Tree protocol always uses the flat array path.
         try serializeTreeProtocol(writer, result, &projection, catalog, tokens, source);
         if (pool_stats) |stats| {
             try serializeInspectStats(
@@ -62,18 +73,24 @@ pub fn serializeQueryResult(
         return;
     }
 
-    var row_index: usize = 0;
-    while (row_index < result.row_count) : (row_index += 1) {
-        const row = result.rows[row_index];
-        std.debug.assert(row.column_count <= row.values.len);
-        var column_index: usize = 0;
-        while (column_index < row.column_count) : (column_index += 1) {
-            if (column_index > 0) {
-                writer.writeAll(",") catch return error.ResponseTooLarge;
-            }
-            try serializeValue(writer, row.values[column_index]);
+    // When a collector is active, iterate from spilled + in-memory rows.
+    if (result.collector) |collector| {
+        var iter = collector.iterator();
+        var arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
+        var arena = StringArena.init(&arena_buf);
+        var out = ResultRow.init();
+        while (true) {
+            arena.reset();
+            const has_row = iter.next(&out, &arena) catch break;
+            if (!has_row) break;
+            try serializeRowColumns(writer, &out);
         }
-        writer.writeAll("\n") catch return error.ResponseTooLarge;
+    } else {
+        // Standard flat-array path.
+        var row_index: usize = 0;
+        while (row_index < result.row_count) : (row_index += 1) {
+            try serializeRowColumns(writer, &result.rows[row_index]);
+        }
     }
 
     if (pool_stats) |stats| {
@@ -172,6 +189,19 @@ fn serializeInspectStats(
             groupStrategyExplain(exec_stats.plan.group_strategy),
         },
     ) catch return error.ResponseTooLarge;
+}
+
+/// Serialize one row's column values as comma-separated text followed by newline.
+fn serializeRowColumns(writer: anytype, row: *const ResultRow) error{ResponseTooLarge}!void {
+    std.debug.assert(row.column_count <= row.values.len);
+    var column_index: usize = 0;
+    while (column_index < row.column_count) : (column_index += 1) {
+        if (column_index > 0) {
+            writer.writeAll(",") catch return error.ResponseTooLarge;
+        }
+        try serializeValue(writer, row.values[column_index]);
+    }
+    writer.writeAll("\n") catch return error.ResponseTooLarge;
 }
 
 fn planOpLabel(op: exec_mod.PlanOp) []const u8 {

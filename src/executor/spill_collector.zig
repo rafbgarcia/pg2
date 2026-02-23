@@ -155,7 +155,10 @@ pub const SpillingResultCollector = struct {
     }
 
     /// Flush the current hot batch to temp pages.
-    fn flushHotBatch(self: *SpillingResultCollector) FlushError!void {
+    ///
+    /// Public so the executor can force a flush as an arena safety valve
+    /// (e.g. when the string arena is nearly full mid-scan).
+    pub fn flushHotBatch(self: *SpillingResultCollector) FlushError!void {
         std.debug.assert(self.hot_count > 0);
 
         var writer = SpillPageWriter.init();

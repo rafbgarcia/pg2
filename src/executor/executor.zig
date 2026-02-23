@@ -25,6 +25,11 @@ const aggregation_mod = @import("aggregation.zig");
 const sorting_mod = @import("sorting.zig");
 const joins_mod = @import("joins.zig");
 const projections_mod = @import("projections.zig");
+const spill_collector_mod = @import("spill_collector.zig");
+const temp_mod = @import("../storage/temp.zig");
+
+const SpillingResultCollector = spill_collector_mod.SpillingResultCollector;
+const TempStorageManager = temp_mod.TempStorageManager;
 
 const Allocator = std.mem.Allocator;
 const Ast = ast_mod.Ast;
@@ -133,9 +138,13 @@ pub const QueryResult = struct {
     stats: ExecStats = .{},
     has_error: bool = false,
     error_message: [512]u8 = std.mem.zeroes([512]u8),
+    /// When non-null, serialization iterates from this collector instead of
+    /// the flat `rows` array. Points to the per-slot collector in
+    /// `BootstrappedRuntime` — survives through serialization.
+    collector: ?*SpillingResultCollector = null,
 
     pub fn init(rows: []ResultRow) QueryResult {
-        std.debug.assert(rows.len >= scan_mod.max_result_rows);
+        std.debug.assert(rows.len >= scan_mod.scan_batch_size);
         return .{
             .rows = rows,
         };
@@ -177,6 +186,8 @@ pub const ExecContext = struct {
     string_arena_bytes: []u8,
     storage: Storage,
     query_slot_index: u16,
+    collector: *SpillingResultCollector,
+    work_memory_bytes_per_slot: u64,
 };
 
 /// Operator kind extracted from the AST.
@@ -229,7 +240,7 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
     }
     result.stats = total_stats;
 
-    std.debug.assert(result.row_count <= scan_mod.max_result_rows);
+    std.debug.assert(result.row_count <= scan_mod.scan_batch_size);
     return result;
 }
 
@@ -355,7 +366,13 @@ fn setStatementError(result: *QueryResult, statement_index: u16, message: []cons
     setError(result, formatted);
 }
 
-/// Execute the read path: table scan, then apply operators in sequence.
+/// Execute the read path: chunked table scan with per-chunk WHERE filter,
+/// spilling result collector, and post-scan operators.
+///
+/// The scan loop reads one batch at a time via ScanCursor, applies the WHERE
+/// filter in-place, and feeds survivors into the SpillingResultCollector.
+/// When all pages are exhausted the post-scan path runs GROUP/SORT/LIMIT/
+/// OFFSET, nested joins, and column projection.
 fn executeReadPipeline(
     ctx: *const ExecContext,
     result: *QueryResult,
@@ -367,61 +384,200 @@ fn executeReadPipeline(
 ) void {
     const caps = capacity_mod.OperatorCapacities.defaults();
 
-    const scan_result = scan_mod.tableScanInto(
-        ctx.catalog,
-        ctx.pool,
-        ctx.undo_log,
-        ctx.snapshot,
-        ctx.tx_manager,
-        model_id,
-        result.rows[0..scan_mod.max_result_rows],
-        string_arena,
+    // --- 1. Init temp storage and collector for this query slot ---
+    const temp_mgr = TempStorageManager.initDefault(
+        ctx.query_slot_index,
+        ctx.storage,
     ) catch |err| {
         setBoundaryError(
             result,
-            "table scan failed",
-            runtime_errors.classifyScan(err),
-            err,
+            "temp storage init failed",
+            runtime_errors.classifyScan(mapTempInitError(err)),
+            mapTempInitError(err),
         );
         return;
     };
-    result.stats.pages_read = scan_result.pages_read;
-    result.stats.rows_scanned = scan_result.row_count;
-    result.row_count = scan_result.row_count;
+    ctx.collector.* = SpillingResultCollector.init(
+        result.rows,
+        temp_mgr,
+        ctx.work_memory_bytes_per_slot,
+    );
 
-    if (!applyReadOperators(
-        ctx,
-        result,
-        model_id,
-        ops,
-        op_count,
-        &caps,
-        string_arena,
-    )) {
-        return;
+    // --- 2. Chunked scan loop ---
+    var cursor = scan_mod.ScanCursor.init();
+    var total_pages_read: u32 = 0;
+    var total_rows_scanned: u32 = 0;
+
+    while (!cursor.done) {
+        // Arena safety valve: if the hot batch is empty we can safely
+        // reset the string arena (all prior strings have been serialized
+        // into spill pages or are still in the hot batch).
+        if (ctx.collector.hot_count == 0) {
+            string_arena.reset();
+        } else if (string_arena.bytes.len > 0) {
+            // If the arena is nearly exhausted (< 10% remaining) and we
+            // have hot rows, force-flush them so we can reclaim the arena.
+            const remaining = string_arena.bytes.len - string_arena.used;
+            const threshold = string_arena.bytes.len / 10;
+            if (remaining < threshold) {
+                ctx.collector.flushHotBatch() catch {
+                    setError(result, "spill flush failed during arena reclaim");
+                    return;
+                };
+                string_arena.reset();
+            }
+        }
+
+        // Scan one chunk into result.rows.
+        const scan_result = scan_mod.tableScanInto(
+            ctx.catalog,
+            ctx.pool,
+            ctx.undo_log,
+            ctx.snapshot,
+            ctx.tx_manager,
+            model_id,
+            result.rows[0..scan_mod.scan_batch_size],
+            string_arena,
+            &cursor,
+        ) catch |err| {
+            setBoundaryError(
+                result,
+                "table scan failed",
+                runtime_errors.classifyScan(err),
+                err,
+            );
+            captureTempStats(result, ctx.collector);
+            return;
+        };
+        total_pages_read += scan_result.pages_read;
+        total_rows_scanned += scan_result.row_count;
+        result.row_count = scan_result.row_count;
+
+        // Apply per-chunk operators (WHERE filter).
+        applyPerChunkOperators(ctx, result, model_id, ops, op_count, string_arena);
+        if (result.has_error) {
+            captureTempStats(result, ctx.collector);
+            return;
+        }
+
+        // Feed surviving rows into the collector.
+        var row_idx: u16 = 0;
+        while (row_idx < result.row_count) : (row_idx += 1) {
+            ctx.collector.appendRow(&result.rows[row_idx]) catch {
+                setError(result, "spill collector append failed");
+                captureTempStats(result, ctx.collector);
+                return;
+            };
+        }
     }
-    if (!applyNestedSelectionJoin(
-        ctx,
-        result,
-        pipeline_node,
-        model_id,
-        &caps,
-        string_arena,
-    )) {
-        return;
+
+    result.stats.pages_read = total_pages_read;
+    result.stats.rows_scanned = total_rows_scanned;
+
+    // --- 3. Post-scan: materialize final result ---
+    const spilled = ctx.collector.spillTriggered();
+    const needs_full_input = hasFullInputOperators(ops, op_count);
+
+    if (!spilled) {
+        // No spill — hot batch rows are already in result.rows[0..hot_count].
+        result.row_count = ctx.collector.hot_count;
+        result.collector = null;
+
+        if (!applyPostScanOperators(ctx, result, model_id, ops, op_count, &caps, string_arena)) {
+            captureTempStats(result, ctx.collector);
+            return;
+        }
+        if (!applyNestedSelectionJoin(ctx, result, pipeline_node, model_id, &caps, string_arena)) {
+            captureTempStats(result, ctx.collector);
+            return;
+        }
+    } else if (!needs_full_input) {
+        // Spill occurred but no GROUP/SORT needed — let serialization
+        // iterate directly from the collector.
+        result.row_count = @intCast(@min(
+            ctx.collector.totalRowCount(),
+            scan_mod.scan_batch_size,
+        ));
+        result.collector = ctx.collector;
+    } else {
+        // Spill + full-input operators: reload from collector into result.rows.
+        string_arena.reset();
+        var iter = ctx.collector.iterator();
+        var reload_count: u16 = 0;
+        var arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
+        var reload_arena = scan_mod.StringArena.init(&arena_buf);
+        while (reload_count < scan_mod.scan_batch_size) {
+            reload_arena.reset();
+            const has_row = iter.next(&result.rows[reload_count], &reload_arena) catch {
+                setError(result, "spill collector reload failed");
+                captureTempStats(result, ctx.collector);
+                return;
+            };
+            if (!has_row) break;
+            // Copy strings from the temporary reload arena into the main
+            // string arena so they survive post-scan operator processing.
+            copyRowStringsToArena(&result.rows[reload_count], string_arena) catch {
+                setError(result, "string arena exhausted during reload");
+                captureTempStats(result, ctx.collector);
+                return;
+            };
+            reload_count += 1;
+        }
+        result.row_count = reload_count;
+        result.collector = null;
+
+        if (!applyPostScanOperators(ctx, result, model_id, ops, op_count, &caps, string_arena)) {
+            captureTempStats(result, ctx.collector);
+            return;
+        }
+        if (!applyNestedSelectionJoin(ctx, result, pipeline_node, model_id, &caps, string_arena)) {
+            captureTempStats(result, ctx.collector);
+            return;
+        }
     }
 
     result.stats.rows_matched = result.row_count;
-    if (!applyFlatColumnProjection(
-        ctx,
-        result,
-        pipeline_node,
-        model_id,
-        string_arena,
-    )) {
+    if (!applyFlatColumnProjection(ctx, result, pipeline_node, model_id, string_arena)) {
+        captureTempStats(result, ctx.collector);
         return;
     }
     result.stats.rows_returned = result.row_count;
+    captureTempStats(result, ctx.collector);
+}
+
+/// Copy string values in a row from their current backing into `arena`.
+/// This is needed when reloading spilled rows: the reload arena is
+/// temporary, so strings must be relocated into the main string arena.
+fn copyRowStringsToArena(
+    row: *ResultRow,
+    arena: *scan_mod.StringArena,
+) error{OutOfMemory}!void {
+    var col: u16 = 0;
+    while (col < row.column_count) : (col += 1) {
+        switch (row.values[col]) {
+            .string => |s| {
+                row.values[col] = .{ .string = try arena.copyString(s) };
+            },
+            else => {},
+        }
+    }
+}
+
+/// Snapshot temp storage stats into the query result.
+fn captureTempStats(result: *QueryResult, collector: *const SpillingResultCollector) void {
+    const stats = collector.tempStats();
+    result.stats.temp_pages_allocated = stats.temp_pages_allocated;
+    result.stats.temp_pages_reclaimed = stats.temp_pages_reclaimed;
+    result.stats.temp_bytes_written = stats.temp_bytes_written;
+    result.stats.temp_bytes_read = stats.temp_bytes_read;
+}
+
+/// Map TempAllocatorError to ScanError for boundary error reporting.
+fn mapTempInitError(err: temp_mod.TempAllocatorError) scan_mod.ScanError {
+    return switch (err) {
+        error.InvalidRegion => error.Corruption,
+        error.RegionExhausted => error.StorageRead,
+    };
 }
 
 const applyFlatColumnProjection = projections_mod.applyFlatColumnProjection;
@@ -492,6 +648,112 @@ fn applyReadOperators(
     return true;
 }
 
+/// Apply only per-chunk operators (WHERE filter) to the current result batch.
+/// Called once per scan chunk inside the chunked scan loop.
+fn applyPerChunkOperators(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    model_id: ModelId,
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+    string_arena: *scan_mod.StringArena,
+) void {
+    var group_runtime = GroupRuntime{};
+    const schema = &ctx.catalog.models[model_id].row_schema;
+    var i: u16 = 0;
+    while (i < op_count) : (i += 1) {
+        const op = ops[i];
+        switch (op.kind) {
+            .where_filter => applyWhereFilter(
+                ctx,
+                result,
+                op.node,
+                schema,
+                &group_runtime,
+                string_arena,
+            ),
+            else => {},
+        }
+    }
+}
+
+/// Apply post-scan operators (GROUP/SORT/LIMIT/OFFSET/HAVING) to the
+/// fully-collected result set. WHERE is skipped because it was already
+/// applied per-chunk during the scan loop.
+fn applyPostScanOperators(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    model_id: ModelId,
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+    caps: *const capacity_mod.OperatorCapacities,
+    string_arena: *scan_mod.StringArena,
+) bool {
+    var group_runtime = GroupRuntime{};
+    const schema = &ctx.catalog.models[model_id].row_schema;
+    var i: u16 = 0;
+    while (i < op_count) : (i += 1) {
+        const op = ops[i];
+        switch (op.kind) {
+            .where_filter => {}, // Already applied per-chunk.
+            .having_filter => applyWhereFilter(
+                ctx,
+                result,
+                op.node,
+                schema,
+                &group_runtime,
+                string_arena,
+            ),
+            .group_op => {
+                if (!aggregation_mod.applyGroup(
+                    ctx,
+                    result,
+                    op.node,
+                    schema,
+                    ops,
+                    op_count,
+                    i,
+                    caps,
+                    &group_runtime,
+                    string_arena,
+                )) return false;
+            },
+            .limit_op => applyLimit(ctx, result, op.node, string_arena),
+            .offset_op => applyOffset(ctx, result, op.node, &group_runtime, string_arena),
+            .sort_op => {
+                if (!sorting_mod.applySort(
+                    ctx,
+                    result,
+                    op.node,
+                    schema,
+                    caps,
+                    &group_runtime,
+                    string_arena,
+                )) return false;
+            },
+            .inspect_op => {},
+            .insert_op, .update_op, .delete_op => {},
+        }
+    }
+    return true;
+}
+
+/// Returns true if the operator list contains GROUP or SORT — operators
+/// that require the full input set before producing output.
+fn hasFullInputOperators(
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+) bool {
+    var i: u16 = 0;
+    while (i < op_count) : (i += 1) {
+        switch (ops[i].kind) {
+            .group_op, .sort_op => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
 fn applyNestedSelectionJoin(
     ctx: *const ExecContext,
     result: *QueryResult,
@@ -556,8 +818,9 @@ fn applySingleNestedSelectionJoin(
         ctx.snapshot,
         ctx.tx_manager,
         target_model_id,
-        right_result.rows[0..scan_mod.max_result_rows],
+        right_result.rows[0..scan_mod.scan_batch_size],
         string_arena,
+        null,
     ) catch |err| {
         setBoundaryError(
             result,
@@ -598,7 +861,7 @@ fn applySingleNestedSelectionJoin(
         return false;
     }
 
-    std.debug.assert(ctx.scratch_rows_b.len >= scan_mod.max_result_rows);
+    std.debug.assert(ctx.scratch_rows_b.len >= scan_mod.scan_batch_size);
     const left_copy = ctx.scratch_rows_b;
     @memcpy(left_copy[0..result.row_count], result.rows[0..result.row_count]);
 
@@ -853,14 +1116,14 @@ fn applyOffset(
 
 fn numericToRowCount(value: Value) ?u16 {
     return switch (value) {
-        .i8 => |v| if (v >= 0) @intCast(@min(v, scan_mod.max_result_rows)) else 0,
-        .i16 => |v| if (v >= 0) @intCast(@min(v, scan_mod.max_result_rows)) else 0,
-        .i32 => |v| if (v >= 0) @intCast(@min(v, scan_mod.max_result_rows)) else 0,
-        .i64 => |v| if (v >= 0) @intCast(@min(v, scan_mod.max_result_rows)) else 0,
-        .u8 => |v| @intCast(@min(v, scan_mod.max_result_rows)),
-        .u16 => |v| @intCast(@min(v, scan_mod.max_result_rows)),
-        .u32 => |v| @intCast(@min(v, scan_mod.max_result_rows)),
-        .u64 => |v| @intCast(@min(v, scan_mod.max_result_rows)),
+        .i8 => |v| if (v >= 0) @intCast(@min(v, scan_mod.scan_batch_size)) else 0,
+        .i16 => |v| if (v >= 0) @intCast(@min(v, scan_mod.scan_batch_size)) else 0,
+        .i32 => |v| if (v >= 0) @intCast(@min(v, scan_mod.scan_batch_size)) else 0,
+        .i64 => |v| if (v >= 0) @intCast(@min(v, scan_mod.scan_batch_size)) else 0,
+        .u8 => |v| @intCast(@min(v, scan_mod.scan_batch_size)),
+        .u16 => |v| @intCast(@min(v, scan_mod.scan_batch_size)),
+        .u32 => |v| @intCast(@min(v, scan_mod.scan_batch_size)),
+        .u64 => |v| @intCast(@min(v, scan_mod.scan_batch_size)),
         else => null,
     };
 }
@@ -920,7 +1183,7 @@ fn executeMutation(
                 string_arena.reset();
                 result.row_count = 0;
                 returning_capture = .{
-                    .rows = result.rows[0..scan_mod.max_result_rows],
+                    .rows = result.rows[0..scan_mod.scan_batch_size],
                     .row_count = &result.row_count,
                     .string_arena = string_arena,
                 };
@@ -960,7 +1223,7 @@ fn executeMutation(
                 string_arena.reset();
                 result.row_count = 0;
                 returning_capture = .{
-                    .rows = result.rows[0..scan_mod.max_result_rows],
+                    .rows = result.rows[0..scan_mod.scan_batch_size],
                     .row_count = &result.row_count,
                     .string_arena = string_arena,
                 };
@@ -1024,8 +1287,9 @@ fn materializeRowsMatchingPredicate(
         ctx.snapshot,
         ctx.tx_manager,
         model_id,
-        out.rows[0..scan_mod.max_result_rows],
+        out.rows[0..scan_mod.scan_batch_size],
         string_arena,
+        null,
     ) catch |err| {
         setBoundaryError(
             out,
@@ -1340,6 +1604,7 @@ const ExecTestEnv = struct {
     scratch_rows_a: []ResultRow,
     scratch_rows_b: []ResultRow,
     string_arena_bytes: []u8,
+    collector: SpillingResultCollector,
 
     /// Initialize in-place so that disk.storage() captures a stable pointer.
     fn init(self: *ExecTestEnv) !void {
@@ -1354,17 +1619,17 @@ const ExecTestEnv = struct {
         self.undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
         self.result_rows = try testing.allocator.alloc(
             ResultRow,
-            scan_mod.max_result_rows,
+            scan_mod.scan_batch_size,
         );
         errdefer testing.allocator.free(self.result_rows);
         self.scratch_rows_a = try testing.allocator.alloc(
             ResultRow,
-            scan_mod.max_result_rows,
+            scan_mod.scan_batch_size,
         );
         errdefer testing.allocator.free(self.scratch_rows_a);
         self.scratch_rows_b = try testing.allocator.alloc(
             ResultRow,
-            scan_mod.max_result_rows,
+            scan_mod.scan_batch_size,
         );
         errdefer testing.allocator.free(self.scratch_rows_b);
         self.string_arena_bytes = try testing.allocator.alloc(
@@ -1372,6 +1637,9 @@ const ExecTestEnv = struct {
             scan_mod.default_string_arena_bytes,
         );
         errdefer testing.allocator.free(self.string_arena_bytes);
+        // Collector is initialized lazily per-query by executeReadPipeline;
+        // just zero-init here so the pointer is stable.
+        self.collector = undefined;
 
         self.catalog = Catalog{};
         self.model_id = try self.catalog.addModel("User");
@@ -1442,6 +1710,8 @@ const ExecTestEnv = struct {
             .string_arena_bytes = self.string_arena_bytes,
             .storage = self.disk.storage(),
             .query_slot_index = 0,
+            .collector = &self.collector,
+            .work_memory_bytes_per_slot = 4 * 1024 * 1024,
         };
     }
 };
@@ -2390,7 +2660,7 @@ test "bounded inner join preserves deterministic left-major ordering" {
         makeJoinRightRow(2, true),
     };
 
-    var result_rows: [scan_mod.max_result_rows]ResultRow = undefined;
+    var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
     var result = QueryResult.init(result_rows[0..]);
     defer result.deinit();
     const caps = capacity_mod.OperatorCapacities.defaults();
@@ -2431,7 +2701,7 @@ test "bounded inner join enforces build row capacity contract" {
         makeJoinRightRow(1, true),
     };
 
-    var result_rows: [scan_mod.max_result_rows]ResultRow = undefined;
+    var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
     var result = QueryResult.init(result_rows[0..]);
     defer result.deinit();
     var caps = capacity_mod.OperatorCapacities.defaults();
@@ -2460,7 +2730,7 @@ test "bounded inner join enforces output row capacity contract" {
         makeJoinRightRow(1, false),
     };
 
-    var result_rows: [scan_mod.max_result_rows]ResultRow = undefined;
+    var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
     var result = QueryResult.init(result_rows[0..]);
     defer result.deinit();
     var caps = capacity_mod.OperatorCapacities.defaults();
@@ -2488,7 +2758,7 @@ test "bounded inner join enforces state byte capacity contract" {
         makeJoinRightRow(1, true),
     };
 
-    var result_rows: [scan_mod.max_result_rows]ResultRow = undefined;
+    var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
     var result = QueryResult.init(result_rows[0..]);
     defer result.deinit();
     var caps = capacity_mod.OperatorCapacities.defaults();
