@@ -111,18 +111,20 @@ Queries should degrade performance under memory pressure before failing, using p
 - **Capacity migration**: `max_sort_rows` no longer enforced as a hard error. Sort accepts any input size. Failure only on temp page exhaustion (`RegionExhausted`) or storage hard errors.
 - `plan.sort_strategy` gains `.external_merge`.
 
-#### 3c: Hash Aggregation with Partition Spill
+#### 3c: Hash Aggregation with Partition Spill ✅
 - `src/executor/hash_aggregate.zig`: hash-based GROUP BY with grace-hash partition spill.
-- **Hash table**: Open-addressing with linear probing. Array of `(hash: u64, group_index: u16)` entries, power-of-2 sized, load factor ≤ 0.7. Table size derived from `work_memory_bytes_per_slot` (budget / entry_size). Group representative rows stored in the working buffer (`result.rows` or `scratch_rows_b`).
-- **Aggregate state**: Migrate from fixed `[max_group_aggregate_exprs][scan_batch_size]` to a flat array sized by the byte-budget-derived group capacity. The `AggregateState` struct and `updateAggregateState()` accumulation logic are reused unchanged.
+- **Hash table**: Open-addressing with linear probing. Separate `hashes: [8192]u64` and `indices: [8192]u16` arrays for cache-friendly probing. Power-of-2 sized (8192 slots), load factor 0.5 with max 4096 groups. `std.hash.Wyhash` with seed 0, type-tag prefix per value to prevent cross-type collisions. Empty sentinel: `maxInt(u16)`.
+- **Aggregate state**: Reuses existing `GroupRuntime` with its `[max_group_aggregate_exprs][scan_batch_size]AggregateState` arrays and `group_counts`. Byte-budget-derived capacity migration deferred to Phase 3e's `OperatorCapacities` overhaul. `AggregateState` struct and `updateAggregateState()` accumulation logic reused unchanged.
 - **In-memory fast path**: All input rows hash-aggregated into the table. If all groups fit (common OLTP case with few distinct keys), output the groups directly. O(n) total, O(1) per row amortized.
-- **Spill path (grace hash aggregation)**: When a new group would exceed the table's capacity:
-  1. Choose a partition count P (next power of 2 above current group count / target partition size). P partitions numbered 0..P-1.
-  2. The hash table retains groups whose `hash % P == 0` (partition 0 stays resident). All other groups' rows are evicted from the table, their aggregate state is discarded.
-  3. Remaining input rows: if `hash % P == 0`, aggregate inline. Otherwise, serialize to the spill partition's temp pages (raw input rows, not aggregated state).
-  4. After all input consumed: emit partition 0 results. Then for each spilled partition (1..P-1): load from temp pages, hash-aggregate (fits in memory by construction since each partition is ~1/P of the data), emit results.
+- **Spill path (grace hash aggregation)**: When a new group would exceed the table's capacity during the in-memory attempt:
+  1. Choose a partition count P (next power of 2, clamped to [2, 16], targeting ~half of max_in_memory_groups per partition).
+  2. Re-iterate all input from the collector (data is in spill pages, supports multiple iterations). This avoids the complexity of evicting partial aggregate state from the in-memory attempt.
+  3. For each input row: if `hash % P == 0`, aggregate inline into the hash table (partition 0 stays resident). Otherwise, serialize raw input row to that partition's temp pages via per-partition `SpillPageWriter`.
+  4. After all input consumed: partition 0 groups are complete in `result.rows`. For each spilled partition (1..P-1): clear hash table, read partition's temp pages sequentially, hash-aggregate into `result.rows` (accumulating group indices across partitions), emit results.
 - **Subtlety — re-aggregation**: Spilled partitions contain raw input rows, not partial aggregates. This is necessary because aggregate functions like AVG need the original values (can't merge partial AVGs correctly without count+sum decomposition). For SUM/COUNT/MIN/MAX, partial merge would work, but the uniform re-aggregation approach is simpler and correct for all aggregate kinds.
-- `max_aggregate_groups` becomes the in-memory hash table capacity, derived from byte budget. `plan.group_strategy` gains `.hash_spill`.
+- **String arena management**: Small stack-allocated read arena (8 KB) for reading each row from the collector/partition pages. Group representative row strings and aggregate min/max strings are copied to the main string arena. Rescue mechanism (64 KB buffer) handles main arena >90% full by saving group strings, resetting arena, and re-interning.
+- **Pipeline integration**: The executor's spill+GROUP path in `executeReadPipeline` dispatches to `applyHashAggregate`, replacing the old "reload up to scan_batch_size" path that silently truncated input beyond 4096 rows. `applyPostHashAggregateOperators` applies HAVING/SORT/LIMIT/OFFSET using the populated `GroupRuntime` for aggregate resolution.
+- `max_aggregate_groups` (4096) remains the in-memory hash table group capacity. `plan.group_strategy` gains `.hash_spill`.
 
 #### 3d: Hash Join with Partition Spill
 - `src/executor/hash_join.zig`: hash join replacing nested-loop, with grace-hash partition spill.
