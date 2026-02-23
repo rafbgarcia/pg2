@@ -402,7 +402,7 @@ fn choosePartitionCount(current_group_count: u16) u64 {
 
 /// Apply hash-based GROUP BY aggregation over spilled input data.
 ///
-/// Reads all input rows from `ctx.collector`, groups them using a hash table,
+/// Reads all input rows from the provided `collector`, groups them using a hash table,
 /// and populates `result.rows[0..result.row_count]` with group representative
 /// rows and `group_runtime` with aggregate state.
 ///
@@ -410,6 +410,7 @@ fn choosePartitionCount(current_group_count: u16) u64 {
 pub fn applyHashAggregate(
     ctx: *const ExecContext,
     result: *QueryResult,
+    collector: *SpillingResultCollector,
     group_node: NodeIndex,
     group_op_index: u16,
     schema: *const RowSchema,
@@ -469,6 +470,7 @@ pub fn applyHashAggregate(
     applyHashAggregateImpl(
         ctx,
         result,
+        collector,
         group_key_indices[0..group_key_count],
         schema,
         group_runtime,
@@ -496,13 +498,12 @@ pub fn applyHashAggregate(
 fn applyHashAggregateImpl(
     ctx: *const ExecContext,
     result: *QueryResult,
+    collector: *SpillingResultCollector,
     group_key_indices: []const u16,
     schema: *const RowSchema,
     group_runtime: *GroupRuntime,
     string_arena: *StringArena,
 ) HashAggregateError!void {
-    const collector = ctx.collector;
-
     // Flush hot batch so all data is in spill pages.
     if (collector.hot_count > 0) {
         collector.flushHotBatch() catch return error.SpillError;

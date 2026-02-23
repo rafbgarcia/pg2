@@ -354,6 +354,7 @@ const RunMergeState = struct {
 pub fn applyExternalSort(
     ctx: *const ExecContext,
     result: *QueryResult,
+    collector: *SpillingResultCollector,
     sort_node: NodeIndex,
     schema: *const RowSchema,
     string_arena: *StringArena,
@@ -386,6 +387,7 @@ pub fn applyExternalSort(
     applyExternalSortImpl(
         ctx,
         result,
+        collector,
         sort_keys[0..key_count],
         schema,
         string_arena,
@@ -412,12 +414,11 @@ pub fn applyExternalSort(
 fn applyExternalSortImpl(
     ctx: *const ExecContext,
     result: *QueryResult,
+    collector: *SpillingResultCollector,
     sort_keys: []const SortKeyDescriptor,
     schema: *const RowSchema,
     string_arena: *StringArena,
 ) ExternalSortError!void {
-    const collector = ctx.collector;
-
     // Step 1: Flush hot batch so all data is in spill pages and result.rows
     // is free for use as a working buffer.
     if (collector.hot_count > 0) {

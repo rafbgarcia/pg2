@@ -675,7 +675,7 @@ fn executeReadPipeline(
         // directly, avoiding the scan_batch_size reload truncation.
         const sort_node = findSortOpNode(ops, op_count).?;
         const schema = &ctx.catalog.models[model_id].row_schema;
-        if (!external_sort_mod.applyExternalSort(ctx, result, sort_node, schema, string_arena)) {
+        if (!external_sort_mod.applyExternalSort(ctx, result, ctx.collector, sort_node, schema, string_arena)) {
             captureTempStats(result, ctx.collector);
             return;
         }
@@ -766,6 +766,7 @@ fn executeReadPipeline(
         if (!hash_aggregate_mod.applyHashAggregate(
             ctx,
             result,
+            ctx.collector,
             group_info.node,
             group_info.index,
             schema,

@@ -68,6 +68,7 @@ Queries should degrade performance under memory pressure before failing, using p
   - Current fail-closed guard is now per-parent subset capacity (`nested relation per-parent child subset exceeds in-memory capacity`) and per-parent nested match arena exhaustion.
 - The unified operator I/O contract (flat buffer vs spill descriptor/iterator chaining) is still pending and remains the next major step.
 - Next recommended implementation step is **per-parent spill for nested child subsets** so per-parent child matches are not bounded by in-memory subset capacity/arena.
+- Foundation update: spill-heavy operators now support explicit collector injection (no hard wiring to `ctx.collector`) for external sort and hash aggregate. This unblocks nested per-parent spill composition without duplicating operator engines.
 
 ### Handoff Update (2026-02-23, latest)
 - Current state: nested selection semantics are per-parent for both flat and collector-backed paths, and child-table scanning is chunked; remaining nested scaling bound is per-parent in-memory subset/arena capacity (no per-parent spill yet).
