@@ -506,3 +506,47 @@ test "collector-backed spill path fails explicitly for nested selection" {
         ) != null,
     );
 }
+
+test "nested selection fails explicitly when child scan exceeds in-memory batch" {
+    var env: FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\  reference(posts, id, Post.user_id, withoutReferentialIntegrity)
+        \\}
+        \\Post {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(user_id, i64, notNull)
+        \\  field(title, string, notNull)
+        \\}
+    );
+
+    _ = try executor.run("User |> insert(id = 1, name = \"Alice\") {}");
+    var i: u32 = 1;
+    while (i <= 4200) : (i += 1) {
+        var query_buf: [256]u8 = undefined;
+        const query = std.fmt.bufPrint(
+            &query_buf,
+            "Post |> insert(id = {d}, user_id = 1, title = \"p{d}\") {{}}",
+            .{ i, i },
+        ) catch unreachable;
+        _ = try executor.run(query);
+    }
+
+    const result = try executor.run(
+        "User |> inspect { name posts |> sort(id desc) |> limit(1) { id } }",
+    );
+    try std.testing.expect(std.mem.startsWith(u8, result, "ERR query: "));
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            result,
+            "nested relation right-side scan exceeds in-memory capacity",
+        ) != null,
+    );
+}

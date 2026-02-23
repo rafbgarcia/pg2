@@ -1831,10 +1831,14 @@ fn applySingleNestedSelectionJoin(
         return false;
     }
     const target_model_id = assoc.target_model_id;
+    const target_schema = &ctx.catalog.models[target_model_id].row_schema;
 
     var right_result = QueryResult.init(ctx.scratch_rows_a);
     defer right_result.deinit();
 
+    // Nested right-side scan is currently bounded to one in-memory batch.
+    // Fail closed if additional chunks exist to avoid silent truncation.
+    var right_cursor = scan_mod.ScanCursor.init();
     const right_scan = scan_mod.tableScanInto(
         ctx.catalog,
         ctx.pool,
@@ -1844,7 +1848,7 @@ fn applySingleNestedSelectionJoin(
         target_model_id,
         right_result.rows[0..scan_mod.scan_batch_size],
         string_arena,
-        null,
+        &right_cursor,
     ) catch |err| {
         setBoundaryError(
             result,
@@ -1856,6 +1860,10 @@ fn applySingleNestedSelectionJoin(
     };
     right_result.row_count = right_scan.row_count;
     right_result.stats.pages_read = right_scan.pages_read;
+    if (!right_cursor.done) {
+        setError(result, "nested relation right-side scan exceeds in-memory capacity");
+        return false;
+    }
 
     var nested_ops: [max_operators]OpDescriptor = undefined;
     var nested_op_count: u16 = 0;
@@ -1872,22 +1880,10 @@ fn applySingleNestedSelectionJoin(
             &nested_op_count,
         );
     }
-    if (!applyReadOperators(
-        ctx,
-        &right_result,
-        target_model_id,
-        &nested_ops,
-        nested_op_count,
-        caps,
-        string_arena,
-    )) {
-        if (right_result.getError()) |msg| setError(result, msg);
-        return false;
-    }
-
     std.debug.assert(ctx.scratch_rows_b.len >= scan_mod.scan_batch_size);
+    const left_count = result.row_count;
     const left_copy = ctx.scratch_rows_b;
-    @memcpy(left_copy[0..result.row_count], result.rows[0..result.row_count]);
+    @memcpy(left_copy[0..left_count], result.rows[0..left_count]);
 
     const join = inferAssociationJoinDescriptor(
         ctx.catalog,
@@ -1896,17 +1892,257 @@ fn applySingleNestedSelectionJoin(
         result,
     ) orelse return false;
     recordNestedJoinPlan(&result.stats.plan);
-    if (!joins_mod.executeLeftJoinBounded(
-        result,
-        left_copy[0..result.row_count],
-        right_result.rows[0..right_result.row_count],
-        join,
-        ctx.catalog.models[target_model_id].row_schema.column_count,
-        caps,
-    )) {
+
+    // Per-parent nested semantics:
+    // apply nested child pipeline operators to each parent's child subset,
+    // then join that subset back to the parent row.
+    var output_count: u16 = 0;
+    var left_idx: u16 = 0;
+    while (left_idx < left_count) : (left_idx += 1) {
+        const left_row = left_copy[left_idx];
+        const left_key = left_row.values[join.left_key_index];
+
+        var matched_count: u16 = 0;
+        var right_idx_count: u16 = 0;
+        while (right_idx_count < right_result.row_count) : (right_idx_count += 1) {
+            const right_row = right_result.rows[right_idx_count];
+            if (row_mod.compareValues(left_key, right_row.values[join.right_key_index]) == .eq) {
+                matched_count += 1;
+            }
+        }
+
+        if (matched_count == 0) {
+            if (@as(usize, output_count) >= caps.join_output_rows) {
+                setError(result, "join output row capacity exceeded");
+                return false;
+            }
+            const total_columns_with_right = @as(usize, left_row.column_count) +
+                @as(usize, target_schema.column_count);
+            if (total_columns_with_right > scan_mod.max_columns) {
+                setError(result, "join column capacity exceeded");
+                return false;
+            }
+
+            var out = ResultRow.init();
+            out.column_count = @intCast(total_columns_with_right);
+            out.row_id = left_row.row_id;
+            @memcpy(
+                out.values[0..left_row.column_count],
+                left_row.values[0..left_row.column_count],
+            );
+            var null_col: u16 = 0;
+            while (null_col < target_schema.column_count) : (null_col += 1) {
+                out.values[left_row.column_count + null_col] = .{ .null_value = {} };
+            }
+            result.rows[output_count] = out;
+            output_count += 1;
+            continue;
+        }
+
+        const tail_start = scan_mod.scan_batch_size - matched_count;
+        if (output_count + matched_count > tail_start) {
+            setError(result, "join output row capacity exceeded");
+            return false;
+        }
+
+        var write_tail: u16 = tail_start;
+        var right_idx_copy: u16 = 0;
+        while (right_idx_copy < right_result.row_count) : (right_idx_copy += 1) {
+            const right_row = right_result.rows[right_idx_copy];
+            if (row_mod.compareValues(left_key, right_row.values[join.right_key_index]) != .eq) {
+                continue;
+            }
+            result.rows[write_tail] = right_row;
+            write_tail += 1;
+        }
+
+        var parent_subset = QueryResult{
+            .rows = result.rows[tail_start..scan_mod.scan_batch_size],
+            .row_count = matched_count,
+        };
+        if (!applyNestedReadOperatorsPerParent(
+            ctx,
+            &parent_subset,
+            target_model_id,
+            &nested_ops,
+            nested_op_count,
+            caps,
+            string_arena,
+        )) {
+            if (parent_subset.getError()) |msg| setError(result, msg);
+            return false;
+        }
+
+        var nested_idx: u16 = 0;
+        while (nested_idx < parent_subset.row_count) : (nested_idx += 1) {
+            if (@as(usize, output_count) >= caps.join_output_rows) {
+                setError(result, "join output row capacity exceeded");
+                return false;
+            }
+            const nested_row = parent_subset.rows[nested_idx];
+            const total_columns = @as(usize, left_row.column_count) +
+                @as(usize, nested_row.column_count);
+            if (total_columns > scan_mod.max_columns) {
+                setError(result, "join column capacity exceeded");
+                return false;
+            }
+
+            var out = ResultRow.init();
+            out.column_count = @intCast(total_columns);
+            out.row_id = left_row.row_id;
+            @memcpy(
+                out.values[0..left_row.column_count],
+                left_row.values[0..left_row.column_count],
+            );
+            @memcpy(
+                out.values[left_row.column_count..out.column_count],
+                nested_row.values[0..nested_row.column_count],
+            );
+            result.rows[output_count] = out;
+            output_count += 1;
+        }
+    }
+    result.row_count = output_count;
+    result.stats.pages_read += right_result.stats.pages_read;
+    return true;
+}
+
+/// Apply nested child pipeline operators to a single parent's child subset.
+///
+/// Uses insertion sort for `sort_op` to avoid mutating `ctx.scratch_rows_b`,
+/// which is reserved for left-row preservation in nested joins.
+fn applyNestedReadOperatorsPerParent(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    model_id: ModelId,
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+    caps: *const capacity_mod.OperatorCapacities,
+    string_arena: *scan_mod.StringArena,
+) bool {
+    var group_runtime = GroupRuntime{};
+    const schema = &ctx.catalog.models[model_id].row_schema;
+    var i: u16 = 0;
+    while (i < op_count) : (i += 1) {
+        const op = ops[i];
+        switch (op.kind) {
+            .where_filter => applyWhereFilter(
+                ctx,
+                result,
+                op.node,
+                schema,
+                &group_runtime,
+                string_arena,
+            ),
+            .having_filter => applyWhereFilter(
+                ctx,
+                result,
+                op.node,
+                schema,
+                &group_runtime,
+                string_arena,
+            ),
+            .group_op => {
+                if (!aggregation_mod.applyGroup(
+                    ctx,
+                    result,
+                    op.node,
+                    schema,
+                    ops,
+                    op_count,
+                    i,
+                    caps,
+                    &group_runtime,
+                    string_arena,
+                )) return false;
+            },
+            .limit_op => applyLimit(ctx, result, op.node, string_arena),
+            .offset_op => applyOffset(ctx, result, op.node, &group_runtime, string_arena),
+            .sort_op => {
+                if (!applySortNoScratch(
+                    ctx,
+                    result,
+                    op.node,
+                    schema,
+                    caps,
+                    &group_runtime,
+                    string_arena,
+                )) return false;
+            },
+            .inspect_op => {},
+            .insert_op, .update_op, .delete_op => {},
+        }
+        if (result.has_error) return false;
+    }
+    return true;
+}
+
+/// Stable insertion sort variant for nested child subsets.
+///
+/// This path avoids `ctx.scratch_rows_b` usage so nested joins can preserve
+/// left rows while still honoring per-parent `sort(...)` semantics.
+fn applySortNoScratch(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    sort_node: NodeIndex,
+    schema: *const RowSchema,
+    caps: *const capacity_mod.OperatorCapacities,
+    group_runtime: *GroupRuntime,
+    string_arena: *scan_mod.StringArena,
+) bool {
+    const node = ctx.ast.getNode(sort_node);
+    const key_count = ctx.ast.listLen(node.data.unary);
+    if (key_count == 0) {
+        setError(result, "sort requires at least one key");
         return false;
     }
-    result.stats.pages_read += right_result.stats.pages_read;
+    if (@as(usize, key_count) > caps.sort_keys) {
+        setError(result, "sort capacity exceeded");
+        return false;
+    }
+
+    var sort_keys: [capacity_mod.max_sort_keys]sorting_mod.SortKeyDescriptor = undefined;
+    if (!sorting_mod.buildSortKeyDescriptors(
+        ctx,
+        result,
+        node.data.unary,
+        schema,
+        sort_keys[0..],
+        key_count,
+    )) return false;
+
+    var i: u16 = 1;
+    while (i < result.row_count) : (i += 1) {
+        var j = i;
+        while (j > 0) {
+            const order = sorting_mod.compareRowsBySortKeys(
+                ctx,
+                schema,
+                group_runtime,
+                j - 1,
+                j,
+                &result.rows[j - 1],
+                &result.rows[j],
+                sort_keys[0..key_count],
+                string_arena,
+            ) catch {
+                setError(result, "sort key evaluation failed");
+                return false;
+            };
+            if (order != .gt) break;
+
+            const tmp = result.rows[j - 1];
+            result.rows[j - 1] = result.rows[j];
+            result.rows[j] = tmp;
+
+            if (group_runtime.active) {
+                const ctmp = group_runtime.group_counts[j - 1];
+                group_runtime.group_counts[j - 1] = group_runtime.group_counts[j];
+                group_runtime.group_counts[j] = ctmp;
+            }
+            j -= 1;
+        }
+    }
     return true;
 }
 
