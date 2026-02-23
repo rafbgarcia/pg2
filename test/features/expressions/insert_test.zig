@@ -542,6 +542,29 @@ test "feature multi-row insert token-bound batch preserves heap and unique index
     );
 }
 
+test "feature multi-row insert reports tokenizer cap for oversized statements" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\  field(active, bool, notNull)
+        \\}
+    );
+
+    var insert_buf: [96 * 1024]u8 = undefined;
+    const oversized_insert = try buildBulkUserInsertRequest(insert_buf[0..], 1, 350);
+    const result = try executor.run(oversized_insert);
+    try std.testing.expectEqualStrings(
+        "ERR tokenize: too many tokens\n",
+        result,
+    );
+}
+
 test "feature multi-row insert rejects PK duplicate against existing row" {
     var env: feature.FeatureEnv = undefined;
     try env.init();

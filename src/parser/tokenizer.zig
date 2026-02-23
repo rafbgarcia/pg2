@@ -523,6 +523,28 @@ test "unterminated string" {
     try testing.expect(result.has_error);
 }
 
+test "tokenize fails with explicit diagnostic when token budget is exceeded" {
+    var source_buf: [(max_tokens * 2) + 2]u8 = undefined;
+    var pos: usize = 0;
+    var i: usize = 0;
+    while (i <= max_tokens) : (i += 1) {
+        source_buf[pos] = 'a';
+        pos += 1;
+        if (i != max_tokens) {
+            source_buf[pos] = ' ';
+            pos += 1;
+        }
+    }
+
+    const result = tokenize(source_buf[0..pos]);
+    try testing.expect(result.has_error);
+    try testing.expectEqual(@as(u16, max_tokens), result.count);
+
+    const msg_len = std.mem.indexOfScalar(u8, &result.error_message, 0) orelse
+        result.error_message.len;
+    try testing.expectEqualStrings("too many tokens", result.error_message[0..msg_len]);
+}
+
 test "keywords recognized" {
     const source = "where sort limit offset group having let fn";
     const result = tokenize(source);
