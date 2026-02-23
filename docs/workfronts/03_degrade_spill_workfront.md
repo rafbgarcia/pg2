@@ -29,32 +29,36 @@ Queries should degrade performance under memory pressure before failing, using p
 - **Byte-budget spill, not row-count spill.** The current `max_result_rows = 4096` hard cap is a row-count proxy for memory. The real constraint is bytes. Spill triggers when the accumulated *serialized* data size of result rows exceeds the per-slot work memory budget, OR when the physical result buffer (4096 slots) is full — whichever comes first. Narrow rows hit the physical buffer limit first (common OLTP case, efficient). Wide rows hit the byte budget first (protects against memory blowout on wide schemas).
 - **Chunk-and-filter-then-spill.** Scan fills the physical buffer in chunks of up to 4096 rows. Each chunk runs through WHERE/project in-place. Only surviving rows are serialized and spilled to temp pages. This avoids wasting the temp page budget on rows the filter will discard — critical since temp pages per slot are finite (default 1024 pages = 8 MB).
 - **`work_memory_bytes_per_slot` config field.** Added to `BootstrapConfig` with a hardcoded default of 4 MB (matching PostgreSQL's `work_mem`). Workfront 02's planner will later derive this from `--memory` and `--concurrency`. The spill mechanism is agnostic to the source of the budget.
+- **Arena safety valve instead of string spill path.** Rather than a dedicated string spill mechanism, the executor force-flushes the collector's hot batch and resets the string arena when remaining arena capacity drops below 10%. This keeps string materialization simple — strings are serialized inline during spill and deserialized into a caller-provided arena during iteration.
 
 ### Scope
 
-#### 2a: Compact Row Serialization for Temp Pages
-- Define a serialization format for writing `ResultRow` data to temp pages compactly (only actual column values, not 128-slot fixed structs). Multiple rows per 8 KB temp page. Includes string data inline. Round-trip serialize/deserialize must be deterministic for simulation replay.
-- Track serialized byte size per row so the byte budget can be enforced accurately.
+#### 2a: Compact Row Serialization for Temp Pages ✅
+- `src/storage/spill_row.zig`: compact serialization format for `ResultRow` data to temp pages (only actual column values, not 128-slot fixed structs). Multiple rows per 8 KB temp page. String data inline. Round-trip serialize/deserialize is deterministic for simulation replay.
+- `spillRowSize()` tracks serialized byte size per row so the byte budget can be enforced accurately.
 
-#### 2b: `SpillingResultCollector`
-- New module `src/executor/spill_collector.zig`.
+#### 2b: `SpillingResultCollector` ✅
+- `src/executor/spill_collector.zig`.
 - Wraps the existing pre-allocated `result_rows` buffer (as a "hot batch") + a `TempStorageManager` for overflow.
 - Accepts rows via `appendRow()`. Tracks accumulated serialized bytes against `work_memory_bytes_per_slot`. When the hot batch is full or byte budget exceeded, serializes the batch to temp pages via 2a's format, resets the buffer, continues accepting.
 - Provides `iterator()` to read back all rows: spilled batches (in spill order) then in-memory remainder. Iterator deserializes from temp pages on demand.
 - `reset()` reclaims all temp pages via `TempPageAllocator.reset()`.
-- String data that overflows the string arena is spilled to dedicated temp pages (string spill path).
+- `flushHotBatch()` is public so the executor can force-flush as an arena safety valve.
 
-#### 2c: Chunked Scan Loop
-- Rename `max_result_rows` to `scan_batch_size` to reflect its new role: it is the physical working buffer size for a single scan chunk, NOT a cap on total query results. Total result size is bounded by the byte budget + temp page budget.
-- Modify `tableScanInto()` and `indexRange()` in `scan.zig`: instead of `break` when the buffer is full, yield the current batch to a caller-provided callback/collector, reset the buffer, continue scanning.
-- The executor's `executeReadPipeline()` drives the chunk loop: scan chunk → apply WHERE/project → feed survivors to `SpillingResultCollector` → next chunk.
+#### 2c: Chunked Scan Loop ✅
+- Renamed `max_result_rows` to `scan_batch_size` to reflect its new role: it is the physical working buffer size for a single scan chunk, NOT a cap on total query results. Total result size is bounded by the byte budget + temp page budget.
+- `tableScanInto()` in `scan.zig` accepts an optional `ScanCursor` parameter. When non-null, the scan resumes from the cursor position and sets `done = true` when all pages are exhausted.
+- The executor's `executeReadPipeline()` drives the chunk loop: scan chunk (into `scratch_rows_a`) → apply WHERE in-place on chunk → feed survivors to `SpillingResultCollector` (whose hot batch is `result.rows`) → next chunk.
 - For queries without sort/group/join, the collector holds the complete result after all chunks.
-- For queries with sort/group/join, the scan still produces all input rows (no silent truncation), but operator capacity limits remain until Phase 3 adds operator-specific spill.
+- For queries with sort/group/join, the scan still produces all input rows (no silent truncation), but operator capacity limits remain until Phase 3 adds operator-specific spill. When spill occurs with full-input operators, rows are reloaded from the collector (up to `scan_batch_size`) for post-scan processing.
+- Three post-scan paths: (a) no spill — fast path with rows in `result.rows`; (b) spill + no GROUP/SORT — serialization iterates directly from collector; (c) spill + GROUP/SORT — reload from collector into `result.rows` then run post-scan operators.
+- **Deferred**: `indexRange()` is not yet chunked; it still does a single-shot scan capped at `scan_batch_size`.
 
-#### 2d: ExecContext and Pipeline Integration
-- Add `work_memory_bytes_per_slot` to `BootstrapConfig` (default `4 * 1024 * 1024`).
-- Plumb through `QueryBuffers` → `ExecContext` so operators can construct a `SpillingResultCollector`.
-- Response serialization (`serializeQueryResult`) consumes from the collector's iterator instead of a flat `result_rows` slice.
+#### 2d: ExecContext and Pipeline Integration ✅
+- `work_memory_bytes_per_slot` added to `BootstrapConfig` (default `4 * 1024 * 1024`).
+- `BootstrappedRuntime` allocates per-slot `SpillingResultCollector` array. `QueryBuffers` carries collector pointer and `work_memory_bytes_per_slot`.
+- Plumbed through `QueryBuffers` → `ExecContext` (gains `collector: *SpillingResultCollector` and `work_memory_bytes_per_slot: u64`).
+- `QueryResult` gains `collector: ?*SpillingResultCollector = null`. When non-null, `serializeQueryResult()` iterates from the collector instead of the flat `result_rows` slice and uses `collector.totalRowCount()` for the OK header.
 
 #### 2e: Telemetry
 - `ExecStats` gains `spill_triggered: bool` and `result_bytes_accumulated: u64`.
@@ -62,13 +66,15 @@ Queries should degrade performance under memory pressure before failing, using p
 - Existing temp page counters (`temp_pages_allocated`, `temp_bytes_written`, etc.) track spill volume.
 
 ### Gate
-- Unit tests: row serialization round-trip, collector flush/iterate, byte budget enforcement, string spill.
+- ✅ Unit tests: row serialization round-trip (`src/storage/spill_row.zig` inline tests).
+- ✅ Unit tests: collector flush/iterate, byte budget enforcement, multi-batch spill, reset/reuse, deterministic roundtrip (`src/executor/spill_collector.zig` inline tests).
+- ✅ Unit tests: ScanCursor chunked scan, cross-page boundaries, empty table (`src/executor/scan.zig` inline tests).
+- ✅ Regression: existing queries under 4096 rows / 4 MB show no behavior change (all existing unit, feature, and stress tests pass).
 - Integration: `SELECT *` on table with >4096 rows returns complete correct results.
-- Integration: query with large string columns exceeding 4 MB arena completes via string spill.
+- Integration: query with large string columns exceeding 4 MB arena completes via arena safety valve.
 - Integration: selective `WHERE` on large table does NOT spill (survivors fit in memory).
 - Determinism: spill replay from same seed produces identical results.
-- Telemetry: `INSPECT spill` correctly reports degraded execution and byte counts.
-- Regression: existing queries under 4096 rows / 4 MB show no behavior change.
+- Telemetry: `INSPECT spill` correctly reports degraded execution and byte counts (blocked on 2e).
 
 ## Phase 3: Sort/Group/Join Spill
 ### Scope
