@@ -27,6 +27,7 @@ const joins_mod = @import("joins.zig");
 const projections_mod = @import("projections.zig");
 const spill_collector_mod = @import("spill_collector.zig");
 const external_sort_mod = @import("external_sort.zig");
+const hash_aggregate_mod = @import("hash_aggregate.zig");
 const index_scan_planner = @import("index_scan_planner.zig");
 const index_maintenance_mod = @import("index_maintenance.zig");
 const index_key_mod = @import("../storage/index_key.zig");
@@ -562,35 +563,29 @@ fn executeReadPipeline(
             return;
         }
     } else {
-        // Spill + GROUP (with or without sort): reload from collector into
-        // result.rows. Limited to scan_batch_size until Phase 3c adds
-        // hash aggregation with partition spill.
-        string_arena.reset();
-        var iter = ctx.collector.iterator();
-        var reload_count: u16 = 0;
-        var arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
-        var reload_arena = scan_mod.StringArena.init(&arena_buf);
-        while (reload_count < scan_mod.scan_batch_size) {
-            reload_arena.reset();
-            const has_row = iter.next(&result.rows[reload_count], &reload_arena) catch {
-                setError(result, "spill collector reload failed");
-                captureTempStats(result, ctx.collector);
-                return;
-            };
-            if (!has_row) break;
-            // Copy strings from the temporary reload arena into the main
-            // string arena so they survive post-scan operator processing.
-            copyRowStringsToArena(&result.rows[reload_count], string_arena) catch {
-                setError(result, "string arena exhausted during reload");
-                captureTempStats(result, ctx.collector);
-                return;
-            };
-            reload_count += 1;
-        }
-        result.row_count = reload_count;
-        result.collector = null;
+        // Spill + GROUP (with or without sort): hash aggregation reads from
+        // collector directly, processing all input without truncation.
+        const group_info = findGroupOpInfo(ops, op_count).?;
+        const schema = &ctx.catalog.models[model_id].row_schema;
+        var group_runtime = GroupRuntime{};
 
-        if (!applyPostScanOperators(ctx, result, model_id, ops, op_count, &caps, string_arena)) {
+        if (!hash_aggregate_mod.applyHashAggregate(
+            ctx,
+            result,
+            group_info.node,
+            group_info.index,
+            schema,
+            ops,
+            op_count,
+            &caps,
+            &group_runtime,
+            string_arena,
+        )) {
+            captureTempStats(result, ctx.collector);
+            return;
+        }
+        // Apply post-hash-aggregate operators (HAVING, SORT, LIMIT, OFFSET).
+        if (!applyPostHashAggregateOperators(ctx, result, model_id, ops, op_count, &caps, &group_runtime, string_arena)) {
             captureTempStats(result, ctx.collector);
             return;
         }
@@ -786,24 +781,6 @@ fn executeRangeScan(
         };
     }
     return true;
-}
-
-/// Copy string values in a row from their current backing into `arena`.
-/// This is needed when reloading spilled rows: the reload arena is
-/// temporary, so strings must be relocated into the main string arena.
-fn copyRowStringsToArena(
-    row: *ResultRow,
-    arena: *scan_mod.StringArena,
-) error{OutOfMemory}!void {
-    var col: u16 = 0;
-    while (col < row.column_count) : (col += 1) {
-        switch (row.values[col]) {
-            .string => |s| {
-                row.values[col] = .{ .string = try arena.copyString(s) };
-            },
-            else => {},
-        }
-    }
 }
 
 /// Snapshot temp storage stats into the query result.
@@ -1033,6 +1010,66 @@ fn hasGroupOp(
         if (ops[i].kind == .group_op) return true;
     }
     return false;
+}
+
+/// Find the group operator's node and index, if present.
+const GroupOpInfo = struct { node: NodeIndex, index: u16 };
+fn findGroupOpInfo(
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+) ?GroupOpInfo {
+    var i: u16 = 0;
+    while (i < op_count) : (i += 1) {
+        if (ops[i].kind == .group_op) return .{ .node = ops[i].node, .index = i };
+    }
+    return null;
+}
+
+/// Apply post-hash-aggregate operators: HAVING, SORT, LIMIT, OFFSET.
+/// Skips WHERE (already applied per-chunk) and GROUP (already done by
+/// hash aggregate). Uses the populated group_runtime for aggregate resolution.
+fn applyPostHashAggregateOperators(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    model_id: ModelId,
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+    caps: *const capacity_mod.OperatorCapacities,
+    group_runtime: *GroupRuntime,
+    string_arena: *scan_mod.StringArena,
+) bool {
+    const schema = &ctx.catalog.models[model_id].row_schema;
+    var i: u16 = 0;
+    while (i < op_count) : (i += 1) {
+        const op = ops[i];
+        switch (op.kind) {
+            .where_filter, .group_op => {}, // Already handled.
+            .having_filter => applyWhereFilter(
+                ctx,
+                result,
+                op.node,
+                schema,
+                group_runtime,
+                string_arena,
+            ),
+            .sort_op => {
+                if (!sorting_mod.applySort(
+                    ctx,
+                    result,
+                    op.node,
+                    schema,
+                    caps,
+                    group_runtime,
+                    string_arena,
+                )) return false;
+            },
+            .limit_op => applyLimit(ctx, result, op.node, string_arena),
+            .offset_op => applyOffset(ctx, result, op.node, group_runtime, string_arena),
+            .inspect_op => {},
+            .insert_op, .update_op, .delete_op => {},
+        }
+    }
+    return true;
 }
 
 /// Apply post-external-sort operators: HAVING, LIMIT, OFFSET.
