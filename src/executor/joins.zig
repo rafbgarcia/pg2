@@ -6,6 +6,7 @@ const std = @import("std");
 const row_mod = @import("../storage/row.zig");
 const scan_mod = @import("scan.zig");
 const capacity_mod = @import("capacity.zig");
+const hash_join_mod = @import("hash_join.zig");
 
 const Value = row_mod.Value;
 const compareValues = row_mod.compareValues;
@@ -16,6 +17,39 @@ pub const JoinDescriptor = struct {
     left_key_index: u16,
     right_key_index: u16,
 };
+
+pub fn executeLeftJoinHashFlat(
+    result: *QueryResult,
+    left_rows: []const ResultRow,
+    right_rows: []const ResultRow,
+    join: JoinDescriptor,
+    right_column_count: u16,
+    caps: *const capacity_mod.OperatorCapacities,
+) bool {
+    result.row_count = 0;
+    hash_join_mod.executeLeftJoinFlatInMemoryHash(
+        result.rows,
+        &result.row_count,
+        left_rows,
+        right_rows,
+        .{
+            .left_key_index = join.left_key_index,
+            .right_key_index = join.right_key_index,
+        },
+        right_column_count,
+        caps,
+    ) catch |err| {
+        setError(result, switch (err) {
+            error.BuildRowCapacityExceeded => "join build row capacity exceeded",
+            error.StateCapacityExceeded => "join state capacity exceeded",
+            error.LeftKeyOutOfBounds, error.RightKeyOutOfBounds => "join key out of bounds",
+            error.JoinColumnCapacityExceeded => "join column capacity exceeded",
+            error.OutputRowCapacityExceeded => "join output row capacity exceeded",
+        });
+        return false;
+    };
+    return true;
+}
 
 pub fn executeInnerJoinBounded(
     result: *QueryResult,
@@ -181,4 +215,87 @@ fn setError(result: *QueryResult, msg: []const u8) void {
     @memset(&result.error_message, 0);
     const copy_len = @min(msg.len, result.error_message.len);
     @memcpy(result.error_message[0..copy_len], msg[0..copy_len]);
+}
+
+const testing = std.testing;
+
+fn makeLeftRow(id: i64, label: []const u8) ResultRow {
+    var row = ResultRow.init();
+    row.column_count = 2;
+    row.values[0] = .{ .i64 = id };
+    row.values[1] = .{ .string = label };
+    return row;
+}
+
+fn makeRightRow(id: i64, flag: bool) ResultRow {
+    var row = ResultRow.init();
+    row.column_count = 2;
+    row.values[0] = .{ .i64 = id };
+    row.values[1] = .{ .bool = flag };
+    return row;
+}
+
+test "hash left join preserves deterministic left-major order" {
+    const left = [_]ResultRow{
+        makeLeftRow(1, "A"),
+        makeLeftRow(2, "B"),
+        makeLeftRow(1, "C"),
+    };
+    const right = [_]ResultRow{
+        makeRightRow(1, true),
+        makeRightRow(1, false),
+        makeRightRow(2, true),
+    };
+
+    var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
+    var result = QueryResult.init(result_rows[0..]);
+    const caps = capacity_mod.OperatorCapacities.defaults();
+    const ok = executeLeftJoinHashFlat(
+        &result,
+        left[0..],
+        right[0..],
+        .{ .left_key_index = 0, .right_key_index = 0 },
+        2,
+        &caps,
+    );
+
+    try testing.expect(ok);
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(@as(u16, 5), result.row_count);
+    try testing.expectEqualSlices(u8, "A", result.rows[0].values[1].string);
+    try testing.expectEqual(true, result.rows[0].values[3].bool);
+    try testing.expectEqualSlices(u8, "A", result.rows[1].values[1].string);
+    try testing.expectEqual(false, result.rows[1].values[3].bool);
+    try testing.expectEqualSlices(u8, "B", result.rows[2].values[1].string);
+    try testing.expectEqual(true, result.rows[2].values[3].bool);
+    try testing.expectEqualSlices(u8, "C", result.rows[3].values[1].string);
+    try testing.expectEqual(true, result.rows[3].values[3].bool);
+    try testing.expectEqualSlices(u8, "C", result.rows[4].values[1].string);
+    try testing.expectEqual(false, result.rows[4].values[3].bool);
+}
+
+test "hash left join emits null-extended row for unmatched key" {
+    const left = [_]ResultRow{
+        makeLeftRow(99, "Z"),
+    };
+    const right = [_]ResultRow{
+        makeRightRow(1, true),
+    };
+
+    var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
+    var result = QueryResult.init(result_rows[0..]);
+    const caps = capacity_mod.OperatorCapacities.defaults();
+    const ok = executeLeftJoinHashFlat(
+        &result,
+        left[0..],
+        right[0..],
+        .{ .left_key_index = 0, .right_key_index = 0 },
+        2,
+        &caps,
+    );
+
+    try testing.expect(ok);
+    try testing.expectEqual(@as(u16, 1), result.row_count);
+    try testing.expect(result.rows[0].values[2] == .null_value);
+    try testing.expect(result.rows[0].values[3] == .null_value);
 }
