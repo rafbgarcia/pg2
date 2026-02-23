@@ -70,11 +70,11 @@ Queries should degrade performance under memory pressure before failing, using p
 - ✅ Unit tests: collector flush/iterate, byte budget enforcement, multi-batch spill, reset/reuse, deterministic roundtrip (`src/executor/spill_collector.zig` inline tests).
 - ✅ Unit tests: ScanCursor chunked scan, cross-page boundaries, empty table (`src/executor/scan.zig` inline tests).
 - ✅ Regression: existing queries under 4096 rows / 4 MB show no behavior change (all existing unit, feature, and stress tests pass).
-- Integration: `SELECT *` on table with >4096 rows returns complete correct results.
-- Integration: query with large string columns exceeding 4 MB arena completes via arena safety valve.
-- Integration: selective `WHERE` on large table does NOT spill (survivors fit in memory).
-- Determinism: spill replay from same seed produces identical results.
-- Telemetry: `INSPECT spill` correctly reports degraded execution and byte counts (blocked on 2e).
+- ✅ Integration: `SELECT *` on table with >4096 rows returns complete correct results (`test/internals/spill/phase2_gate_test.zig`).
+- ✅ Integration: query with large string columns exceeding 4 MB arena completes via arena safety valve (`test/internals/spill/phase2_gate_test.zig`).
+- ✅ Integration: selective `WHERE` on large table does NOT spill (survivors fit in memory) (`test/internals/spill/phase2_gate_test.zig`).
+- ✅ Determinism: spill replay from same seed produces identical results (`test/internals/spill/phase2_gate_test.zig`).
+- ✅ Telemetry: `INSPECT spill` correctly reports degraded execution and byte counts (`test/internals/spill/temp_storage_surface_test.zig`).
 
 ## Phase 3: Sort/Group/Join Spill
 ### Scope
