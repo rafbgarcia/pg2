@@ -46,6 +46,7 @@ src/
 test/
   features/      # Test files mapping 1-1 to what's currently supported
   internals/     # Other tests
+  stress/        # Long-running tests
 docs/
   ...
 ```

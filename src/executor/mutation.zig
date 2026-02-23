@@ -47,7 +47,7 @@ const ResultRow = scan_mod.ResultRow;
 const ParameterBinding = filter_mod.ParameterBinding;
 const ParameterResolver = filter_mod.ParameterResolver;
 
-// --- Extracted submodules (Phase 2, Workfront 09) ---
+// --- Extracted submodules ---
 const overflow_chains_mod = @import("overflow_chains.zig");
 const referential_integrity_mod = @import("referential_integrity.zig");
 const value_builder_mod = @import("value_builder.zig");
@@ -1044,7 +1044,6 @@ fn canUpdateFitInPage(page: *const Page, slot_idx: u16, new_len: u16) bool {
     const fragmented = HeapPage.fragmented_bytes(page);
     return @as(u32, free) + @as(u32, fragmented) >= new_len;
 }
-
 
 fn resolveVisibleVersion(
     undo_log: *const UndoLog,

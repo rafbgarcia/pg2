@@ -1,4 +1,4 @@
-//! Phase 2 gate integration tests for the degrade-first spill path (Workfront 03).
+//! Phase 2 gate integration tests for the degrade-first spill path.
 //!
 //! Validates end-to-end correctness of the chunked scan + spill pipeline:
 //! - Large table completeness: >4096 rows returned without truncation.
