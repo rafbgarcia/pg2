@@ -441,6 +441,28 @@ test "collector-backed spill path preserves having-limit order semantics" {
     try std.testing.expect(std.mem.startsWith(u8, result_b, "OK returned_rows=0 "));
 }
 
+test "collector-backed external sort spill applies having correctly" {
+    var env: FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\SortHavingSpillTable {
+        \\  field(id, i64, notNull, primaryKey)
+        \\}
+    );
+
+    try insertRows(executor, "SortHavingSpillTable", 4200);
+
+    const result = try executor.run(
+        "SortHavingSpillTable |> sort(id desc) |> having(id > 4197) |> inspect { id }",
+    );
+
+    try std.testing.expect(std.mem.startsWith(u8, result, "OK returned_rows=3 "));
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n4200\n4199\n4198\n") != null);
+}
+
 test "collector-backed spill path fails explicitly for nested selection" {
     var env: FeatureEnv = undefined;
     try env.init();
