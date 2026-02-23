@@ -62,12 +62,15 @@ Queries should degrade performance under memory pressure before failing, using p
   - Nested child pipeline operators now execute per-parent (user-expected semantics) for in-memory nested joins.
   - Regression coverage exists for spill + LIMIT, spill + OFFSET+LIMIT, and spill + external-sort + LIMIT.
   - Regression coverage now includes spill + flat projection and spill + computed projection.
-  - Regression coverage now locks explicit fail-closed behavior for collector-backed nested selection.
-  - Remaining fail-closed guard currently covers collector-backed nested selection; non-spill nested path also fail-closes when right-side child scan exceeds one in-memory batch.
+  - Collector-backed nested selection is now implemented with per-parent child-operator semantics (including empty-child behavior), and tree protocol serialization/counting is collector-aware.
+  - Nested child scanning now runs chunked over the child model (no one-batch child-table cap) for both flat and collector-backed parent paths.
+  - Nested execution uses preallocated per-slot workspace (rows + decode arena + match arena) and performs no runtime allocation in sealed runtime.
+  - Current fail-closed guard is now per-parent subset capacity (`nested relation per-parent child subset exceeds in-memory capacity`) and per-parent nested match arena exhaustion.
 - The unified operator I/O contract (flat buffer vs spill descriptor/iterator chaining) is still pending and remains the next major step.
+- Next recommended implementation step is **per-parent spill for nested child subsets** so per-parent child matches are not bounded by in-memory subset capacity/arena.
 
 ### Handoff Update (2026-02-23, latest)
-- Current state: nested selection semantics are per-parent for existing paths, and collector-backed nested selection is implemented, but nested right-side scaling is still bounded in executor internals.
+- Current state: nested selection semantics are per-parent for both flat and collector-backed paths, and child-table scanning is chunked; remaining nested scaling bound is per-parent in-memory subset/arena capacity (no per-parent spill yet).
 - Next major implementation for nested spill scalability is tracked in Workfront 13:
   - `docs/workfronts/13_nested_spill_hash_join_workfront.md`
   - Specifically: spill-aware hash join with per-parent child-operator semantics.

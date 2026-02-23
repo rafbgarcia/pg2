@@ -546,7 +546,7 @@ test "nested selection fails explicitly when child scan exceeds in-memory batch"
         std.mem.indexOf(
             u8,
             result,
-            "nested relation right-side scan exceeds in-memory capacity",
+            "nested relation per-parent child subset exceeds in-memory capacity",
         ) != null,
     );
 }

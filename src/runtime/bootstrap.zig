@@ -25,6 +25,8 @@ const StaticAllocator = static_alloc_mod.StaticAllocator;
 const ResultRow = scan_mod.ResultRow;
 const scan_batch_size = scan_mod.scan_batch_size;
 const SpillingResultCollector = spill_collector_mod.SpillingResultCollector;
+const nested_scan_decode_arena_bytes: usize = 512 * 1024;
+const nested_scan_match_arena_bytes: usize = 512 * 1024;
 
 pub const BootstrapError = error{
     OutOfMemory,
@@ -56,7 +58,10 @@ pub const QueryBuffers = struct {
     result_rows: []ResultRow,
     scratch_rows_a: []ResultRow,
     scratch_rows_b: []ResultRow,
+    nested_rows: []ResultRow,
     string_arena_bytes: []u8,
+    nested_decode_arena_bytes: []u8,
+    nested_match_arena_bytes: []u8,
     collector: *SpillingResultCollector,
     work_memory_bytes_per_slot: u64,
 };
@@ -74,7 +79,10 @@ pub const BootstrappedRuntime = struct {
     query_result_rows: []ResultRow,
     query_scratch_rows_a: []ResultRow,
     query_scratch_rows_b: []ResultRow,
+    query_nested_rows: []ResultRow,
     query_string_arenas: []u8,
+    query_nested_decode_arenas: []u8,
+    query_nested_match_arenas: []u8,
     query_collectors: []SpillingResultCollector,
     max_query_slots: u16,
     work_memory_bytes_per_slot: u64,
@@ -150,6 +158,11 @@ pub const BootstrappedRuntime = struct {
             total_rows,
         ) catch return error.OutOfMemory;
         errdefer allocator.free(runtime.query_scratch_rows_b);
+        runtime.query_nested_rows = allocator.alloc(
+            ResultRow,
+            total_rows,
+        ) catch return error.OutOfMemory;
+        errdefer allocator.free(runtime.query_nested_rows);
         const total_string_arena_bytes = std.math.mul(
             usize,
             @as(usize, config.max_query_slots),
@@ -160,6 +173,26 @@ pub const BootstrappedRuntime = struct {
             total_string_arena_bytes,
         ) catch return error.OutOfMemory;
         errdefer allocator.free(runtime.query_string_arenas);
+        const total_nested_decode_arena_bytes = std.math.mul(
+            usize,
+            @as(usize, config.max_query_slots),
+            nested_scan_decode_arena_bytes,
+        ) catch return error.InvalidConfig;
+        runtime.query_nested_decode_arenas = allocator.alloc(
+            u8,
+            total_nested_decode_arena_bytes,
+        ) catch return error.OutOfMemory;
+        errdefer allocator.free(runtime.query_nested_decode_arenas);
+        const total_nested_match_arena_bytes = std.math.mul(
+            usize,
+            @as(usize, config.max_query_slots),
+            nested_scan_match_arena_bytes,
+        ) catch return error.InvalidConfig;
+        runtime.query_nested_match_arenas = allocator.alloc(
+            u8,
+            total_nested_match_arena_bytes,
+        ) catch return error.OutOfMemory;
+        errdefer allocator.free(runtime.query_nested_match_arenas);
 
         runtime.query_collectors = allocator.alloc(
             SpillingResultCollector,
@@ -197,7 +230,13 @@ pub const BootstrappedRuntime = struct {
                         self.query_scratch_rows_b,
                         slot_index,
                     ),
+                    .nested_rows = self.rowsForSlot(
+                        self.query_nested_rows,
+                        slot_index,
+                    ),
                     .string_arena_bytes = self.stringArenaForSlot(slot_index),
+                    .nested_decode_arena_bytes = self.nestedDecodeArenaForSlot(slot_index),
+                    .nested_match_arena_bytes = self.nestedMatchArenaForSlot(slot_index),
                     .collector = &self.query_collectors[slot_index],
                     .work_memory_bytes_per_slot = self.work_memory_bytes_per_slot,
                 };
@@ -223,6 +262,9 @@ pub const BootstrappedRuntime = struct {
     pub fn deinit(self: *BootstrappedRuntime) void {
         const allocator = self.static_allocator.allocator();
         allocator.free(self.query_collectors);
+        allocator.free(self.query_nested_match_arenas);
+        allocator.free(self.query_nested_decode_arenas);
+        allocator.free(self.query_nested_rows);
         allocator.free(self.query_scratch_rows_b);
         allocator.free(self.query_scratch_rows_a);
         allocator.free(self.query_result_rows);
@@ -257,6 +299,28 @@ pub const BootstrappedRuntime = struct {
         const end = start + per_slot;
         std.debug.assert(end <= self.query_string_arenas.len);
         return self.query_string_arenas[start..end];
+    }
+
+    fn nestedDecodeArenaForSlot(
+        self: *BootstrappedRuntime,
+        slot_index: u16,
+    ) []u8 {
+        std.debug.assert(slot_index < self.max_query_slots);
+        const start = @as(usize, slot_index) * nested_scan_decode_arena_bytes;
+        const end = start + nested_scan_decode_arena_bytes;
+        std.debug.assert(end <= self.query_nested_decode_arenas.len);
+        return self.query_nested_decode_arenas[start..end];
+    }
+
+    fn nestedMatchArenaForSlot(
+        self: *BootstrappedRuntime,
+        slot_index: u16,
+    ) []u8 {
+        std.debug.assert(slot_index < self.max_query_slots);
+        const start = @as(usize, slot_index) * nested_scan_match_arena_bytes;
+        const end = start + nested_scan_match_arena_bytes;
+        std.debug.assert(end <= self.query_nested_match_arenas.len);
+        return self.query_nested_match_arenas[start..end];
     }
 };
 
@@ -305,11 +369,27 @@ fn validateMemoryBudget(
         return error.InsufficientMemoryBudget;
     _ = allocator.alloc(ResultRow, total_rows) catch
         return error.InsufficientMemoryBudget;
+    _ = allocator.alloc(ResultRow, total_rows) catch
+        return error.InsufficientMemoryBudget;
     const total_string_arena_bytes = std.math.mul(
         usize,
         @as(usize, config.max_query_slots),
         config.query_string_arena_bytes_per_slot,
     ) catch return error.InvalidConfig;
+    const total_nested_match_arena_bytes = std.math.mul(
+        usize,
+        @as(usize, config.max_query_slots),
+        nested_scan_match_arena_bytes,
+    ) catch return error.InvalidConfig;
+    _ = allocator.alloc(u8, total_nested_match_arena_bytes) catch
+        return error.InsufficientMemoryBudget;
+    const total_nested_decode_arena_bytes = std.math.mul(
+        usize,
+        @as(usize, config.max_query_slots),
+        nested_scan_decode_arena_bytes,
+    ) catch return error.InvalidConfig;
+    _ = allocator.alloc(u8, total_nested_decode_arena_bytes) catch
+        return error.InsufficientMemoryBudget;
     _ = allocator.alloc(u8, total_string_arena_bytes) catch
         return error.InsufficientMemoryBudget;
     _ = allocator.alloc(SpillingResultCollector, config.max_query_slots) catch

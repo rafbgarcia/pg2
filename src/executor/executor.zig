@@ -217,7 +217,10 @@ pub const ExecContext = struct {
     result_rows: []ResultRow,
     scratch_rows_a: []ResultRow,
     scratch_rows_b: []ResultRow,
+    nested_rows: []ResultRow,
     string_arena_bytes: []u8,
+    nested_decode_arena_bytes: []u8,
+    nested_match_arena_bytes: []u8,
     storage: Storage,
     query_slot_index: u16,
     collector: *SpillingResultCollector,
@@ -1880,35 +1883,13 @@ fn applySingleNestedSelectionJoinCollector(
     }
     const target_model_id = assoc.target_model_id;
     const target_schema = &ctx.catalog.models[target_model_id].row_schema;
-
-    var right_result = QueryResult.init(ctx.scratch_rows_a);
-    defer right_result.deinit();
-
-    const right_scan = scan_mod.tableScanInto(
-        ctx.catalog,
-        ctx.pool,
-        ctx.undo_log,
-        ctx.snapshot,
-        ctx.tx_manager,
-        target_model_id,
-        right_result.rows[0..scan_mod.scan_batch_size],
-        string_arena,
-        null,
-    ) catch |err| {
-        setBoundaryError(
-            result,
-            "nested relation scan failed",
-            runtime_errors.classifyScan(err),
-            err,
-        );
-        return false;
-    };
-    right_result.row_count = right_scan.row_count;
-    right_result.stats.pages_read = right_scan.pages_read;
-    if (right_result.row_count == scan_mod.scan_batch_size) {
-        setError(result, "nested relation right-side scan exceeds in-memory capacity");
-        return false;
-    }
+    _ = string_arena;
+    var nested_decode_arena = scan_mod.StringArena.init(
+        ctx.nested_decode_arena_bytes,
+    );
+    var nested_match_arena = scan_mod.StringArena.init(
+        ctx.nested_match_arena_bytes,
+    );
 
     var nested_ops: [max_operators]OpDescriptor = undefined;
     var nested_op_count: u16 = 0;
@@ -1961,18 +1942,23 @@ fn applySingleNestedSelectionJoinCollector(
 
         const left_key = left_row.values[join.left_key_index];
         var matched_count: u16 = 0;
-        var right_idx_count: u16 = 0;
-        while (right_idx_count < right_result.row_count) : (right_idx_count += 1) {
-            const right_row = right_result.rows[right_idx_count];
-            if (row_mod.compareValues(left_key, right_row.values[join.right_key_index]) == .eq) {
-                if (matched_count >= scan_mod.scan_batch_size) {
-                    setError(result, "nested relation per-parent child subset exceeds in-memory capacity");
-                    return false;
-                }
-                result.rows[matched_count] = right_row;
-                matched_count += 1;
-            }
+        var right_pages_read: u32 = 0;
+        nested_match_arena.reset();
+        if (!collectNestedMatchesForParent(
+            ctx,
+            result,
+            target_model_id,
+            join.right_key_index,
+            left_key,
+            &nested_decode_arena,
+            &nested_match_arena,
+            ctx.nested_rows,
+            &matched_count,
+            &right_pages_read,
+        )) {
+            return false;
         }
+        result.stats.pages_read +|= right_pages_read;
 
         if (matched_count == 0) {
             if (!appendNestedCollectorOutputRow(
@@ -1990,7 +1976,7 @@ fn applySingleNestedSelectionJoinCollector(
         }
 
         var parent_subset = QueryResult{
-            .rows = result.rows[0..scan_mod.scan_batch_size],
+            .rows = ctx.nested_rows,
             .row_count = matched_count,
         };
         if (!applyNestedReadOperatorsPerParent(
@@ -2000,7 +1986,7 @@ fn applySingleNestedSelectionJoinCollector(
             &nested_ops,
             nested_op_count,
             caps,
-            string_arena,
+            &nested_match_arena,
         )) {
             if (parent_subset.getError()) |msg| setError(result, msg);
             return false;
@@ -2065,7 +2051,6 @@ fn applySingleNestedSelectionJoinCollector(
     result.collector_output_offset = 0;
     result.collector_output_count = output_rows;
     result.row_count = @intCast(@min(output_rows, scan_mod.scan_batch_size));
-    result.stats.pages_read += right_result.stats.pages_read;
     return true;
 }
 
@@ -2144,6 +2129,98 @@ fn appendNestedCollectorOutputRow(
     return true;
 }
 
+fn copyNestedMatchRowIntoArena(
+    src: *const ResultRow,
+    dst: *ResultRow,
+    match_arena: *scan_mod.StringArena,
+) error{OutOfMemory}!void {
+    dst.* = ResultRow.init();
+    dst.column_count = src.column_count;
+    dst.row_id = src.row_id;
+    var col_idx: u16 = 0;
+    while (col_idx < src.column_count) : (col_idx += 1) {
+        dst.values[col_idx] = switch (src.values[col_idx]) {
+            .string => |text| .{ .string = try match_arena.copyString(text) },
+            else => src.values[col_idx],
+        };
+    }
+}
+
+fn copyNestedValueIntoArena(
+    value: Value,
+    arena: *scan_mod.StringArena,
+) error{OutOfMemory}!Value {
+    return switch (value) {
+        .string => |text| .{ .string = try arena.copyString(text) },
+        else => value,
+    };
+}
+
+fn collectNestedMatchesForParent(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    target_model_id: ModelId,
+    right_key_index: u16,
+    left_key: Value,
+    decode_arena: *scan_mod.StringArena,
+    match_arena: *scan_mod.StringArena,
+    out_rows: []ResultRow,
+    out_count: *u16,
+    out_pages_read: *u32,
+) bool {
+    const nested_scan_chunk_rows: usize = 64;
+    out_count.* = 0;
+    out_pages_read.* = 0;
+    var right_cursor = scan_mod.ScanCursor.init();
+
+    while (!right_cursor.done) {
+        decode_arena.reset();
+        const chunk = scan_mod.tableScanInto(
+            ctx.catalog,
+            ctx.pool,
+            ctx.undo_log,
+            ctx.snapshot,
+            ctx.tx_manager,
+            target_model_id,
+            ctx.scratch_rows_a[0..nested_scan_chunk_rows],
+            decode_arena,
+            &right_cursor,
+        ) catch |err| {
+            setBoundaryError(
+                result,
+                "nested relation scan failed",
+                runtime_errors.classifyScan(err),
+                err,
+            );
+            return false;
+        };
+        out_pages_read.* +|= chunk.pages_read;
+
+        var right_idx: u16 = 0;
+        while (right_idx < chunk.row_count) : (right_idx += 1) {
+            const right_row = ctx.scratch_rows_a[right_idx];
+            if (row_mod.compareValues(left_key, right_row.values[right_key_index]) != .eq) {
+                continue;
+            }
+            if (out_count.* >= out_rows.len) {
+                setError(result, "nested relation per-parent child subset exceeds in-memory capacity");
+                return false;
+            }
+            copyNestedMatchRowIntoArena(
+                &right_row,
+                &out_rows[out_count.*],
+                match_arena,
+            ) catch {
+                setError(result, "nested relation parent string arena exhausted");
+                return false;
+            };
+            out_count.* += 1;
+        }
+    }
+
+    return true;
+}
+
 fn applySingleNestedSelectionJoin(
     ctx: *const ExecContext,
     result: *QueryResult,
@@ -2170,37 +2247,12 @@ fn applySingleNestedSelectionJoin(
     }
     const target_model_id = assoc.target_model_id;
     const target_schema = &ctx.catalog.models[target_model_id].row_schema;
-
-    var right_result = QueryResult.init(ctx.scratch_rows_a);
-    defer right_result.deinit();
-
-    // Nested right-side scan is currently bounded to one in-memory batch.
-    // Fail closed if additional chunks exist to avoid silent truncation.
-    const right_scan = scan_mod.tableScanInto(
-        ctx.catalog,
-        ctx.pool,
-        ctx.undo_log,
-        ctx.snapshot,
-        ctx.tx_manager,
-        target_model_id,
-        right_result.rows[0..scan_mod.scan_batch_size],
-        string_arena,
-        null,
-    ) catch |err| {
-        setBoundaryError(
-            result,
-            "nested relation scan failed",
-            runtime_errors.classifyScan(err),
-            err,
-        );
-        return false;
-    };
-    right_result.row_count = right_scan.row_count;
-    right_result.stats.pages_read = right_scan.pages_read;
-    if (right_result.row_count == scan_mod.scan_batch_size) {
-        setError(result, "nested relation right-side scan exceeds in-memory capacity");
-        return false;
-    }
+    var nested_decode_arena = scan_mod.StringArena.init(
+        ctx.nested_decode_arena_bytes,
+    );
+    var nested_match_arena = scan_mod.StringArena.init(
+        ctx.nested_match_arena_bytes,
+    );
 
     var nested_ops: [max_operators]OpDescriptor = undefined;
     var nested_op_count: u16 = 0;
@@ -2240,13 +2292,23 @@ fn applySingleNestedSelectionJoin(
         const left_key = left_row.values[join.left_key_index];
 
         var matched_count: u16 = 0;
-        var right_idx_count: u16 = 0;
-        while (right_idx_count < right_result.row_count) : (right_idx_count += 1) {
-            const right_row = right_result.rows[right_idx_count];
-            if (row_mod.compareValues(left_key, right_row.values[join.right_key_index]) == .eq) {
-                matched_count += 1;
-            }
+        var right_pages_read: u32 = 0;
+        nested_match_arena.reset();
+        if (!collectNestedMatchesForParent(
+            ctx,
+            result,
+            target_model_id,
+            join.right_key_index,
+            left_key,
+            &nested_decode_arena,
+            &nested_match_arena,
+            ctx.nested_rows,
+            &matched_count,
+            &right_pages_read,
+        )) {
+            return false;
         }
+        result.stats.pages_read +|= right_pages_read;
 
         if (matched_count == 0) {
             if (@as(usize, output_count) >= caps.join_output_rows) {
@@ -2276,25 +2338,8 @@ fn applySingleNestedSelectionJoin(
             continue;
         }
 
-        const tail_start = scan_mod.scan_batch_size - matched_count;
-        if (output_count + matched_count > tail_start) {
-            setError(result, "join output row capacity exceeded");
-            return false;
-        }
-
-        var write_tail: u16 = tail_start;
-        var right_idx_copy: u16 = 0;
-        while (right_idx_copy < right_result.row_count) : (right_idx_copy += 1) {
-            const right_row = right_result.rows[right_idx_copy];
-            if (row_mod.compareValues(left_key, right_row.values[join.right_key_index]) != .eq) {
-                continue;
-            }
-            result.rows[write_tail] = right_row;
-            write_tail += 1;
-        }
-
         var parent_subset = QueryResult{
-            .rows = result.rows[tail_start..scan_mod.scan_batch_size],
+            .rows = ctx.nested_rows,
             .row_count = matched_count,
         };
         if (!applyNestedReadOperatorsPerParent(
@@ -2304,7 +2349,7 @@ fn applySingleNestedSelectionJoin(
             &nested_ops,
             nested_op_count,
             caps,
-            string_arena,
+            &nested_match_arena,
         )) {
             if (parent_subset.getError()) |msg| setError(result, msg);
             return false;
@@ -2356,17 +2401,22 @@ fn applySingleNestedSelectionJoin(
                     out.values[0..left_row.column_count],
                     left_row.values[0..left_row.column_count],
                 );
-                @memcpy(
-                    out.values[left_row.column_count..out.column_count],
-                    nested_row.values[0..nested_row.column_count],
-                );
+                var nested_col: u16 = 0;
+                while (nested_col < nested_row.column_count) : (nested_col += 1) {
+                    out.values[left_row.column_count + nested_col] = copyNestedValueIntoArena(
+                        nested_row.values[nested_col],
+                        string_arena,
+                    ) catch {
+                        setError(result, "nested relation output string arena exhausted");
+                        return false;
+                    };
+                }
                 result.rows[output_count] = out;
                 output_count += 1;
             }
         }
     }
     result.row_count = output_count;
-    result.stats.pages_read += right_result.stats.pages_read;
     return true;
 }
 
@@ -3267,7 +3317,10 @@ const ExecTestEnv = struct {
     result_rows: []ResultRow,
     scratch_rows_a: []ResultRow,
     scratch_rows_b: []ResultRow,
+    nested_rows: []ResultRow,
     string_arena_bytes: []u8,
+    nested_decode_arena_bytes: []u8,
+    nested_match_arena_bytes: []u8,
     collector: SpillingResultCollector,
 
     /// Initialize in-place so that disk.storage() captures a stable pointer.
@@ -3296,11 +3349,26 @@ const ExecTestEnv = struct {
             scan_mod.scan_batch_size,
         );
         errdefer testing.allocator.free(self.scratch_rows_b);
+        self.nested_rows = try testing.allocator.alloc(
+            ResultRow,
+            scan_mod.scan_batch_size,
+        );
+        errdefer testing.allocator.free(self.nested_rows);
         self.string_arena_bytes = try testing.allocator.alloc(
             u8,
             scan_mod.default_string_arena_bytes,
         );
         errdefer testing.allocator.free(self.string_arena_bytes);
+        self.nested_decode_arena_bytes = try testing.allocator.alloc(
+            u8,
+            512 * 1024,
+        );
+        errdefer testing.allocator.free(self.nested_decode_arena_bytes);
+        self.nested_match_arena_bytes = try testing.allocator.alloc(
+            u8,
+            512 * 1024,
+        );
+        errdefer testing.allocator.free(self.nested_match_arena_bytes);
         // Collector is initialized lazily per-query by executeReadPipeline;
         // just zero-init here so the pointer is stable.
         self.collector = undefined;
@@ -3341,7 +3409,10 @@ const ExecTestEnv = struct {
         self.disk.deinit();
         testing.allocator.free(self.scratch_rows_b);
         testing.allocator.free(self.scratch_rows_a);
+        testing.allocator.free(self.nested_rows);
         testing.allocator.free(self.result_rows);
+        testing.allocator.free(self.nested_decode_arena_bytes);
+        testing.allocator.free(self.nested_match_arena_bytes);
         testing.allocator.free(self.string_arena_bytes);
     }
 
@@ -3365,13 +3436,15 @@ const ExecTestEnv = struct {
             .tokens = tokens,
             .source = source,
             .statement_timestamp_micros = 0,
-            .now_source = null,
             .parameter_bindings = &.{},
             .allocator = testing.allocator,
             .result_rows = self.result_rows,
             .scratch_rows_a = self.scratch_rows_a,
             .scratch_rows_b = self.scratch_rows_b,
+            .nested_rows = self.nested_rows,
             .string_arena_bytes = self.string_arena_bytes,
+            .nested_decode_arena_bytes = self.nested_decode_arena_bytes,
+            .nested_match_arena_bytes = self.nested_match_arena_bytes,
             .storage = self.disk.storage(),
             .query_slot_index = 0,
             .collector = &self.collector,
