@@ -283,3 +283,78 @@ test "feature insert duplicate key fails closed late in high-volume workload" {
         result,
     );
 }
+
+test "feature multi-row insert returns explicit insert count via session path" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\  field(active, bool, notNull)
+        \\}
+    );
+
+    const result = try executor.run(
+        "User |> insert((id = 1, name = \"Alice\", active = true), (id = 2, name = \"Bob\", active = false), (id = 3, name = \"Carol\", active = true)) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=3 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+}
+
+test "feature multi-row insert returning yields all inserted rows" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\  field(active, bool, notNull)
+        \\}
+    );
+
+    const result = try executor.run(
+        "User |> insert((id = 1, name = \"Alice\", active = true), (id = 2, name = \"Bob\", active = false), (id = 3, name = \"Carol\", active = true)) { id name }",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=3 inserted_rows=3 updated_rows=0 deleted_rows=0\n1,Alice\n2,Bob\n3,Carol\n",
+        result,
+    );
+}
+
+test "feature multi-row insert duplicate key fails closed and inserts nothing" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\  field(active, bool, notNull)
+        \\}
+    );
+
+    var result = try executor.run(
+        "User |> insert((id = 1, name = \"Alice\", active = true), (id = 1, name = \"Bob\", active = false)) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        result,
+    );
+
+    result = try executor.run("User { id name }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+}

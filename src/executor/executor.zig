@@ -1502,36 +1502,74 @@ fn executeMutation(
     switch (mut_op.kind) {
         .insert_op => {
             const node = ctx.ast.getNode(mut_op.node);
-            const row_id = mutation_mod.executeInsertWithDiagnosticAndParameters(
-                ctx.catalog,
-                ctx.pool,
-                ctx.wal,
-                ctx.tx_id,
-                model_id,
-                ctx.ast,
-                ctx.tokens,
-                ctx.source,
-                node.data.unary,
-                ctx.parameter_bindings,
-                &diagnostic,
-                &exec_eval.eval_ctx,
-                ctx.undo_log,
-                ctx.snapshot,
-                ctx.tx_manager,
-            ) catch |err| {
-                setMutationBoundaryError(result, ctx, .insert_op, err, &diagnostic);
-                return;
-            };
-            result.stats.rows_inserted = 1;
-            if (has_projection) {
-                string_arena.reset();
-                materializeRowsById(
-                    ctx,
-                    result,
+            if (node.data.unary != null_node and ctx.ast.getNode(node.data.unary).tag == .insert_row_group) {
+                var row_ids: [scan_mod.scan_batch_size]RowId = undefined;
+                var row_id_count: u16 = 0;
+                const inserted_count = mutation_mod.executeBulkInsertWithDiagnosticAndParameters(
+                    ctx.catalog,
+                    ctx.pool,
+                    ctx.wal,
+                    ctx.tx_id,
                     model_id,
-                    &[_]RowId{row_id},
-                    string_arena,
-                );
+                    ctx.ast,
+                    ctx.tokens,
+                    ctx.source,
+                    node.data.unary,
+                    ctx.parameter_bindings,
+                    &diagnostic,
+                    &exec_eval.eval_ctx,
+                    ctx.undo_log,
+                    ctx.snapshot,
+                    ctx.tx_manager,
+                    row_ids[0..],
+                    &row_id_count,
+                ) catch |err| {
+                    setMutationBoundaryError(result, ctx, .insert_op, err, &diagnostic);
+                    return;
+                };
+                result.stats.rows_inserted = inserted_count;
+                if (has_projection) {
+                    string_arena.reset();
+                    materializeRowsById(
+                        ctx,
+                        result,
+                        model_id,
+                        row_ids[0..row_id_count],
+                        string_arena,
+                    );
+                }
+            } else {
+                const row_id = mutation_mod.executeInsertWithDiagnosticAndParameters(
+                    ctx.catalog,
+                    ctx.pool,
+                    ctx.wal,
+                    ctx.tx_id,
+                    model_id,
+                    ctx.ast,
+                    ctx.tokens,
+                    ctx.source,
+                    node.data.unary,
+                    ctx.parameter_bindings,
+                    &diagnostic,
+                    &exec_eval.eval_ctx,
+                    ctx.undo_log,
+                    ctx.snapshot,
+                    ctx.tx_manager,
+                ) catch |err| {
+                    setMutationBoundaryError(result, ctx, .insert_op, err, &diagnostic);
+                    return;
+                };
+                result.stats.rows_inserted = 1;
+                if (has_projection) {
+                    string_arena.reset();
+                    materializeRowsById(
+                        ctx,
+                        result,
+                        model_id,
+                        &[_]RowId{row_id},
+                        string_arena,
+                    );
+                }
             }
         },
         .update_op => {

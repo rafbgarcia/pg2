@@ -434,6 +434,155 @@ pub fn executeInsertWithDiagnosticAndParameters(
     return result;
 }
 
+pub fn executeBulkInsertWithDiagnosticAndParameters(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    tx_id: TxId,
+    model_id: ModelId,
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    first_row_group_node: NodeIndex,
+    parameter_bindings: []const ParameterBinding,
+    diagnostic: ?*MutationDiagnostic,
+    eval_ctx: *const filter_mod.EvalContext,
+    undo_log: ?*UndoLog,
+    snapshot: ?*const Snapshot,
+    tx_manager: ?*const TxManager,
+    out_row_ids: []RowId,
+    out_row_count: *u16,
+) MutationError!u32 {
+    const schema = &catalog.models[model_id].row_schema;
+    var inserted_count: u32 = 0;
+    out_row_count.* = 0;
+
+    // Fail-fast on in-batch PK duplicates before any heap/index writes.
+    if (catalog_mod.findPrimaryKeyColumnId(catalog, model_id)) |pk_col| {
+        var string_decode_bytes: [max_row_buf_size]u8 = undefined;
+        var string_arena = scan_mod.StringArena.init(string_decode_bytes[0..]);
+
+        var outer_group = first_row_group_node;
+        while (outer_group != null_node) {
+            const outer_node = tree.getNode(outer_group);
+            if (outer_node.tag != .insert_row_group) return error.Corruption;
+
+            var outer_values: [max_assignments]Value =
+                [_]Value{.{ .null_value = {} }} ** max_assignments;
+            var outer_assigned: [max_assignments]bool = [_]bool{false} ** max_assignments;
+            string_arena.reset();
+            try buildRowFromAssignments(
+                tree,
+                tokens,
+                source,
+                schema,
+                outer_node.data.unary,
+                parameter_bindings,
+                &outer_values,
+                &outer_assigned,
+                diagnostic,
+                &string_arena,
+                eval_ctx,
+            );
+            applyColumnDefaultsForInsert(
+                catalog,
+                model_id,
+                outer_values[0..schema.column_count],
+                outer_assigned[0..schema.column_count],
+            );
+            var outer_key_buf: [max_row_buf_size]u8 = undefined;
+            const outer_key = index_key_mod.encodeValue(outer_values[pk_col], &outer_key_buf);
+
+            var inner_group = first_row_group_node;
+            while (inner_group != outer_group) {
+                const inner_node = tree.getNode(inner_group);
+                if (inner_node.tag != .insert_row_group) return error.Corruption;
+
+                var inner_values: [max_assignments]Value =
+                    [_]Value{.{ .null_value = {} }} ** max_assignments;
+                var inner_assigned: [max_assignments]bool = [_]bool{false} ** max_assignments;
+                string_arena.reset();
+                try buildRowFromAssignments(
+                    tree,
+                    tokens,
+                    source,
+                    schema,
+                    inner_node.data.unary,
+                    parameter_bindings,
+                    &inner_values,
+                    &inner_assigned,
+                    diagnostic,
+                    &string_arena,
+                    eval_ctx,
+                );
+                applyColumnDefaultsForInsert(
+                    catalog,
+                    model_id,
+                    inner_values[0..schema.column_count],
+                    inner_assigned[0..schema.column_count],
+                );
+                var inner_key_buf: [max_row_buf_size]u8 = undefined;
+                const inner_key = index_key_mod.encodeValue(inner_values[pk_col], &inner_key_buf);
+                if (std.mem.eql(u8, outer_key, inner_key)) return error.DuplicateKey;
+                inner_group = inner_node.next;
+            }
+            outer_group = outer_node.next;
+        }
+    }
+
+    var row_group = first_row_group_node;
+    while (row_group != null_node) {
+        const group_node = tree.getNode(row_group);
+        if (group_node.tag != .insert_row_group) return error.Corruption;
+        if (out_row_count.* >= out_row_ids.len) return error.ResultOverflow;
+
+        const row_id = executeInsertWithDiagnosticAndParameters(
+            catalog,
+            pool,
+            wal,
+            tx_id,
+            model_id,
+            tree,
+            tokens,
+            source,
+            group_node.data.unary,
+            parameter_bindings,
+            diagnostic,
+            eval_ctx,
+            undo_log,
+            snapshot,
+            tx_manager,
+        ) catch |insert_err| {
+            if (undo_log) |undo| {
+                var i: u16 = 0;
+                while (i < out_row_count.*) : (i += 1) {
+                    try deleteSingleRow(
+                        catalog,
+                        pool,
+                        wal,
+                        undo,
+                        tx_id,
+                        schema,
+                        out_row_ids[i],
+                    );
+                }
+                if (out_row_count.* > 0) {
+                    catalog.decrementRowCount(model_id, out_row_count.*);
+                }
+            }
+            out_row_count.* = 0;
+            return insert_err;
+        };
+        out_row_ids[out_row_count.*] = row_id;
+        out_row_count.* += 1;
+        inserted_count += 1;
+
+        row_group = group_node.next;
+    }
+
+    return inserted_count;
+}
+
 /// Execute an UPDATE operation.
 ///
 /// Scans the table, filters by predicate, then for each matching row:
