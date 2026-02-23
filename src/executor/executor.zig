@@ -2637,7 +2637,10 @@ fn applyNestedReadOperatorsPerParent(
             result.collector = spill.collector;
             result.collector_output_offset = spill.offset;
             result.collector_output_count = spill.count;
-            result.row_count = @intCast(@min(spill.count, scan_mod.scan_batch_size));
+            // Collector-backed row sets do not have materialized in-memory rows.
+            // Keep row_count at 0 so aggregate-state budgeting does not treat
+            // spill cardinality as resident in `result.rows`.
+            result.row_count = 0;
         },
     }
 

@@ -82,7 +82,7 @@ test "nested per-parent spill preserves where-group-having-sort-offset-limit ord
     }
 
     const result = try executor.run(
-        "User |> inspect { name posts |> where(points >= 0) |> group(bucket) |> having(bucket >= 0) |> sort(bucket asc) |> offset(1) |> limit(1) { bucket } }",
+        "User |> inspect { name posts |> where(points >= 0) |> group(bucket) |> having(sum(points) > 0) |> sort(bucket asc) |> offset(1) |> limit(1) { bucket } }",
     );
 
     try std.testing.expect(!std.mem.startsWith(u8, result, "ERR query: "));
