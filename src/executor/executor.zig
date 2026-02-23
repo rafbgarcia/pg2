@@ -27,6 +27,10 @@ const joins_mod = @import("joins.zig");
 const projections_mod = @import("projections.zig");
 const spill_collector_mod = @import("spill_collector.zig");
 const external_sort_mod = @import("external_sort.zig");
+const index_scan_planner = @import("index_scan_planner.zig");
+const index_maintenance_mod = @import("index_maintenance.zig");
+const index_key_mod = @import("../storage/index_key.zig");
+const btree_mod = @import("../storage/btree.zig");
 const temp_mod = @import("../storage/temp.zig");
 
 const SpillingResultCollector = spill_collector_mod.SpillingResultCollector;
@@ -102,6 +106,8 @@ pub const GroupStrategy = enum {
     in_memory_linear,
 };
 
+pub const ScanStrategy = index_scan_planner.ScanStrategy;
+
 pub const PlanStats = struct {
     source_model: [32]u8 = [_]u8{0} ** 32,
     source_model_len: u8 = 0,
@@ -113,6 +119,7 @@ pub const PlanStats = struct {
     materialization_mode: MaterializationMode = .none,
     sort_strategy: SortStrategy = .none,
     group_strategy: GroupStrategy = .none,
+    scan_strategy: ScanStrategy = .table_scan,
     nested_relation_count: u8 = 0,
 };
 
@@ -410,15 +417,35 @@ fn executeReadPipeline(
         ctx.work_memory_bytes_per_slot,
     );
 
-    // --- 2. Chunked scan loop ---
+    // --- 2. Try PK index scan before falling back to full table scan ---
+    // If the index scan succeeds, it populates the collector and stats
+    // directly, then we skip the chunked scan loop and proceed to post-scan.
+    var total_pages_read: u32 = 0;
+    var total_rows_scanned: u32 = 0;
+    const index_scan_used = blk: {
+        const where_node = findWhereOpNode(ops, op_count);
+        if (where_node == null) break :blk false;
+        break :blk tryIndexScan(
+            ctx,
+            result,
+            model_id,
+            where_node.?,
+            ops,
+            op_count,
+            string_arena,
+            &total_pages_read,
+            &total_rows_scanned,
+        );
+    };
+
+    if (!index_scan_used) {
+    // --- 3. Chunked scan loop ---
     // Scan into scratch_rows_a so the collector's hot batch (result.rows)
     // is never overwritten by scan output.
     const scan_buf = ctx.scratch_rows_a[0..scan_mod.scan_batch_size];
     var chunk_result = QueryResult.init(ctx.scratch_rows_a);
 
     var cursor = scan_mod.ScanCursor.init();
-    var total_pages_read: u32 = 0;
-    var total_rows_scanned: u32 = 0;
 
     while (!cursor.done) {
         // Arena safety valve: if the hot batch is empty we can safely
@@ -484,11 +511,12 @@ fn executeReadPipeline(
             };
         }
     }
+    } // end if (!index_scan_used)
 
     result.stats.pages_read = total_pages_read;
     result.stats.rows_scanned = total_rows_scanned;
 
-    // --- 3. Post-scan: materialize final result ---
+    // --- 4. Post-scan: materialize final result ---
     const spilled = ctx.collector.spillTriggered();
     const needs_full_input = hasFullInputOperators(ops, op_count);
 
@@ -578,6 +606,185 @@ fn executeReadPipeline(
     }
     result.stats.rows_returned = result.row_count;
     captureTempStats(result, ctx.collector);
+}
+
+/// Attempt a PK index scan for the given WHERE clause. Returns true if
+/// the index scan was used (rows are in the collector and stats are set).
+/// Returns false if the query should fall back to a full table scan.
+/// On true, the caller skips the chunked scan loop but still runs
+/// the normal post-scan pipeline (projections, joins, etc.).
+fn tryIndexScan(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    model_id: ModelId,
+    where_node: NodeIndex,
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+    string_arena: *scan_mod.StringArena,
+    total_pages_read: *u32,
+    total_rows_scanned: *u32,
+) bool {
+    // Check if this model has a PK column with a B+ tree index.
+    const pk_col_id = catalog_mod.findPrimaryKeyColumnId(ctx.catalog, model_id) orelse return false;
+    var pk_btree = index_maintenance_mod.openPrimaryKeyIndex(
+        ctx.catalog,
+        ctx.pool,
+        ctx.wal,
+        model_id,
+    ) orelse return false;
+
+    // Get the PK column name for AST matching.
+    const schema = &ctx.catalog.models[model_id].row_schema;
+    const pk_col_name = schema.getColumnName(pk_col_id);
+
+    // Analyze the WHERE predicate for PK-indexable patterns.
+    const ast_node = ctx.ast.getNode(where_node);
+    const predicate = ast_node.data.unary;
+    if (predicate == null_node) return false;
+
+    const plan = index_scan_planner.analyze(
+        ctx.ast,
+        ctx.tokens,
+        ctx.source,
+        predicate,
+        pk_col_name,
+    );
+
+    switch (plan.strategy) {
+        .table_scan => return false,
+        .pk_point_lookup => {
+            return executePointLookup(
+                ctx, result, model_id, &pk_btree, plan.eq_value,
+                ops, op_count, string_arena,
+                total_pages_read, total_rows_scanned,
+            );
+        },
+        .pk_range_scan => {
+            return executeRangeScan(
+                ctx, result, model_id, &pk_btree, plan.loKey(), plan.hiKey(),
+                ops, op_count, string_arena,
+                total_pages_read, total_rows_scanned,
+            );
+        },
+    }
+}
+
+/// Execute a PK point lookup: find one row by exact key, apply WHERE, feed to collector.
+fn executePointLookup(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    model_id: ModelId,
+    btree: *btree_mod.BTree,
+    pk_value: Value,
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+    string_arena: *scan_mod.StringArena,
+    total_pages_read: *u32,
+    total_rows_scanned: *u32,
+) bool {
+    var key_buf: [index_scan_planner.max_key_buf]u8 = undefined;
+    const key = index_key_mod.encodeValue(pk_value, &key_buf);
+
+    const row_opt = scan_mod.indexFind(
+        ctx.catalog,
+        ctx.pool,
+        ctx.undo_log,
+        ctx.snapshot,
+        ctx.tx_manager,
+        btree,
+        model_id,
+        key,
+        string_arena,
+    ) catch {
+        setError(result, "index point lookup failed");
+        return true;
+    };
+
+    result.stats.plan.scan_strategy = .pk_point_lookup;
+    total_pages_read.* = 1;
+
+    if (row_opt) |row| {
+        // Put the found row in the scratch buffer for WHERE filtering.
+        var chunk_result = QueryResult.init(ctx.scratch_rows_a);
+        ctx.scratch_rows_a[0] = row;
+        chunk_result.row_count = 1;
+        total_rows_scanned.* = 1;
+
+        // Apply WHERE filter (and any other per-chunk operators).
+        applyPerChunkOperators(ctx, &chunk_result, model_id, ops, op_count, string_arena);
+        if (chunk_result.has_error) {
+            if (chunk_result.getError()) |msg| setError(result, msg);
+            return true;
+        }
+
+        // Feed survivors into the collector.
+        var row_idx: u16 = 0;
+        while (row_idx < chunk_result.row_count) : (row_idx += 1) {
+            ctx.collector.appendRow(&chunk_result.rows[row_idx]) catch {
+                setError(result, "spill collector append failed");
+                return true;
+            };
+        }
+    }
+    return true;
+}
+
+/// Execute a PK range scan: iterate B+ tree entries in [lo, hi), apply WHERE, feed to collector.
+fn executeRangeScan(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    model_id: ModelId,
+    btree: *btree_mod.BTree,
+    lo: ?[]const u8,
+    hi: ?[]const u8,
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+    string_arena: *scan_mod.StringArena,
+    total_pages_read: *u32,
+    total_rows_scanned: *u32,
+) bool {
+    const scan_buf = ctx.scratch_rows_a[0..scan_mod.scan_batch_size];
+
+    const scan_result = scan_mod.indexRangeScanInto(
+        ctx.catalog,
+        ctx.pool,
+        ctx.undo_log,
+        ctx.snapshot,
+        ctx.tx_manager,
+        btree,
+        model_id,
+        lo,
+        hi,
+        scan_buf,
+        string_arena,
+    ) catch {
+        setError(result, "index range scan failed");
+        return true;
+    };
+
+    result.stats.plan.scan_strategy = .pk_range_scan;
+    total_pages_read.* = scan_result.pages_read;
+    total_rows_scanned.* = scan_result.row_count;
+
+    // Apply WHERE filter on the scanned batch.
+    var chunk_result = QueryResult.init(ctx.scratch_rows_a);
+    chunk_result.row_count = scan_result.row_count;
+
+    applyPerChunkOperators(ctx, &chunk_result, model_id, ops, op_count, string_arena);
+    if (chunk_result.has_error) {
+        if (chunk_result.getError()) |msg| setError(result, msg);
+        return true;
+    }
+
+    // Feed survivors into the collector.
+    var row_idx: u16 = 0;
+    while (row_idx < chunk_result.row_count) : (row_idx += 1) {
+        ctx.collector.appendRow(&chunk_result.rows[row_idx]) catch {
+            setError(result, "spill collector append failed");
+            return true;
+        };
+    }
+    return true;
 }
 
 /// Copy string values in a row from their current backing into `arena`.
@@ -789,6 +996,18 @@ fn hasFullInputOperators(
         }
     }
     return false;
+}
+
+/// Find the AST node for the WHERE operator, if present.
+fn findWhereOpNode(
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+) ?NodeIndex {
+    var i: u16 = 0;
+    while (i < op_count) : (i += 1) {
+        if (ops[i].kind == .where_filter) return ops[i].node;
+    }
+    return null;
 }
 
 /// Find the AST node for the sort operator, if present.
@@ -1258,6 +1477,9 @@ fn executeMutation(
                 ctx.parameter_bindings,
                 &diagnostic,
                 &exec_eval.eval_ctx,
+                ctx.undo_log,
+                ctx.snapshot,
+                ctx.tx_manager,
             ) catch |err| {
                 setMutationBoundaryError(result, ctx, .insert_op, err, &diagnostic);
                 return;

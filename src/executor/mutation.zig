@@ -81,6 +81,7 @@ const index_maintenance_mod = @import("index_maintenance.zig");
 const openPrimaryKeyIndex = index_maintenance_mod.openPrimaryKeyIndex;
 const insertPrimaryKey = index_maintenance_mod.insertPrimaryKey;
 const primaryKeyExists = index_maintenance_mod.primaryKeyExists;
+const primaryKeyVisibleInIndex = index_maintenance_mod.primaryKeyVisibleInIndex;
 const index_key_mod = @import("../storage/index_key.zig");
 
 // Value builder delegation
@@ -251,6 +252,8 @@ pub fn executeInsertWithDiagnostic(
         diagnostic,
         null,
         null,
+        null,
+        null,
     );
 }
 
@@ -267,6 +270,9 @@ pub fn executeInsertWithDiagnosticAndParameters(
     parameter_bindings: []const ParameterBinding,
     diagnostic: ?*MutationDiagnostic,
     eval_ctx: *const filter_mod.EvalContext,
+    undo_log: ?*const UndoLog,
+    snapshot: ?*const Snapshot,
+    tx_manager: ?*const TxManager,
 ) MutationError!RowId {
     std.debug.assert(model_id < catalog.model_count);
     const model = &catalog.models[model_id];
@@ -302,7 +308,7 @@ pub fn executeInsertWithDiagnosticAndParameters(
     var pk_btree = openPrimaryKeyIndex(catalog, pool, wal, model_id);
     if (pk_btree != null) {
         const pk_col = catalog_mod.findPrimaryKeyColumnId(catalog, model_id).?;
-        if (try primaryKeyExists(&pk_btree.?, values[pk_col])) {
+        if (try primaryKeyVisibleInIndex(catalog, &pk_btree.?, model_id, values[pk_col], pool, undo_log, snapshot, tx_manager)) {
             return error.DuplicateKey;
         }
         // Non-PK unique indexes still need heap scan.
@@ -654,7 +660,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                 if (row_mod.compareValues(old_pk, new_pk) != .eq) {
                     pk_changed = true;
                     // Check that the new PK value doesn't already exist.
-                    if (try primaryKeyExists(&pk_btree_update.?, new_pk)) {
+                    if (try primaryKeyVisibleInIndex(catalog, &pk_btree_update.?, model_id, new_pk, pool, undo_log, snapshot, tx_manager)) {
                         return error.DuplicateKey;
                     }
                 }

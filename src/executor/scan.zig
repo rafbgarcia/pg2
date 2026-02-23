@@ -459,6 +459,72 @@ pub fn indexRange(
     return result;
 }
 
+/// Index range scan into a caller-provided buffer.
+/// Like `indexRange`, but writes results into `out_rows` instead of
+/// allocating its own storage. Returns the count of rows written and
+/// pages read.
+pub fn indexRangeScanInto(
+    catalog: *const Catalog,
+    pool: *BufferPool,
+    undo_log: *const UndoLog,
+    snapshot: *const Snapshot,
+    tx_manager: *const TxManager,
+    btree: *BTree,
+    model_id: ModelId,
+    lo: ?[]const u8,
+    hi: ?[]const u8,
+    out_rows: []ResultRow,
+    string_arena: *StringArena,
+) ScanError!ScanIntoResult {
+    std.debug.assert(model_id < catalog.model_count);
+
+    const model = &catalog.models[model_id];
+    const schema = &model.row_schema;
+
+    var iter = btree.rangeScan(lo, hi) catch |e| return mapBTreeError(e);
+    defer iter.close();
+
+    var row_count: u16 = 0;
+    var pages_read: u32 = 0;
+
+    while (true) {
+        const entry_opt = iter.next() catch |e| return mapBTreeError(e);
+        const entry = entry_opt orelse break;
+        if (@as(usize, row_count) >= out_rows.len) break;
+
+        const row_id = entry.row_id;
+        const page = pool.pin(row_id.page_id) catch |e| return mapPoolError(e);
+        defer pool.unpin(row_id.page_id, false);
+        pages_read += 1;
+
+        const row_data_opt = HeapPage.read(page, row_id.slot) catch null;
+
+        const data_to_decode = resolveVisibleVersion(
+            undo_log,
+            row_id.page_id,
+            row_id.slot,
+            snapshot,
+            tx_manager,
+            row_data_opt,
+        ) orelse continue;
+
+        out_rows[@as(usize, row_count)] = ResultRow.init();
+        out_rows[@as(usize, row_count)].row_id = row_id;
+        try decodeRowIntoResult(
+            catalog,
+            pool,
+            schema,
+            data_to_decode,
+            &out_rows[@as(usize, row_count)],
+            string_arena,
+        );
+        row_count += 1;
+    }
+
+    return .{ .row_count = row_count, .pages_read = pages_read };
+}
+
+
 fn decodeRowIntoResult(
     catalog: *const Catalog,
     pool: *BufferPool,

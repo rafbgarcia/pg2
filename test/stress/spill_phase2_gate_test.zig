@@ -135,27 +135,30 @@ test "query exceeding string arena completes via arena safety valve" {
         \\ArenaTable {
         \\  field(id, i64, notNull, primaryKey)
         \\  field(data, string, notNull)
+        \\  field(flag, bool, notNull)
         \\}
     );
 
     const padding = "A" ** 250;
 
     // Insert 4200 rows (2 scan chunks) with 250-byte strings.
+    // Mark the first 4 rows with flag=true, rest with flag=false.
     var i: i64 = 1;
     while (i <= 4200) : (i += 1) {
         var query_buf: [512]u8 = undefined;
+        const flag_str = if (i <= 4) "true" else "false";
         const query = std.fmt.bufPrint(
             &query_buf,
-            "ArenaTable |> insert(id = {d}, data = \"{s}\") {{}}",
-            .{ i, padding },
+            "ArenaTable |> insert(id = {d}, data = \"{s}\", flag = {s}) {{}}",
+            .{ i, padding, flag_str },
         ) catch unreachable;
         _ = try executor.run(query);
     }
 
-    // Use a selective WHERE so the response stays small (4 rows × ~260 bytes)
-    // while still forcing a full table scan that fills the arena.
+    // Filter on non-PK column to force a full table scan that fills the arena,
+    // while keeping the result set small (4 rows × ~260 bytes).
     const result = try executor.run(
-        "ArenaTable |> where(id < 5) |> inspect {}",
+        "ArenaTable |> where(flag == true) |> inspect {}",
     );
 
     // Query completed without error — the safety valve prevented arena exhaustion.

@@ -16,6 +16,8 @@ const buffer_pool_mod = @import("../storage/buffer_pool.zig");
 const wal_mod = @import("../storage/wal.zig");
 const row_mod = @import("../storage/row.zig");
 const heap_mod = @import("../storage/heap.zig");
+const undo_mod = @import("../mvcc/undo.zig");
+const tx_mod = @import("../mvcc/transaction.zig");
 
 const BTree = btree_mod.BTree;
 const BTreeError = btree_mod.BTreeError;
@@ -25,6 +27,10 @@ const Catalog = catalog_mod.Catalog;
 const ModelId = catalog_mod.ModelId;
 const BufferPool = buffer_pool_mod.BufferPool;
 const Wal = wal_mod.Wal;
+const HeapPage = heap_mod.HeapPage;
+const UndoLog = undo_mod.UndoLog;
+const Snapshot = tx_mod.Snapshot;
+const TxManager = tx_mod.TxManager;
 
 const mutation = @import("mutation.zig");
 const MutationError = mutation.MutationError;
@@ -48,7 +54,7 @@ pub fn openPrimaryKeyIndex(
     };
 }
 
-/// Persist the BTree's current next_page_id back to the catalog.
+/// Persist the BTree's current root_page_id and next_page_id back to the catalog.
 /// Must be called after any BTree mutation that may have allocated pages (insert with split).
 pub fn syncBTreeState(
     catalog: *Catalog,
@@ -56,6 +62,8 @@ pub fn syncBTreeState(
     btree: *const BTree,
 ) void {
     const idx_id = catalog_mod.findPrimaryKeyIndex(catalog, model_id) orelse return;
+    catalog.models[model_id].indexes[idx_id].btree_root_page_id =
+        @intCast(btree.root_page_id);
     catalog.models[model_id].indexes[idx_id].btree_next_page_id =
         @intCast(btree.next_page_id);
 }
@@ -101,6 +109,75 @@ pub fn primaryKeyExists(
     const key = index_key_mod.encodeValue(pk_value, &key_buf);
     const found = btree.find(key) catch |e| return mapBTreeError(e);
     return found != null;
+}
+
+/// MVCC-aware PK uniqueness check.
+///
+/// Looks up the key in the B+ tree. If found, follows the pointer to the
+/// heap and checks MVCC visibility. Returns `true` when the key belongs to
+/// a row that is visible to the current snapshot (genuine duplicate).
+/// Returns `false` when the key is absent or belongs to a deleted/invisible
+/// row — in the latter case the dead B+ tree entry is also cleaned up.
+///
+/// When any of the optional MVCC parameters is null, falls back to the
+/// non-MVCC behavior: key present in B+ tree = duplicate.
+pub fn primaryKeyVisibleInIndex(
+    catalog: *Catalog,
+    btree: *BTree,
+    model_id: ModelId,
+    pk_value: Value,
+    pool: *BufferPool,
+    undo_log: ?*const UndoLog,
+    snapshot: ?*const Snapshot,
+    tx_manager: ?*const TxManager,
+) MutationError!bool {
+    var key_buf: [max_row_buf_size]u8 = undefined;
+    const key = index_key_mod.encodeValue(pk_value, &key_buf);
+    const row_id_opt = btree.find(key) catch |e| return mapBTreeError(e);
+    const row_id = row_id_opt orelse return false;
+
+    // Without full MVCC context, fall back to: key exists = duplicate.
+    if (undo_log == null or snapshot == null or tx_manager == null) {
+        return true;
+    }
+
+    // Pin the heap page and check MVCC visibility.
+    const page = pool.pin(row_id.page_id) catch |e| return mapPoolError(e);
+    defer pool.unpin(row_id.page_id, false);
+
+    const heap_data_opt: ?[]const u8 = HeapPage.read(page, row_id.slot) catch null;
+    const head = undo_log.?.getHead(row_id.page_id, row_id.slot);
+    const visible: ?[]const u8 = if (head == null)
+        heap_data_opt
+    else
+        undo_log.?.findVisible(
+            row_id.page_id,
+            row_id.slot,
+            snapshot.?,
+            tx_manager.?,
+        ) orelse heap_data_opt;
+
+    if (visible != null) {
+        // Row is visible — genuine duplicate.
+        return true;
+    }
+
+    // Row is invisible (committed delete). Clean up the dead B+ tree entry
+    // so future lookups skip the extra heap check.
+    deletePrimaryKey(catalog, btree, model_id, pk_value) catch {};
+    return false;
+}
+
+fn mapPoolError(err: buffer_pool_mod.BufferPoolError) MutationError {
+    return switch (err) {
+        error.AllFramesPinned => error.AllFramesPinned,
+        error.OutOfMemory => error.OutOfMemory,
+        error.ChecksumMismatch => error.ChecksumMismatch,
+        error.StorageRead => error.StorageRead,
+        error.StorageWrite => error.StorageWrite,
+        error.StorageFsync => error.StorageFsync,
+        error.WalNotFlushed => error.WalNotFlushed,
+    };
 }
 
 pub fn mapBTreeError(err: BTreeError) MutationError {
