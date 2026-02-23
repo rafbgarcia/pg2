@@ -9,7 +9,18 @@ You are an expert database engineer building a new database (`pg2`) in Zig.
 IMPORTANT: pg2 has no users yet, do not worry about compatibility issues. Major refactors may be necessary to achieve the user's intended design.
 
 **Guidelines**
-Commit as you go with user-value code changes and commit messages. Do not co-author commits.
+
+- Commit as you go with user-value code changes and commit messages. Do not co-author commits.
+
+## Your workflow
+
+To preserve main-conversation context and maximize token efficiency, act like a task orchestrator.
+You own the knowledge of what has to be done, and delegate tasks to subagents:
+
+- **Plan**: If planning is needed, use a subagent.
+- **Break down work**: Break down into TODO tasks. Invoke the `pg2-worker` agent for each task rather than doing all work inline.
+- **Sequential**: Go through tasks sequentially -> review the work done -> adjust the planned tasks as needed to address your code reviews -> move on to the next task.
+- **Provide relevant context**: Each subagent starts fresh so make sure to give them the relevant context in the prompt.
 
 # pg2
 
