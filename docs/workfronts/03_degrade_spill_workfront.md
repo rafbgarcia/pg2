@@ -20,7 +20,9 @@ Queries must degrade under memory pressure (spill to temp storage) before failin
 - ✅ Nested semantics corrected to per-parent for in-memory paths.
 - ✅ Nested child scanning is chunked and allocation-free at runtime via preallocated workspace.
 - ✅ External sort and hash aggregate now accept explicit collector handles (not hard-wired to `ctx.collector`), enabling composition for parent-local spill.
-- ❌ Per-parent nested child subsets still have in-memory caps (subset rows + match arena). No per-parent spill engine yet.
+- ✅ Per-parent nested child subsets now spill via parent-local collectors (no in-memory subset truncation/failure behavior).
+- ✅ Nested per-parent operator order under spill is wired and covered: `WHERE -> GROUP BY -> HAVING -> ORDER BY -> OFFSET -> LIMIT`.
+- ✅ Nested spill + aggregate `HAVING` path fixed and replay-deterministic under test.
 
 ### Commits Already Landed (latest relevant)
 
@@ -28,6 +30,9 @@ Queries must degrade under memory pressure (spill to temp storage) before failin
 - `4258bae`: allocation-free chunked nested child scans with preallocated workspace.
 - `801a136`: per-parent nested child operator semantics.
 - `38d805d`, `6e39f43`, `70d88b6`, `6437c47`: collector-backed semantic correctness and regression coverage.
+- `eb8dfbc`: per-parent nested spill execution path and contracts.
+- `4f34fdf`: nested spill aggregate `HAVING` state-budget correctness fix.
+- `8d474db`: nested temp-region isolation hardening + determinism coverage.
 
 ## Non-Negotiables
 
@@ -87,9 +92,10 @@ Queries must degrade under memory pressure (spill to temp storage) before failin
 
 ### Remaining Limitation
 
-- Per-parent child matches are still bounded by in-memory subset capacity and per-parent match arena size.
+- Per-parent child subsets no longer fail at the prior in-memory subset cap.
+- Remaining nested spill/join expansion work is in Phase 6 / WF13.
 
-## Phase 5: Per-Parent Nested Spill 🚧 Active / Next Major Implementation
+## Phase 5: Per-Parent Nested Spill ✅ Completed
 
 ### Goal
 
@@ -142,6 +148,13 @@ Remove per-parent in-memory subset limits by making nested child pipelines spill
 - Determinism test for repeated runs with same seed.
 - Full suite: `zig build test --summary all`.
 
+### Gate Status
+
+- ✅ One-parent-many-children overflow case succeeds with correct nested output.
+- ✅ Nested spill coverage exists for `WHERE`, `GROUP BY + HAVING`, `ORDER BY`, `OFFSET/LIMIT`, and combinations.
+- ✅ Determinism coverage exists for nested spill + aggregate `HAVING` replay.
+- ✅ Full suite currently passing: `zig build test --summary all`.
+
 ## Phase 6: Spill-Aware Hash Join (Cross-Tracked with WF13) ⏳ Pending
 
 ### Status
@@ -156,10 +169,9 @@ Remove per-parent in-memory subset limits by making nested child pipelines spill
 
 ## Immediate Next Step (for fresh Codex session)
 
-1. Implement Phase 5 Slice 1: parent-local nested row source/output descriptor.
-2. Thread descriptor through nested execution path in `src/executor/executor.zig` (no behavior change yet).
-3. Add a focused failing test in `test/internals/spill/` for one-parent-many-children overflow case to lock expected behavior before full spill wiring.
-4. Then implement Slice 2 + 3 in the same branch.
+1. Start Phase 6 with WF13 alignment: spill-aware hash join contracts and algorithm slices.
+2. Keep WF03 guardrails explicit in tests: no cross-parent semantic bleed, no serialized rows outside final descriptor, fail-closed only on hard boundaries.
+3. Add Phase 6 determinism + stress coverage once first hash-join spill slice lands.
 
 ## Verification Command
 
