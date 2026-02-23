@@ -76,6 +76,9 @@ Additional confirmed decisions (2026-02-21):
 - Multi-statement responses serialize only the final statement's row payload.
 - Errors include deterministic failing `statement_index`.
 
+Additional confirmed decisions (2026-02-23):
+- If an identifier could resolve to both a column and a `let` variable in the same expression context, fail closed with an explicit ambiguous-identifier error (no precedence fallback).
+
 ## Phase 1: Language and AST Contracts
 ### Scope
 - Define variable value kinds:
@@ -86,6 +89,7 @@ Additional confirmed decisions (2026-02-21):
 - Add explicit parse/semantic errors for:
   - undefined variable
   - duplicate variable name in same request
+  - ambiguous identifier resolution (column vs `let` variable name collision)
   - invalid variable type in predicate context
   - variable value/type incompatibility for declared usage context
 
