@@ -281,6 +281,46 @@ pub fn executeInsertWithDiagnosticAndParameters(
     snapshot: ?*const Snapshot,
     tx_manager: ?*const TxManager,
 ) MutationError!RowId {
+    return executeInsertWithDiagnosticAndParametersWithOptions(
+        catalog,
+        pool,
+        wal,
+        tx_id,
+        model_id,
+        tree,
+        tokens,
+        source,
+        first_assignment_node,
+        parameter_bindings,
+        diagnostic,
+        eval_ctx,
+        undo_log,
+        snapshot,
+        tx_manager,
+        false,
+        null,
+    );
+}
+
+fn executeInsertWithDiagnosticAndParametersWithOptions(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    tx_id: TxId,
+    model_id: ModelId,
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    first_assignment_node: NodeIndex,
+    parameter_bindings: []const ParameterBinding,
+    diagnostic: ?*MutationDiagnostic,
+    eval_ctx: *const filter_mod.EvalContext,
+    undo_log: ?*const UndoLog,
+    snapshot: ?*const Snapshot,
+    tx_manager: ?*const TxManager,
+    skip_index_writes: bool,
+    page_hint: ?*u64,
+) MutationError!RowId {
     std.debug.assert(model_id < catalog.model_count);
     const model = &catalog.models[model_id];
     const schema = &model.row_schema;
@@ -356,6 +396,7 @@ pub fn executeInsertWithDiagnosticAndParameters(
         model.heap_first_page_id,
         model.total_pages,
         dry_row_len,
+        page_hint,
     );
 
     try spillOversizedStrings(
@@ -407,25 +448,27 @@ pub fn executeInsertWithDiagnosticAndParameters(
     const result = RowId{ .page_id = page_id, .slot = slot };
     std.debug.assert(result.page_id >= model.heap_first_page_id);
 
-    // Insert into PK B+ tree index after successful heap write.
-    if (pk_btree) |*btree| {
-        const pk_col = catalog_mod.findPrimaryKeyColumnId(catalog, model_id).?;
-        try insertPrimaryKey(catalog, btree, model_id, values[pk_col], result);
-    }
+    if (!skip_index_writes) {
+        // Insert into PK B+ tree index after successful heap write.
+        if (pk_btree) |*btree| {
+            const pk_col = catalog_mod.findPrimaryKeyColumnId(catalog, model_id).?;
+            try insertPrimaryKey(catalog, btree, model_id, values[pk_col], result);
+        }
 
-    // Insert into non-PK unique indexes after successful heap write.
-    {
-        const pk_col = catalog_mod.findPrimaryKeyColumnId(catalog, model_id);
-        var idx_id: u16 = 0;
-        while (idx_id < model.index_count) : (idx_id += 1) {
-            const idx = &model.indexes[idx_id];
-            if (!idx.is_unique) continue;
-            if (idx.column_count != 1) continue;
-            if (idx.btree_root_page_id == 0) continue;
-            // Skip PK index — already handled above.
-            if (pk_col != null and idx.column_ids[0] == pk_col.?) continue;
-            var idx_btree = openIndex(catalog, pool, wal, model_id, idx_id) orelse continue;
-            try insertIndexKey(catalog, &idx_btree, model_id, idx_id, values[idx.column_ids[0]], result);
+        // Insert into non-PK unique indexes after successful heap write.
+        {
+            const pk_col = catalog_mod.findPrimaryKeyColumnId(catalog, model_id);
+            var idx_id: u16 = 0;
+            while (idx_id < model.index_count) : (idx_id += 1) {
+                const idx = &model.indexes[idx_id];
+                if (!idx.is_unique) continue;
+                if (idx.column_count != 1) continue;
+                if (idx.btree_root_page_id == 0) continue;
+                // Skip PK index — already handled above.
+                if (pk_col != null and idx.column_ids[0] == pk_col.?) continue;
+                var idx_btree = openIndex(catalog, pool, wal, model_id, idx_id) orelse continue;
+                try insertIndexKey(catalog, &idx_btree, model_id, idx_id, values[idx.column_ids[0]], result);
+            }
         }
     }
 
@@ -436,6 +479,7 @@ pub fn executeInsertWithDiagnosticAndParameters(
         overflow_page_ids[0..schema.column_count],
         0,
     );
+    if (page_hint) |hint| hint.* = page_id;
     return result;
 }
 
@@ -555,12 +599,15 @@ pub fn executeBulkInsertWithDiagnosticAndParameters(
     }
 
     var row_group = first_row_group_node;
+    var bulk_page_hint: u64 = 0;
+    var has_bulk_page_hint = false;
     while (row_group != null_node) {
         const group_node = tree.getNode(row_group);
         if (group_node.tag != .insert_row_group) return error.Corruption;
         if (out_row_count.* >= out_row_ids.len) return error.ResultOverflow;
 
-        const row_id = executeInsertWithDiagnosticAndParameters(
+        const page_hint_ptr: ?*u64 = if (has_bulk_page_hint) &bulk_page_hint else null;
+        const row_id = executeInsertWithDiagnosticAndParametersWithOptions(
             catalog,
             pool,
             wal,
@@ -576,6 +623,8 @@ pub fn executeBulkInsertWithDiagnosticAndParameters(
             undo_log,
             snapshot,
             tx_manager,
+            false,
+            page_hint_ptr,
         ) catch |insert_err| {
             if (undo_log) |undo| {
                 var i: u16 = 0;
@@ -600,6 +649,8 @@ pub fn executeBulkInsertWithDiagnosticAndParameters(
         out_row_ids[out_row_count.*] = row_id;
         out_row_count.* += 1;
         inserted_count += 1;
+        bulk_page_hint = row_id.page_id;
+        has_bulk_page_hint = true;
 
         row_group = group_node.next;
     }
@@ -1363,8 +1414,21 @@ fn findPageWithSpace(
     first_page_id: u32,
     total_pages: u32,
     row_len: u16,
+    page_hint: ?*u64,
 ) MutationError!u64 {
     std.debug.assert(row_len > 0);
+
+    if (page_hint) |hint| {
+        const hint_page = hint.*;
+        const first_id: u64 = first_page_id;
+        const last_existing: u64 = if (total_pages == 0) first_id else first_id + total_pages - 1;
+        if (total_pages > 0 and hint_page >= first_id and hint_page <= last_existing) {
+            const page = pool.pin(hint_page) catch |e| return mapPoolError(e);
+            const free = HeapPage.free_space(page);
+            pool.unpin(hint_page, false);
+            if (free >= row_len + 4) return hint_page;
+        }
+    }
 
     // Try existing pages (scan from last to first for locality).
     if (total_pages > 0) {
