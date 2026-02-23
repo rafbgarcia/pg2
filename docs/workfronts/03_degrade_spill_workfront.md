@@ -60,7 +60,7 @@ Queries should degrade performance under memory pressure before failing, using p
 - Plumbed through `QueryBuffers` → `ExecContext` (gains `collector: *SpillingResultCollector` and `work_memory_bytes_per_slot: u64`).
 - `QueryResult` gains `collector: ?*SpillingResultCollector = null`. When non-null, `serializeQueryResult()` iterates from the collector instead of the flat `result_rows` slice and uses `collector.totalRowCount()` for the OK header.
 
-#### 2e: Telemetry
+#### 2e: Telemetry ✅
 - `ExecStats` gains `spill_triggered: bool` and `result_bytes_accumulated: u64`.
 - `INSPECT spill` output includes whether the query degraded and total bytes accumulated.
 - Existing temp page counters (`temp_pages_allocated`, `temp_bytes_written`, etc.) track spill volume.

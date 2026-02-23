@@ -144,8 +144,10 @@ fn serializeInspectStats(
         },
     ) catch return error.ResponseTooLarge;
     writer.print(
-        "INSPECT spill temp_pages_allocated={d} temp_pages_reclaimed={d} temp_bytes_written={d} temp_bytes_read={d}\n",
+        "INSPECT spill spill_triggered={} result_bytes_accumulated={d} temp_pages_allocated={d} temp_pages_reclaimed={d} temp_bytes_written={d} temp_bytes_read={d}\n",
         .{
+            exec_stats.spill_triggered,
+            exec_stats.result_bytes_accumulated,
             exec_stats.temp_pages_allocated,
             exec_stats.temp_pages_reclaimed,
             exec_stats.temp_bytes_written,

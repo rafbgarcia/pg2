@@ -188,7 +188,7 @@ test "inspect includes spill stats at zero when no spilling occurs" {
         std.mem.indexOf(
             u8,
             result,
-            "INSPECT spill temp_pages_allocated=0 temp_pages_reclaimed=0 temp_bytes_written=0 temp_bytes_read=0\n",
+            "INSPECT spill spill_triggered=false result_bytes_accumulated=0 temp_pages_allocated=0 temp_pages_reclaimed=0 temp_bytes_written=0 temp_bytes_read=0\n",
         ) != null,
     );
 }

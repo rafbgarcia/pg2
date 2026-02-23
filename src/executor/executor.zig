@@ -127,6 +127,8 @@ pub const ExecStats = struct {
     temp_pages_reclaimed: u32 = 0,
     temp_bytes_written: u64 = 0,
     temp_bytes_read: u64 = 0,
+    spill_triggered: bool = false,
+    result_bytes_accumulated: u64 = 0,
     plan: PlanStats = .{},
 };
 
@@ -577,6 +579,8 @@ fn captureTempStats(result: *QueryResult, collector: *const SpillingResultCollec
     result.stats.temp_pages_reclaimed = stats.temp_pages_reclaimed;
     result.stats.temp_bytes_written = stats.temp_bytes_written;
     result.stats.temp_bytes_read = stats.temp_bytes_read;
+    result.stats.spill_triggered = collector.spillTriggered();
+    result.stats.result_bytes_accumulated = collector.resultBytesAccumulated();
 }
 
 /// Map TempAllocatorError to ScanError for boundary error reporting.

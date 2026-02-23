@@ -242,6 +242,11 @@ pub const SpillingResultCollector = struct {
         return self.spill_triggered;
     }
 
+    /// Total serialized bytes accumulated across all rows (spilled and in-memory).
+    pub fn resultBytesAccumulated(self: *const SpillingResultCollector) u64 {
+        return self.result_bytes_accumulated;
+    }
+
     /// Snapshot the underlying temp storage stats.
     pub fn tempStats(self: *const SpillingResultCollector) temp_mod.TempSpillStats {
         return self.temp_mgr.snapshotStats();
