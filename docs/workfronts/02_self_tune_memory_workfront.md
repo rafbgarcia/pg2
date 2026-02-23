@@ -17,6 +17,15 @@ Turn `--memory` into a planner input that derives runtime capacities automatical
 - Add planner module that derives:
   - `max_query_slots` (effective concurrency)
   - buffer/WAL/undo/query arena budgets
+  - parser budgets per query slot:
+    - `parse_tokens_bytes_per_slot`
+    - `parse_ast_bytes_per_slot`
+  - parser effective capacities from those budgets:
+    - `max_tokens_effective`
+    - `max_ast_nodes_effective`
+  - parser global hard caps (independent safety ceilings):
+    - `hard_max_tokens`
+    - `hard_max_ast_nodes`
   - `work_memory_bytes_per_slot` — per-query byte budget governing in-memory result accumulation before spill (consumed by Workfront 03 Phase 2's spill threshold)
   - `temp_pages_per_query_slot` — per-slot temp page budget for operator spill (consumed by Workfront 03 Phases 2-3). Derived from remaining disk budget after shared structures.
   - `max_active_transactions` — concurrency-derived limit on simultaneously executing transactions. Default: `max(max_query_slots * 4, 256)`. Currently hardcoded at 256 in `TxManager`. The planner makes this a runtime value so higher `--concurrency` configurations don't hit transaction admission errors under load.
@@ -32,6 +41,12 @@ Turn `--memory` into a planner input that derives runtime capacities automatical
 
 - Default effective concurrency = `min(vcpus, memory_limited_slots)` with min 1.
 - `work_memory_bytes_per_slot` = remaining per-slot budget after reserving shared structures (buffer pool, WAL, undo log). Before WF02 lands, Workfront 03 uses a hardcoded default (4 MB, matching PostgreSQL's `work_mem`).
+- parser capacities are primarily memory-bound (`max_*_effective`), but must also be bounded by global hard caps:
+  - `max_tokens_effective <= hard_max_tokens`
+  - `max_ast_nodes_effective <= hard_max_ast_nodes`
+- recommended initial hard caps:
+  - `hard_max_tokens = 32768`
+  - `hard_max_ast_nodes = 65535` (u16 `NodeIndex` upper bound)
 
 ### Gate
 
@@ -39,7 +54,28 @@ Turn `--memory` into a planner input that derives runtime capacities automatical
 - `work_memory_bytes_per_slot` scales correctly with `--memory` and `--concurrency` (more memory or less concurrency → larger per-slot budget).
 - `max_active_transactions` and `max_tx_states` scale with effective concurrency (higher `--concurrency` → larger limits).
 - `temp_pages_per_query_slot` is derived and scales inversely with concurrency (fewer slots → more temp pages per slot).
+- parser effective capacities scale with memory/concurrency (more memory or fewer slots → larger `max_tokens_effective` / `max_ast_nodes_effective`).
+- parser effective capacities never exceed global hard caps.
+- tokenizer/parser diagnostics distinguish budget exhaustion from hard-cap exhaustion.
 - `TxManager` accepts runtime-sized capacity (no longer compile-time constants). Existing tests pass with the default-derived values.
+
+### Parser Runtime Migration (Phase 1 extension)
+
+#### Scope
+
+- Convert parser/tokenizer fixed compile-time capacities to runtime slot-local capacities:
+  - tokenizer token buffer size derived from `max_tokens_effective`
+  - AST node buffer size derived from `max_ast_nodes_effective`
+- Allocate parser buffers per query slot at bootstrap from planned memory budgets.
+- Keep fail-closed semantics and deterministic behavior with explicit error messages.
+
+#### Gate
+
+- Existing parser/feature tests pass under default planned capacities.
+- New boundary tests:
+  - `effective_limit - 1` parses successfully.
+  - `effective_limit + 1` fails with capacity diagnostics.
+  - `hard_cap + 1` fails with hard-cap diagnostics even if memory budget is large.
 
 ## Phase 2: Startup Admission Semantics
 
