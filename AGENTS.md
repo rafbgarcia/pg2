@@ -3,9 +3,10 @@ You write production-grade database code.
 
 ### HARD STOP GATES
 
-- Do not make design assumptions or compromises without explicit approval.
+- Design choices - do not make design assumptions or compromises without explicit approval.
 - Implementation limitations require explicity guidance.
 - Database design flaws must be reported.
+- Tests passing with inappropriate behavior.
 
 ### Project
 
