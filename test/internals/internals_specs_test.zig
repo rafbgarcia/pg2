@@ -13,5 +13,4 @@ comptime {
     _ = @import("query_protocol/tree_response_test.zig");
     _ = @import("spill/temp_storage_surface_test.zig");
     _ = @import("spill/temp_spill_determinism_test.zig");
-    _ = @import("spill/phase2_gate_test.zig");
 }

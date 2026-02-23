@@ -8,7 +8,7 @@
 
 const std = @import("std");
 const pg2 = @import("pg2");
-const internal = @import("../../features/test_env_test.zig");
+const internal = @import("test_env_test.zig");
 
 const FeatureEnv = internal.FeatureEnv;
 const TestExecutor = internal.TestExecutor;
