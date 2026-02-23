@@ -3,6 +3,65 @@
 ## Objective
 Queries should degrade performance under memory pressure before failing, using pg2 storage abstractions.
 
+## Review Findings (2026-02-23)
+
+### Context
+- Scope reviewed against code and tests: `src/executor/executor.zig`, `src/executor/external_sort.zig`, `src/executor/hash_aggregate.zig`, `src/executor/joins.zig`, `src/executor/capacity.zig`, `src/server/serialization.zig`, and spill-related tests under `test/`.
+- Full suite status at review time: `zig build test --summary all` passed (`195/195`).
+- Important: passing suite did not cover several spill-path correctness edges listed below.
+
+### Findings (severity ordered)
+
+1. **Critical: collector-backed spill path can skip semantic operators and still serialize full collector output.**
+   - In `executeReadPipeline`, the `spilled && !needs_full_input` branch sets `result.collector` and bypasses post-scan operator application.
+   - Serializer then emits all collector rows directly.
+   - Effect: LIMIT/OFFSET/HAVING (without GROUP) and nested selection are not reliably enforced once query output is collector-backed.
+   - References:
+     - `src/executor/executor.zig` (`executeReadPipeline`, spilled/no-full-input branch)
+     - `src/server/serialization.zig` (`serializeQueryResult`, collector iterator path)
+
+2. **Critical: external sort + spilled output has the same semantic gap for downstream operators.**
+   - External sort may spill sorted output back into collector-backed pages.
+   - Downstream post-sort operators currently run on flat `result.rows`, while serialization emits from `result.collector`.
+   - Effect: downstream LIMIT/OFFSET/HAVING/nested can diverge from emitted rows.
+   - References:
+     - `src/executor/external_sort.zig` (collector reconfiguration for spilled sorted output)
+     - `src/executor/executor.zig` (`applyPostExternalSortOperators` invocation)
+     - `src/server/serialization.zig` (collector-backed header/data emission)
+
+3. **High: Phase 3d/3e scope in this document is not yet fully reflected in code.**
+   - Join path remains nested-loop bounded-capacity (`src/executor/joins.zig`), no hash-spill join implementation.
+   - Capacity model still row-count bounded in key contracts (`src/executor/capacity.zig`) and join strategy enum remains nested-loop only (`src/executor/executor.zig`).
+   - `phase3_gate_test.zig` described in this workfront is not present in current tree.
+
+4. **Medium: projection correctness on collector-backed outputs is partially unresolved.**
+   - Flat projection logic mutates `result.rows`, while collector serialization reads collector rows.
+   - Some queries can still appear correct (for example identity projection on one-column schemas), but this is not a sound contract for general multi-column/computed projections.
+   - Reference:
+     - `src/executor/projections.zig` vs `src/server/serialization.zig` collector path
+
+### Hard-stop policy for follow-up sessions
+- Do **not** continue Phase 3 feature expansion until semantic correctness is restored for collector-backed paths.
+- Treat collector-backed post-operator semantics as a release blocker (wrong results risk).
+
+### Recommended execution order (handoff-ready)
+1. **Safety slice first**: fail closed for unsupported collector-backed post-ops (explicit error, never silent wrong results).
+2. Add regression tests covering spill + LIMIT/OFFSET/HAVING and spill + external sort + LIMIT/OFFSET.
+3. Implement a unified operator input/output contract for post-scan pipeline stages:
+   - Each stage must consume either flat rows or spill iterator/output descriptor.
+   - Each stage must produce either flat rows or spill descriptor with consistent row-count semantics.
+4. Resolve collector-backed projection semantics (either projection-aware collector stage or operator descriptor chain that applies projection before serialization).
+5. Resume Phase 3d (hash join spill), Phase 3e capacity migration, then add `phase3_gate_test.zig`.
+
+### Progress Update (2026-02-23, after review)
+- Safety slice is partially landed:
+  - Collector-backed wrong-result risk for LIMIT/OFFSET is removed by explicit collector-window semantics in executor/serialization.
+  - Collector-backed projection now rewrites spill rows before serialization (flat field + computed select expressions).
+  - Regression coverage exists for spill + LIMIT, spill + OFFSET+LIMIT, and spill + external-sort + LIMIT.
+  - Regression coverage now includes spill + flat projection and spill + computed projection.
+  - Remaining fail-closed guard currently covers collector-backed HAVING and nested selection.
+- The unified operator I/O contract (flat buffer vs spill descriptor/iterator chaining) is still pending and remains the next major step.
+
 ## Non-Negotiables
 1. Core logic must use `Storage` abstraction for temp/spill I/O.
 2. Fail only on hard-stop conditions (disk failures, corruption, impossible resource limits).

@@ -238,3 +238,147 @@ test "spill replay from same initial state produces identical results" {
     try std.testing.expectEqual(len_a, len_b);
     try std.testing.expectEqualSlices(u8, result_a[0..len_a], result_b[0..len_b]);
 }
+
+test "collector-backed spill path applies limit correctly" {
+    var env: FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\LimitSpillTable {
+        \\  field(id, i64, notNull, primaryKey)
+        \\}
+    );
+
+    try insertRows(executor, "LimitSpillTable", 4200);
+
+    const result = try executor.run(
+        "LimitSpillTable |> limit(10) |> inspect {}",
+    );
+
+    try std.testing.expect(std.mem.startsWith(u8, result, "OK returned_rows=10 "));
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            result,
+            "spill_triggered=true",
+        ) != null,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n") != null);
+}
+
+test "collector-backed external sort spill applies limit correctly" {
+    var env: FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\SortLimitSpillTable {
+        \\  field(id, i64, notNull, primaryKey)
+        \\}
+    );
+
+    try insertRows(executor, "SortLimitSpillTable", 4200);
+
+    const result = try executor.run(
+        "SortLimitSpillTable |> sort(id desc) |> limit(10) |> inspect {}",
+    );
+
+    try std.testing.expect(std.mem.startsWith(u8, result, "OK returned_rows=10 "));
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            result,
+            "spill_triggered=true",
+        ) != null,
+    );
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n4200\n4199\n4198\n4197\n4196\n4195\n4194\n4193\n4192\n4191\n") != null);
+}
+
+test "collector-backed spill path applies offset then limit correctly" {
+    var env: FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\OffsetLimitSpillTable {
+        \\  field(id, i64, notNull, primaryKey)
+        \\}
+    );
+
+    try insertRows(executor, "OffsetLimitSpillTable", 4200);
+
+    const result = try executor.run(
+        "OffsetLimitSpillTable |> offset(100) |> limit(5) |> inspect {}",
+    );
+
+    try std.testing.expect(std.mem.startsWith(u8, result, "OK returned_rows=5 "));
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n101\n102\n103\n104\n105\n") != null);
+}
+
+test "collector-backed spill path applies flat column projection correctly" {
+    var env: FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\ProjectionSpillTable {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(score, i64, notNull)
+        \\}
+    );
+
+    var i: u32 = 1;
+    while (i <= 4200) : (i += 1) {
+        var query_buf: [160]u8 = undefined;
+        const query = std.fmt.bufPrint(
+            &query_buf,
+            "ProjectionSpillTable |> insert(id = {d}, score = {d}) {{}}",
+            .{ i, i * 2 },
+        ) catch unreachable;
+        _ = try executor.run(query);
+    }
+
+    const result = try executor.run(
+        "ProjectionSpillTable |> limit(3) |> inspect { score }",
+    );
+
+    try std.testing.expect(std.mem.startsWith(u8, result, "OK returned_rows=3 "));
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n2\n4\n6\n") != null);
+}
+
+test "collector-backed spill path applies computed projection correctly" {
+    var env: FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\ComputedProjectionSpillTable {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(score, i64, notNull)
+        \\}
+    );
+
+    var i: u32 = 1;
+    while (i <= 4200) : (i += 1) {
+        var query_buf: [192]u8 = undefined;
+        const query = std.fmt.bufPrint(
+            &query_buf,
+            "ComputedProjectionSpillTable |> insert(id = {d}, score = {d}) {{}}",
+            .{ i, i * 10 },
+        ) catch unreachable;
+        _ = try executor.run(query);
+    }
+
+    const result = try executor.run(
+        "ComputedProjectionSpillTable |> offset(2) |> limit(2) |> inspect { plus_one: score + 1 }",
+    );
+
+    try std.testing.expect(std.mem.startsWith(u8, result, "OK returned_rows=2 "));
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n31\n41\n") != null);
+}

@@ -28,6 +28,7 @@ const projections_mod = @import("projections.zig");
 const spill_collector_mod = @import("spill_collector.zig");
 const external_sort_mod = @import("external_sort.zig");
 const hash_aggregate_mod = @import("hash_aggregate.zig");
+const spill_row_mod = @import("../storage/spill_row.zig");
 const index_scan_planner = @import("index_scan_planner.zig");
 const index_maintenance_mod = @import("index_maintenance.zig");
 const index_key_mod = @import("../storage/index_key.zig");
@@ -35,7 +36,9 @@ const btree_mod = @import("../storage/btree.zig");
 const temp_mod = @import("../storage/temp.zig");
 
 const SpillingResultCollector = spill_collector_mod.SpillingResultCollector;
+const SpillPageWriter = spill_row_mod.SpillPageWriter;
 const TempStorageManager = temp_mod.TempStorageManager;
+const max_spill_pages = spill_collector_mod.max_spill_pages;
 
 const Allocator = std.mem.Allocator;
 const Ast = ast_mod.Ast;
@@ -156,6 +159,9 @@ pub const QueryResult = struct {
     /// the flat `rows` array. Points to the per-slot collector in
     /// `BootstrappedRuntime` — survives through serialization.
     collector: ?*SpillingResultCollector = null,
+    /// Collector-backed output window. Used only when `collector != null`.
+    collector_output_offset: u64 = 0,
+    collector_output_count: u64 = 0,
 
     pub fn init(rows: []ResultRow) QueryResult {
         std.debug.assert(rows.len >= scan_mod.scan_batch_size);
@@ -262,6 +268,9 @@ fn resetQueryResultForStatement(result: *QueryResult) void {
     result.row_count = 0;
     result.stats = .{};
     result.has_error = false;
+    result.collector = null;
+    result.collector_output_offset = 0;
+    result.collector_output_count = 0;
     @memset(result.error_message[0..], 0);
 }
 
@@ -526,6 +535,8 @@ fn executeReadPipeline(
         // No spill — hot batch rows are already in result.rows[0..hot_count].
         result.row_count = ctx.collector.hot_count;
         result.collector = null;
+        result.collector_output_offset = 0;
+        result.collector_output_count = 0;
 
         if (!applyPostScanOperators(ctx, result, model_id, ops, op_count, &caps, string_arena)) {
             captureTempStats(result, ctx.collector);
@@ -538,11 +549,30 @@ fn executeReadPipeline(
     } else if (!needs_full_input) {
         // Spill occurred but no GROUP/SORT needed — let serialization
         // iterate directly from the collector.
+        if (hasUnsupportedCollectorBackedPostOps(ops, op_count) or
+            hasNestedSelection(ctx.ast, pipeline_node))
+        {
+            setError(
+                result,
+                "spill path: collector-backed HAVING or nested selection not implemented",
+            );
+            captureTempStats(result, ctx.collector);
+            return;
+        }
         result.row_count = @intCast(@min(
             ctx.collector.totalRowCount(),
             scan_mod.scan_batch_size,
         ));
         result.collector = ctx.collector;
+        const window = computeCollectorOutputWindow(
+            ctx,
+            ops,
+            op_count,
+            string_arena,
+            ctx.collector.totalRowCount(),
+        );
+        result.collector_output_offset = window.offset;
+        result.collector_output_count = window.count;
     } else if (findSortOpNode(ops, op_count) != null and !hasGroupOp(ops, op_count)) {
         // Spill + sort (no GROUP): external merge sort reads from collector
         // directly, avoiding the scan_batch_size reload truncation.
@@ -552,15 +582,39 @@ fn executeReadPipeline(
             captureTempStats(result, ctx.collector);
             return;
         }
-        // Apply remaining post-sort operators (HAVING, LIMIT, OFFSET).
-        // Sort is done; skip WHERE (already per-chunk) and SORT.
-        if (!applyPostExternalSortOperators(ctx, result, model_id, ops, op_count, &caps, string_arena)) {
-            captureTempStats(result, ctx.collector);
-            return;
-        }
-        if (!applyNestedSelectionJoin(ctx, result, pipeline_node, model_id, &caps, string_arena)) {
-            captureTempStats(result, ctx.collector);
-            return;
+        if (result.collector != null) {
+            // External sort spilled output back to collector-backed pages.
+            // Downstream post-sort operators currently operate on flat rows only.
+            if (hasUnsupportedCollectorBackedPostOps(ops, op_count) or
+                hasNestedSelection(ctx.ast, pipeline_node))
+            {
+                setError(
+                    result,
+                    "spill path: collector-backed HAVING or nested selection not implemented",
+                );
+                captureTempStats(result, ctx.collector);
+                return;
+            }
+            const window = computeCollectorOutputWindow(
+                ctx,
+                ops,
+                op_count,
+                string_arena,
+                ctx.collector.totalRowCount(),
+            );
+            result.collector_output_offset = window.offset;
+            result.collector_output_count = window.count;
+        } else {
+            // Apply remaining post-sort operators (HAVING, LIMIT, OFFSET).
+            // Sort is done; skip WHERE (already per-chunk) and SORT.
+            if (!applyPostExternalSortOperators(ctx, result, model_id, ops, op_count, &caps, string_arena)) {
+                captureTempStats(result, ctx.collector);
+                return;
+            }
+            if (!applyNestedSelectionJoin(ctx, result, pipeline_node, model_id, &caps, string_arena)) {
+                captureTempStats(result, ctx.collector);
+                return;
+            }
         }
     } else {
         // Spill + GROUP (with or without sort): hash aggregation reads from
@@ -595,13 +649,216 @@ fn executeReadPipeline(
         }
     }
 
-    result.stats.rows_matched = result.row_count;
-    if (!applyFlatColumnProjection(ctx, result, pipeline_node, model_id, string_arena)) {
-        captureTempStats(result, ctx.collector);
-        return;
+    if (result.collector) |_| {
+        const collector_rows = collectorWindowCount(
+            result.collector.?.totalRowCount(),
+            result.collector_output_offset,
+            result.collector_output_count,
+        );
+        result.stats.rows_matched = @intCast(@min(collector_rows, std.math.maxInt(u32)));
+        result.row_count = @intCast(@min(collector_rows, scan_mod.scan_batch_size));
+    } else {
+        result.stats.rows_matched = result.row_count;
     }
-    result.stats.rows_returned = result.row_count;
+    if (result.collector) |_| {
+        if (!applyCollectorProjection(
+            ctx,
+            result,
+            pipeline_node,
+            model_id,
+            string_arena,
+        )) {
+            captureTempStats(result, ctx.collector);
+            return;
+        }
+    } else {
+        if (!applyFlatColumnProjection(ctx, result, pipeline_node, model_id, string_arena)) {
+            captureTempStats(result, ctx.collector);
+            return;
+        }
+    }
+    if (result.collector) |_| {
+        const collector_rows = collectorWindowCount(
+            result.collector.?.totalRowCount(),
+            result.collector_output_offset,
+            result.collector_output_count,
+        );
+        result.stats.rows_returned = @intCast(@min(collector_rows, std.math.maxInt(u32)));
+        result.row_count = @intCast(@min(collector_rows, scan_mod.scan_batch_size));
+    } else {
+        result.stats.rows_returned = result.row_count;
+    }
     captureTempStats(result, ctx.collector);
+}
+
+/// Apply selection projection to collector-backed rows.
+///
+/// This rewrites the collector stream into projected rows so serialization
+/// emits the same column shape as flat-buffer execution.
+fn applyCollectorProjection(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    pipeline_node: NodeIndex,
+    model_id: ModelId,
+    string_arena: *scan_mod.StringArena,
+) bool {
+    const collector = result.collector orelse return true;
+    const selection = getPipelineSelection(ctx.ast, pipeline_node) orelse return true;
+    const source_schema = &ctx.catalog.models[model_id].row_schema;
+
+    var descriptors: [scan_mod.max_columns]projections_mod.ProjectionDescriptor = undefined;
+    var descriptor_count: u16 = 0;
+    var has_nested = false;
+
+    var field = ctx.ast.getNode(selection).data.unary;
+    while (field != null_node) {
+        const node = ctx.ast.getNode(field);
+        switch (node.tag) {
+            .select_field => {
+                const col_name = ctx.tokens.getText(node.data.token, ctx.source);
+                const col_idx = source_schema.findColumn(col_name) orelse {
+                    setError(result, "select column not found");
+                    return false;
+                };
+                if (descriptor_count >= scan_mod.max_columns) {
+                    setError(result, "projection column capacity exceeded");
+                    return false;
+                }
+                descriptors[descriptor_count] = .{
+                    .kind = .column,
+                    .column_index = col_idx,
+                };
+                descriptor_count += 1;
+            },
+            .select_computed => {
+                const expr_node = node.data.unary;
+                if (expr_node == null_node) {
+                    setError(result, "computed select expression missing");
+                    return false;
+                }
+                if (descriptor_count >= scan_mod.max_columns) {
+                    setError(result, "projection column capacity exceeded");
+                    return false;
+                }
+                descriptors[descriptor_count] = .{
+                    .kind = .expression,
+                    .expr_node = expr_node,
+                };
+                descriptor_count += 1;
+            },
+            .select_nested => has_nested = true,
+            else => {},
+        }
+        field = node.next;
+    }
+
+    // Nested selection is guarded earlier for collector-backed paths.
+    if (has_nested) return true;
+    if (descriptor_count == 0) return true;
+
+    var iter = collector.iterator();
+    var read_arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
+    var read_arena = scan_mod.StringArena.init(&read_arena_buf);
+    var input_row = scan_mod.ResultRow.init();
+
+    var output_page_ids: [max_spill_pages]u64 = undefined;
+    var output_page_count: u32 = 0;
+    var output_rows: u64 = 0;
+    var writer = SpillPageWriter.init();
+
+    while (true) {
+        read_arena.reset();
+        const has_row = iter.next(&input_row, &read_arena) catch {
+            setError(result, "spill projection read failed");
+            return false;
+        };
+        if (!has_row) break;
+
+        var projected_row = scan_mod.ResultRow.init();
+        projected_row.row_id = input_row.row_id;
+        projected_row.column_count = descriptor_count;
+
+        for (descriptors[0..descriptor_count], 0..) |descriptor, out_idx| {
+            switch (descriptor.kind) {
+                .column => {
+                    if (descriptor.column_index >= input_row.column_count) {
+                        setError(result, "projection column out of bounds");
+                        return false;
+                    }
+                    projected_row.values[out_idx] = input_row.values[descriptor.column_index];
+                },
+                .expression => {
+                    var exec_eval = evalContextForExec(ctx, string_arena);
+                    const value = filter_mod.evaluateExpressionFull(
+                        ctx.ast,
+                        ctx.tokens,
+                        ctx.source,
+                        descriptor.expr_node,
+                        input_row.values[0..input_row.column_count],
+                        source_schema,
+                        null,
+                        &exec_eval.eval_ctx,
+                    ) catch {
+                        setError(result, "select computed expression evaluation failed");
+                        return false;
+                    };
+                    projected_row.values[out_idx] = value;
+                },
+            }
+        }
+
+        const appended = writer.appendRow(&projected_row) catch {
+            setError(result, "spill projection write failed");
+            return false;
+        };
+        if (!appended) {
+            if (output_page_count >= max_spill_pages) {
+                setError(result, "spill projection temp page budget exhausted");
+                return false;
+            }
+            const payload = writer.finalize();
+            const page_id = collector.temp_mgr.allocateAndWrite(payload, temp_mod.TempPage.null_page_id) catch {
+                setError(result, "spill projection temp page budget exhausted");
+                return false;
+            };
+            output_page_ids[output_page_count] = page_id;
+            output_page_count += 1;
+            writer.reset();
+            const retried = writer.appendRow(&projected_row) catch {
+                setError(result, "spill projection write failed");
+                return false;
+            };
+            std.debug.assert(retried);
+        }
+        output_rows += 1;
+    }
+
+    if (writer.row_count > 0) {
+        if (output_page_count >= max_spill_pages) {
+            setError(result, "spill projection temp page budget exhausted");
+            return false;
+        }
+        const payload = writer.finalize();
+        const page_id = collector.temp_mgr.allocateAndWrite(payload, temp_mod.TempPage.null_page_id) catch {
+            setError(result, "spill projection temp page budget exhausted");
+            return false;
+        };
+        output_page_ids[output_page_count] = page_id;
+        output_page_count += 1;
+    }
+
+    @memcpy(
+        collector.spill_page_ids[0..output_page_count],
+        output_page_ids[0..output_page_count],
+    );
+    collector.spill_page_count = output_page_count;
+    collector.hot_count = 0;
+    collector.hot_bytes = 0;
+    collector.total_rows = output_rows;
+    collector.iteration_started = false;
+    result.collector = collector;
+
+    return true;
 }
 
 /// Attempt a PK index scan for the given WHERE clause. Returns true if
@@ -972,6 +1229,123 @@ fn hasFullInputOperators(
             .group_op, .sort_op => return true,
             else => {},
         }
+    }
+    return false;
+}
+
+/// Returns true when the pipeline contains post-scan operators that currently
+/// require flat in-memory rows and are not safe with collector-backed output.
+fn hasUnsupportedCollectorBackedPostOps(
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+) bool {
+    var i: u16 = 0;
+    while (i < op_count) : (i += 1) {
+        switch (ops[i].kind) {
+            .having_filter => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+const CollectorOutputWindow = struct {
+    offset: u64,
+    count: u64,
+};
+
+/// Compute LIMIT/OFFSET window over a collector-backed row stream.
+/// Applies operators in pipeline order against `total_rows`.
+fn computeCollectorOutputWindow(
+    ctx: *const ExecContext,
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+    string_arena: *scan_mod.StringArena,
+    total_rows: u64,
+) CollectorOutputWindow {
+    var offset: u64 = 0;
+    var count: u64 = total_rows;
+
+    var i: u16 = 0;
+    while (i < op_count) : (i += 1) {
+        const op = ops[i];
+        switch (op.kind) {
+            .limit_op => {
+                const limit = evaluateCollectorCountExpr(ctx, op.node, string_arena) orelse continue;
+                if (count > limit) count = limit;
+            },
+            .offset_op => {
+                const skip = evaluateCollectorCountExpr(ctx, op.node, string_arena) orelse continue;
+                if (skip >= count) {
+                    offset +|= count;
+                    count = 0;
+                } else {
+                    offset +|= skip;
+                    count -= skip;
+                }
+            },
+            else => {},
+        }
+    }
+
+    return .{
+        .offset = offset,
+        .count = count,
+    };
+}
+
+fn evaluateCollectorCountExpr(
+    ctx: *const ExecContext,
+    op_node: NodeIndex,
+    string_arena: *scan_mod.StringArena,
+) ?u64 {
+    const node = ctx.ast.getNode(op_node);
+    const expr = node.data.unary;
+    if (expr == null_node) return null;
+
+    var exec_eval = evalContextForExec(ctx, string_arena);
+    const value = filter_mod.evaluateExpressionFull(
+        ctx.ast,
+        ctx.tokens,
+        ctx.source,
+        expr,
+        &.{},
+        &RowSchema{},
+        null,
+        &exec_eval.eval_ctx,
+    ) catch return null;
+
+    return numericToCollectorCount(value);
+}
+
+fn numericToCollectorCount(value: Value) ?u64 {
+    return switch (value) {
+        .i8 => |v| if (v >= 0) @intCast(v) else 0,
+        .i16 => |v| if (v >= 0) @intCast(v) else 0,
+        .i32 => |v| if (v >= 0) @intCast(v) else 0,
+        .i64 => |v| if (v >= 0) @intCast(v) else 0,
+        .u8 => |v| v,
+        .u16 => |v| v,
+        .u32 => |v| v,
+        .u64 => |v| v,
+        else => null,
+    };
+}
+
+fn collectorWindowCount(total_rows: u64, offset: u64, count: u64) u64 {
+    if (offset >= total_rows) return 0;
+    const available = total_rows - offset;
+    return @min(available, count);
+}
+
+/// Returns true if the selection set contains at least one nested relation.
+fn hasNestedSelection(tree: *const Ast, pipeline_node: NodeIndex) bool {
+    const selection = getPipelineSelection(tree, pipeline_node) orelse return false;
+    var field = tree.getNode(selection).data.unary;
+    while (field != null_node) {
+        const node = tree.getNode(field);
+        if (node.tag == .select_nested) return true;
+        field = node.next;
     }
     return false;
 }

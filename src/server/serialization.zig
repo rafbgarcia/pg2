@@ -45,7 +45,14 @@ pub fn serializeQueryResult(
     const returned_rows: u32 = if (tree_projection) |projection|
         countProtocolRootRows(result, &projection)
     else if (result.collector) |collector|
-        @intCast(@min(collector.totalRowCount(), std.math.maxInt(u32)))
+        @intCast(@min(
+            collectorWindowCount(
+                collector.totalRowCount(),
+                result.collector_output_offset,
+                result.collector_output_count,
+            ),
+            std.math.maxInt(u32),
+        ))
     else
         result.row_count;
 
@@ -79,11 +86,19 @@ pub fn serializeQueryResult(
         var arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
         var arena = StringArena.init(&arena_buf);
         var out = ResultRow.init();
+        var skip = result.collector_output_offset;
+        var remaining = result.collector_output_count;
         while (true) {
+            if (remaining == 0) break;
             arena.reset();
             const has_row = iter.next(&out, &arena) catch break;
             if (!has_row) break;
+            if (skip > 0) {
+                skip -= 1;
+                continue;
+            }
             try serializeRowColumns(writer, &out);
+            remaining -= 1;
         }
     } else {
         // Standard flat-array path.
@@ -101,6 +116,12 @@ pub fn serializeQueryResult(
             catalog.snapshotOverflowReclaimStats(),
         );
     }
+}
+
+fn collectorWindowCount(total_rows: u64, offset: u64, count: u64) u64 {
+    if (offset >= total_rows) return 0;
+    const available = total_rows - offset;
+    return @min(available, count);
 }
 
 fn serializeInspectStats(
