@@ -55,6 +55,7 @@ Queries should degrade performance under memory pressure before failing, using p
 
 ### Progress Update (2026-02-23, after review)
 - Safety slice is partially landed:
+  - Executor now uses an explicit post-scan row-set contract (`flat` vs `spill stream + window`) to represent operator outputs; this is the first concrete step toward Phase 3e operator I/O unification.
   - Collector-backed wrong-result risk for LIMIT/OFFSET is removed by explicit collector-window semantics in executor/serialization.
   - Collector-backed HAVING now executes with stream-stage semantics (and preserves pipeline order interactions with LIMIT/OFFSET).
   - Collector-backed projection now rewrites spill rows before serialization (flat field + computed select expressions).

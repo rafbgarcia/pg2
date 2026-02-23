@@ -185,6 +185,20 @@ pub const QueryResult = struct {
     }
 };
 
+pub const SpillRowSet = struct {
+    collector: *SpillingResultCollector,
+    offset: u64,
+    count: u64,
+};
+
+/// Output row-set contract for post-scan operator chaining.
+/// `flat` carries in-memory row count in `result.rows`.
+/// `spill` carries a collector stream view plus visible window.
+pub const RowSet = union(enum) {
+    flat: u16,
+    spill: SpillRowSet,
+};
+
 /// Execution context passed through the pipeline.
 pub const ExecContext = struct {
     catalog: *Catalog,
@@ -272,6 +286,41 @@ fn resetQueryResultForStatement(result: *QueryResult) void {
     result.collector_output_offset = 0;
     result.collector_output_count = 0;
     @memset(result.error_message[0..], 0);
+}
+
+fn applyRowSetToResult(result: *QueryResult, row_set: RowSet) void {
+    switch (row_set) {
+        .flat => |count| {
+            result.row_count = count;
+            result.collector = null;
+            result.collector_output_offset = 0;
+            result.collector_output_count = 0;
+        },
+        .spill => |spill| {
+            result.row_count = @intCast(@min(
+                collectorWindowCount(
+                    spill.collector.totalRowCount(),
+                    spill.offset,
+                    spill.count,
+                ),
+                scan_mod.scan_batch_size,
+            ));
+            result.collector = spill.collector;
+            result.collector_output_offset = spill.offset;
+            result.collector_output_count = spill.count;
+        },
+    }
+}
+
+fn rowSetVisibleCount(row_set: RowSet) u64 {
+    return switch (row_set) {
+        .flat => |count| count,
+        .spill => |spill| collectorWindowCount(
+            spill.collector.totalRowCount(),
+            spill.offset,
+            spill.count,
+        ),
+    };
 }
 
 fn accumulateStatementStats(total: *ExecStats, current: *const ExecStats) void {
@@ -530,13 +579,12 @@ fn executeReadPipeline(
     // --- 4. Post-scan: materialize final result ---
     const spilled = ctx.collector.spillTriggered();
     const needs_full_input = hasFullInputOperators(ops, op_count);
+    var output_rows: RowSet = .{ .flat = 0 };
 
     if (!spilled) {
         // No spill — hot batch rows are already in result.rows[0..hot_count].
-        result.row_count = ctx.collector.hot_count;
-        result.collector = null;
-        result.collector_output_offset = 0;
-        result.collector_output_count = 0;
+        output_rows = .{ .flat = ctx.collector.hot_count };
+        applyRowSetToResult(result, output_rows);
 
         if (!applyPostScanOperators(ctx, result, model_id, ops, op_count, &caps, string_arena)) {
             captureTempStats(result, ctx.collector);
@@ -546,6 +594,7 @@ fn executeReadPipeline(
             captureTempStats(result, ctx.collector);
             return;
         }
+        output_rows = .{ .flat = result.row_count };
     } else if (!needs_full_input) {
         // Spill occurred but no GROUP/SORT needed — let serialization
         // iterate directly from the collector.
@@ -559,11 +608,14 @@ fn executeReadPipeline(
             captureTempStats(result, ctx.collector);
             return;
         }
-        result.row_count = @intCast(@min(
-            ctx.collector.totalRowCount(),
-            scan_mod.scan_batch_size,
-        ));
-        result.collector = ctx.collector;
+        output_rows = .{
+            .spill = .{
+                .collector = ctx.collector,
+                .offset = 0,
+                .count = ctx.collector.totalRowCount(),
+            },
+        };
+        applyRowSetToResult(result, output_rows);
         if (hasCollectorHavingOp(ops, op_count)) {
             if (!rewriteCollectorForPostOps(
                 ctx,
@@ -576,8 +628,13 @@ fn executeReadPipeline(
                 captureTempStats(result, ctx.collector);
                 return;
             }
-            result.collector_output_offset = 0;
-            result.collector_output_count = result.collector.?.totalRowCount();
+            output_rows = .{
+                .spill = .{
+                    .collector = result.collector.?,
+                    .offset = 0,
+                    .count = result.collector.?.totalRowCount(),
+                },
+            };
         } else {
             const window = computeCollectorOutputWindow(
                 ctx,
@@ -586,8 +643,13 @@ fn executeReadPipeline(
                 string_arena,
                 ctx.collector.totalRowCount(),
             );
-            result.collector_output_offset = window.offset;
-            result.collector_output_count = window.count;
+            output_rows = .{
+                .spill = .{
+                    .collector = ctx.collector,
+                    .offset = window.offset,
+                    .count = window.count,
+                },
+            };
         }
     } else if (findSortOpNode(ops, op_count) != null and !hasGroupOp(ops, op_count)) {
         // Spill + sort (no GROUP): external merge sort reads from collector
@@ -623,8 +685,13 @@ fn executeReadPipeline(
                     captureTempStats(result, ctx.collector);
                     return;
                 }
-                result.collector_output_offset = 0;
-                result.collector_output_count = result.collector.?.totalRowCount();
+                output_rows = .{
+                    .spill = .{
+                        .collector = result.collector.?,
+                        .offset = 0,
+                        .count = result.collector.?.totalRowCount(),
+                    },
+                };
             } else {
                 const window = computeCollectorOutputWindow(
                     ctx,
@@ -633,8 +700,13 @@ fn executeReadPipeline(
                     string_arena,
                     ctx.collector.totalRowCount(),
                 );
-                result.collector_output_offset = window.offset;
-                result.collector_output_count = window.count;
+                output_rows = .{
+                    .spill = .{
+                        .collector = result.collector.?,
+                        .offset = window.offset,
+                        .count = window.count,
+                    },
+                };
             }
         } else {
             // Apply remaining post-sort operators (HAVING, LIMIT, OFFSET).
@@ -647,6 +719,7 @@ fn executeReadPipeline(
                 captureTempStats(result, ctx.collector);
                 return;
             }
+            output_rows = .{ .flat = result.row_count };
         }
     } else {
         // Spill + GROUP (with or without sort): hash aggregation reads from
@@ -679,19 +752,12 @@ fn executeReadPipeline(
             captureTempStats(result, ctx.collector);
             return;
         }
+        output_rows = .{ .flat = result.row_count };
     }
 
-    if (result.collector) |_| {
-        const collector_rows = collectorWindowCount(
-            result.collector.?.totalRowCount(),
-            result.collector_output_offset,
-            result.collector_output_count,
-        );
-        result.stats.rows_matched = @intCast(@min(collector_rows, std.math.maxInt(u32)));
-        result.row_count = @intCast(@min(collector_rows, scan_mod.scan_batch_size));
-    } else {
-        result.stats.rows_matched = result.row_count;
-    }
+    applyRowSetToResult(result, output_rows);
+    const matched_count = rowSetVisibleCount(output_rows);
+    result.stats.rows_matched = @intCast(@min(matched_count, std.math.maxInt(u32)));
     if (result.collector) |_| {
         if (!applyCollectorProjection(
             ctx,
@@ -703,23 +769,23 @@ fn executeReadPipeline(
             captureTempStats(result, ctx.collector);
             return;
         }
+        output_rows = .{
+            .spill = .{
+                .collector = result.collector.?,
+                .offset = result.collector_output_offset,
+                .count = result.collector_output_count,
+            },
+        };
     } else {
         if (!applyFlatColumnProjection(ctx, result, pipeline_node, model_id, string_arena)) {
             captureTempStats(result, ctx.collector);
             return;
         }
+        output_rows = .{ .flat = result.row_count };
     }
-    if (result.collector) |_| {
-        const collector_rows = collectorWindowCount(
-            result.collector.?.totalRowCount(),
-            result.collector_output_offset,
-            result.collector_output_count,
-        );
-        result.stats.rows_returned = @intCast(@min(collector_rows, std.math.maxInt(u32)));
-        result.row_count = @intCast(@min(collector_rows, scan_mod.scan_batch_size));
-    } else {
-        result.stats.rows_returned = result.row_count;
-    }
+    applyRowSetToResult(result, output_rows);
+    const returned_count = rowSetVisibleCount(output_rows);
+    result.stats.rows_returned = @intCast(@min(returned_count, std.math.maxInt(u32)));
     captureTempStats(result, ctx.collector);
 }
 
