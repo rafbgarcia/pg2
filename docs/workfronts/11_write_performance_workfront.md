@@ -5,12 +5,13 @@ Eliminate O(n²) insert degradation by wiring B+ tree indexes into constraint en
 
 ## Current State
 - **Phases 1-4 complete.** PK B+ tree indexes are auto-created and used for uniqueness checks (O(log n) vs O(n²) heap scan), PK index-assisted point/range scans work, WAL group commit reduces fsyncs from N to ~1 for N sequential inserts, and all unique indexes (PK and non-PK) now have B+ trees for O(log n) constraint enforcement including FK checks.
+- **Phase 4 follow-up fix complete.** Non-PK unique checks are now MVCC-aware when using B+ trees (dead entries from deleted/invisible rows no longer cause false duplicates), and dedicated Phase 4 feature coverage is in place.
 - **Phase 5 next.** Multi-row INSERT syntax and bulk insert path.
 
 ## Why (original motivation, for context)
 - INSERT used to perform a full heap scan per row to enforce PK uniqueness. Inserting N rows cost O(N²). 4200 inserts triggered ~8.8M row comparisons. **Fixed by Phase 1.**
 - WAL committed (fsync) on every transaction. 4200 inserts = 4200 fsyncs. **Fixed by Phase 3.**
-- FK and non-PK unique checks still do full heap scans per row. **Phase 4 target.**
+- FK and non-PK unique checks used to do full heap scans per row. **Fixed by Phase 4.**
 - No multi-row INSERT syntax exists. **Phase 5 target.**
 
 ## Dependencies
@@ -149,7 +150,7 @@ This maintains the clean separation: `loadSchema()` = AST → catalog metadata (
   - DELETE leaves entries intact (same PostgreSQL-style tombstone approach as PK).
   - UPDATE on indexed columns inserts new key; old entry stays as dead pointer.
 
-- **`enforceNonPkUniqueness` uses B+ tree when available.** When `btree_root_page_id != 0`, use B+ tree `find()` instead of `rowExistsForUniqueIndex()` heap scan. Fall back to heap scan when 0 (safety net for indexes created before Phase 4).
+- **`enforceNonPkUniqueness` uses MVCC-aware B+ tree visibility checks when available.** When `btree_root_page_id != 0` and `column_count == 1`, use index lookup plus heap visibility (`indexKeyVisibleInIndex`) instead of `rowExistsForUniqueIndex()` heap scan. Invisible/deleted rows trigger dead-index-entry cleanup. Fall back to heap scan when no B+ tree is present (safety net for indexes created before Phase 4).
 
 - **Single-column unique indexes only (this phase).** Composite unique indexes (`column_count > 1`) require multi-column key encoding (concatenated sort-preserving encoding with length prefixes). This is deferred — composite unique indexes continue using the heap scan path. PK is already single-column only (workfront non-goal).
 
@@ -184,6 +185,10 @@ This maintains the clean separation: `loadSchema()` = AST → catalog metadata (
 - Integration: DELETE leaves unique index entries intact; re-inserting the same unique value succeeds after delete (MVCC-aware check detects invisible row).
 - Regression: all existing feature and stress tests pass (critical: existing PK-only behavior unchanged).
 - Determinism: index-backed constraint checks produce identical results under simulation replay.
+
+### Follow-up (post-Phase 4)
+- Commit `3ba7439` fixed MVCC visibility handling for non-PK unique index checks by threading snapshot/undo/tx-manager context through insert uniqueness enforcement and using `indexKeyVisibleInIndex` for B+ tree-backed checks.
+- Added dedicated Phase 4 integration suite at `test/features/constraints/index_backed_constraints_test.zig` and wired it into `test/features/features_specs_test.zig`.
 
 ## Phase 5: Bulk Insert Path
 
