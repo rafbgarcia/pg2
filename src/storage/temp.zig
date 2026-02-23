@@ -50,6 +50,13 @@ pub const default_region_start_page_id: u64 = 20_000_000;
 /// Default temp page budget per query slot (1024 pages = 8 MB at 8 KB/page).
 pub const default_pages_per_query_slot: u64 = 1024;
 
+/// Dedicated page-id region for parent-local nested spill collectors.
+///
+/// Kept disjoint from the root temp region by reserving one full u16 slot-space
+/// worth of default temp pages before this start.
+pub const nested_region_start_page_id: u64 = default_region_start_page_id +
+    (default_pages_per_query_slot * (std.math.maxInt(u16) + 1));
+
 // ---------------------------------------------------------------------------
 // Error types
 // ---------------------------------------------------------------------------

@@ -69,7 +69,6 @@ const JoinDescriptor = joins_mod.JoinDescriptor;
 
 /// Maximum pipeline operators in a single query.
 pub const max_operators = capacity_mod.max_pipeline_operators;
-const nested_temp_slot_bias: u16 = 32_768;
 
 pub const PlanOp = enum {
     where_filter,
@@ -1895,17 +1894,11 @@ fn initParentLocalNestedCollector(
     ctx: *const ExecContext,
     result: *QueryResult,
 ) ?SpillingResultCollector {
-    const slot_index = std.math.add(
-        u16,
+    const temp_mgr = TempStorageManager.init(
         ctx.query_slot_index,
-        nested_temp_slot_bias,
-    ) catch {
-        setError(result, "nested relation parent-local spill slot overflow");
-        return null;
-    };
-    const temp_mgr = TempStorageManager.initDefault(
-        slot_index,
         ctx.storage,
+        temp_mod.default_pages_per_query_slot,
+        temp_mod.nested_region_start_page_id,
     ) catch {
         setError(result, "nested relation parent-local spill temp init failed");
         return null;
