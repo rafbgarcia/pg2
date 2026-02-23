@@ -508,6 +508,8 @@ test "collector-backed spill path supports nested selection with empty children"
 }
 
 test "nested selection fails explicitly when child scan exceeds in-memory batch" {
+    // Under WF03 Option A, per-parent child subsets must degrade/spill and
+    // preserve exact semantics instead of failing at the in-memory cap.
     var env: FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
@@ -541,12 +543,7 @@ test "nested selection fails explicitly when child scan exceeds in-memory batch"
     const result = try executor.run(
         "User |> inspect { name posts |> sort(id desc) |> limit(1) { id } }",
     );
-    try std.testing.expect(std.mem.startsWith(u8, result, "ERR query: "));
-    try std.testing.expect(
-        std.mem.indexOf(
-            u8,
-            result,
-            "nested relation per-parent child subset exceeds in-memory capacity",
-        ) != null,
-    );
+    try std.testing.expect(!std.mem.startsWith(u8, result, "ERR query: "));
+    try std.testing.expect(std.mem.indexOf(u8, result, "{name:str,posts:[{id:i64}]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"Alice\",[[4200]]\n") != null);
 }

@@ -69,6 +69,7 @@ const JoinDescriptor = joins_mod.JoinDescriptor;
 
 /// Maximum pipeline operators in a single query.
 pub const max_operators = capacity_mod.max_pipeline_operators;
+const nested_temp_slot_bias: u16 = 32_768;
 
 pub const PlanOp = enum {
     where_filter,
@@ -197,6 +198,27 @@ pub const SpillRowSet = struct {
 pub const RowSet = union(enum) {
     flat: u16,
     spill: SpillRowSet,
+};
+
+pub const NestedSpillRowSet = struct {
+    collector: *SpillingResultCollector,
+    offset: u64,
+    count: u64,
+};
+
+pub const NestedFlatRowSet = struct {
+    rows: []ResultRow,
+    count: u16,
+};
+
+/// Parent-local nested operator row source/output descriptor.
+///
+/// This is intentionally separate from root `RowSet` so nested spill
+/// contracts remain parent-scoped and cannot accidentally inherit root-level
+/// semantics.
+pub const NestedRowSet = union(enum) {
+    flat: NestedFlatRowSet,
+    spill: NestedSpillRowSet,
 };
 
 /// Execution context passed through the pipeline.
@@ -1479,6 +1501,7 @@ fn collectorWindowCount(total_rows: u64, offset: u64, count: u64) u64 {
 }
 
 const CollectorPostOpKind = enum {
+    where_filter,
     having_filter,
     limit_op,
     offset_op,
@@ -1513,6 +1536,13 @@ fn rewriteCollectorForPostOps(
     while (i < op_count) : (i += 1) {
         const op = ops[i];
         switch (op.kind) {
+            .where_filter => {
+                stages[stage_count] = .{
+                    .kind = .where_filter,
+                    .node = op.node,
+                };
+                stage_count += 1;
+            },
             .having_filter => {
                 stages[stage_count] = .{
                     .kind = .having_filter,
@@ -1567,7 +1597,7 @@ fn rewriteCollectorForPostOps(
         while (stage_idx < stage_count and keep) : (stage_idx += 1) {
             var stage = &stages[stage_idx];
             switch (stage.kind) {
-                .having_filter => {
+                .where_filter, .having_filter => {
                     const predicate = ctx.ast.getNode(stage.node).data.unary;
                     if (predicate == null_node) continue;
 
@@ -1854,6 +1884,39 @@ fn applyNestedSelectionJoin(
     return true;
 }
 
+fn nestedRowSetCount(row_set: NestedRowSet) u64 {
+    return switch (row_set) {
+        .flat => |flat| flat.count,
+        .spill => |spill| spill.count,
+    };
+}
+
+fn initParentLocalNestedCollector(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+) ?SpillingResultCollector {
+    const slot_index = std.math.add(
+        u16,
+        ctx.query_slot_index,
+        nested_temp_slot_bias,
+    ) catch {
+        setError(result, "nested relation parent-local spill slot overflow");
+        return null;
+    };
+    const temp_mgr = TempStorageManager.initDefault(
+        slot_index,
+        ctx.storage,
+    ) catch {
+        setError(result, "nested relation parent-local spill temp init failed");
+        return null;
+    };
+    return SpillingResultCollector.init(
+        ctx.nested_rows,
+        temp_mgr,
+        ctx.work_memory_bytes_per_slot,
+    );
+}
+
 fn applySingleNestedSelectionJoinCollector(
     ctx: *const ExecContext,
     result: *QueryResult,
@@ -1915,6 +1978,8 @@ fn applySingleNestedSelectionJoinCollector(
         result,
     ) orelse return false;
     recordNestedJoinPlan(&result.stats.plan);
+    var parent_collector = initParentLocalNestedCollector(ctx, result) orelse
+        return false;
 
     var output_page_ids: [max_spill_pages]u64 = undefined;
     var output_page_count: u32 = 0;
@@ -1942,7 +2007,12 @@ fn applySingleNestedSelectionJoinCollector(
         remaining -= 1;
 
         const left_key = left_row.values[join.left_key_index];
-        var matched_count: u16 = 0;
+        var parent_row_set: NestedRowSet = .{
+            .flat = .{
+                .rows = ctx.nested_rows,
+                .count = 0,
+            },
+        };
         var right_pages_read: u32 = 0;
         nested_match_arena.reset();
         if (!collectNestedMatchesForParent(
@@ -1953,15 +2023,15 @@ fn applySingleNestedSelectionJoinCollector(
             left_key,
             &nested_decode_arena,
             &nested_match_arena,
-            ctx.nested_rows,
-            &matched_count,
+            &parent_collector,
+            &parent_row_set,
             &right_pages_read,
         )) {
             return false;
         }
         result.stats.pages_read +|= right_pages_read;
 
-        if (matched_count == 0) {
+        if (nestedRowSetCount(parent_row_set) == 0) {
             if (!appendNestedCollectorOutputRow(
                 result,
                 collector,
@@ -1978,11 +2048,15 @@ fn applySingleNestedSelectionJoinCollector(
 
         var parent_subset = QueryResult{
             .rows = ctx.nested_rows,
-            .row_count = matched_count,
+            .row_count = @intCast(@min(
+                nestedRowSetCount(parent_row_set),
+                scan_mod.scan_batch_size,
+            )),
         };
         if (!applyNestedReadOperatorsPerParent(
             ctx,
             &parent_subset,
+            &parent_row_set,
             target_model_id,
             &nested_ops,
             nested_op_count,
@@ -1993,7 +2067,7 @@ fn applySingleNestedSelectionJoinCollector(
             return false;
         }
 
-        if (parent_subset.row_count == 0) {
+        if (nestedRowSetCount(parent_row_set) == 0) {
             if (!appendNestedCollectorOutputRow(
                 result,
                 collector,
@@ -2005,22 +2079,53 @@ fn applySingleNestedSelectionJoinCollector(
                 null,
                 target_schema.column_count,
             )) return false;
-        } else {
-            var nested_idx: u16 = 0;
-            while (nested_idx < parent_subset.row_count) : (nested_idx += 1) {
-                const nested_row = parent_subset.rows[nested_idx];
-                if (!appendNestedCollectorOutputRow(
-                    result,
-                    collector,
-                    &writer,
-                    &output_page_ids,
-                    &output_page_count,
-                    &output_rows,
-                    &left_row,
-                    &nested_row,
-                    target_schema.column_count,
-                )) return false;
-            }
+            continue;
+        }
+
+        switch (parent_row_set) {
+            .flat => |flat| {
+                var nested_idx: u16 = 0;
+                while (nested_idx < flat.count) : (nested_idx += 1) {
+                    const nested_row = flat.rows[nested_idx];
+                    if (!appendNestedCollectorOutputRow(
+                        result,
+                        collector,
+                        &writer,
+                        &output_page_ids,
+                        &output_page_count,
+                        &output_rows,
+                        &left_row,
+                        &nested_row,
+                        target_schema.column_count,
+                    )) return false;
+                }
+            },
+            .spill => |spill| {
+                spill.collector.iteration_started = false;
+                var nested_iter = spill.collector.iterator();
+                var nested_read_arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
+                var nested_read_arena = scan_mod.StringArena.init(&nested_read_arena_buf);
+                var nested_row = ResultRow.init();
+                while (true) {
+                    nested_read_arena.reset();
+                    const has_nested = nested_iter.next(&nested_row, &nested_read_arena) catch {
+                        setError(result, "nested relation right-side spill read failed");
+                        return false;
+                    };
+                    if (!has_nested) break;
+                    if (!appendNestedCollectorOutputRow(
+                        result,
+                        collector,
+                        &writer,
+                        &output_page_ids,
+                        &output_page_count,
+                        &output_rows,
+                        &left_row,
+                        &nested_row,
+                        target_schema.column_count,
+                    )) return false;
+                }
+            },
         }
     }
 
@@ -2165,12 +2270,18 @@ fn collectNestedMatchesForParent(
     left_key: Value,
     decode_arena: *scan_mod.StringArena,
     match_arena: *scan_mod.StringArena,
-    out_rows: []ResultRow,
-    out_count: *u16,
+    parent_collector: *SpillingResultCollector,
+    out_row_set: *NestedRowSet,
     out_pages_read: *u32,
 ) bool {
     const nested_scan_chunk_rows: usize = 64;
-    out_count.* = 0;
+    parent_collector.reset();
+    out_row_set.* = .{
+        .flat = .{
+            .rows = parent_collector.hot_batch,
+            .count = 0,
+        },
+    };
     out_pages_read.* = 0;
     var right_cursor = scan_mod.ScanCursor.init();
 
@@ -2203,20 +2314,37 @@ fn collectNestedMatchesForParent(
             if (row_mod.compareValues(left_key, right_row.values[right_key_index]) != .eq) {
                 continue;
             }
-            if (out_count.* >= out_rows.len) {
-                setError(result, "nested relation per-parent child subset exceeds in-memory capacity");
-                return false;
-            }
+            var copied = ResultRow.init();
             copyNestedMatchRowIntoArena(
                 &right_row,
-                &out_rows[out_count.*],
+                &copied,
                 match_arena,
             ) catch {
                 setError(result, "nested relation parent string arena exhausted");
                 return false;
             };
-            out_count.* += 1;
+            parent_collector.appendRow(&copied) catch {
+                setError(result, "nested relation parent-local spill append failed");
+                return false;
+            };
         }
+    }
+
+    if (parent_collector.spillTriggered()) {
+        out_row_set.* = .{
+            .spill = .{
+                .collector = parent_collector,
+                .offset = 0,
+                .count = parent_collector.totalRowCount(),
+            },
+        };
+    } else {
+        out_row_set.* = .{
+            .flat = .{
+                .rows = parent_collector.hot_batch,
+                .count = parent_collector.hot_count,
+            },
+        };
     }
 
     return true;
@@ -2282,6 +2410,8 @@ fn applySingleNestedSelectionJoin(
         result,
     ) orelse return false;
     recordNestedJoinPlan(&result.stats.plan);
+    var parent_collector = initParentLocalNestedCollector(ctx, result) orelse
+        return false;
 
     // Per-parent nested semantics:
     // apply nested child pipeline operators to each parent's child subset,
@@ -2292,7 +2422,12 @@ fn applySingleNestedSelectionJoin(
         const left_row = left_copy[left_idx];
         const left_key = left_row.values[join.left_key_index];
 
-        var matched_count: u16 = 0;
+        var parent_row_set: NestedRowSet = .{
+            .flat = .{
+                .rows = ctx.nested_rows,
+                .count = 0,
+            },
+        };
         var right_pages_read: u32 = 0;
         nested_match_arena.reset();
         if (!collectNestedMatchesForParent(
@@ -2303,15 +2438,15 @@ fn applySingleNestedSelectionJoin(
             left_key,
             &nested_decode_arena,
             &nested_match_arena,
-            ctx.nested_rows,
-            &matched_count,
+            &parent_collector,
+            &parent_row_set,
             &right_pages_read,
         )) {
             return false;
         }
         result.stats.pages_read +|= right_pages_read;
 
-        if (matched_count == 0) {
+        if (nestedRowSetCount(parent_row_set) == 0) {
             if (@as(usize, output_count) >= caps.join_output_rows) {
                 setError(result, "join output row capacity exceeded");
                 return false;
@@ -2341,11 +2476,15 @@ fn applySingleNestedSelectionJoin(
 
         var parent_subset = QueryResult{
             .rows = ctx.nested_rows,
-            .row_count = matched_count,
+            .row_count = @intCast(@min(
+                nestedRowSetCount(parent_row_set),
+                scan_mod.scan_batch_size,
+            )),
         };
         if (!applyNestedReadOperatorsPerParent(
             ctx,
             &parent_subset,
+            &parent_row_set,
             target_model_id,
             &nested_ops,
             nested_op_count,
@@ -2356,8 +2495,7 @@ fn applySingleNestedSelectionJoin(
             return false;
         }
 
-        var nested_idx: u16 = 0;
-        if (parent_subset.row_count == 0) {
+        if (nestedRowSetCount(parent_row_set) == 0) {
             if (@as(usize, output_count) >= caps.join_output_rows) {
                 setError(result, "join output row capacity exceeded");
                 return false;
@@ -2381,40 +2519,91 @@ fn applySingleNestedSelectionJoin(
             }
             result.rows[output_count] = out;
             output_count += 1;
-        } else {
-            while (nested_idx < parent_subset.row_count) : (nested_idx += 1) {
-                if (@as(usize, output_count) >= caps.join_output_rows) {
-                    setError(result, "join output row capacity exceeded");
-                    return false;
-                }
-                const nested_row = parent_subset.rows[nested_idx];
-                const total_columns = @as(usize, left_row.column_count) +
-                    @as(usize, nested_row.column_count);
-                if (total_columns > scan_mod.max_columns) {
-                    setError(result, "join column capacity exceeded");
-                    return false;
-                }
+            continue;
+        }
 
-                var out = ResultRow.init();
-                out.column_count = @intCast(total_columns);
-                out.row_id = left_row.row_id;
-                @memcpy(
-                    out.values[0..left_row.column_count],
-                    left_row.values[0..left_row.column_count],
-                );
-                var nested_col: u16 = 0;
-                while (nested_col < nested_row.column_count) : (nested_col += 1) {
-                    out.values[left_row.column_count + nested_col] = copyNestedValueIntoArena(
-                        nested_row.values[nested_col],
-                        string_arena,
-                    ) catch {
-                        setError(result, "nested relation output string arena exhausted");
+        switch (parent_row_set) {
+            .flat => |flat| {
+                var nested_idx: u16 = 0;
+                while (nested_idx < flat.count) : (nested_idx += 1) {
+                    if (@as(usize, output_count) >= caps.join_output_rows) {
+                        setError(result, "join output row capacity exceeded");
+                        return false;
+                    }
+                    const nested_row = flat.rows[nested_idx];
+                    const total_columns = @as(usize, left_row.column_count) +
+                        @as(usize, nested_row.column_count);
+                    if (total_columns > scan_mod.max_columns) {
+                        setError(result, "join column capacity exceeded");
+                        return false;
+                    }
+
+                    var out = ResultRow.init();
+                    out.column_count = @intCast(total_columns);
+                    out.row_id = left_row.row_id;
+                    @memcpy(
+                        out.values[0..left_row.column_count],
+                        left_row.values[0..left_row.column_count],
+                    );
+                    var nested_col: u16 = 0;
+                    while (nested_col < nested_row.column_count) : (nested_col += 1) {
+                        out.values[left_row.column_count + nested_col] = copyNestedValueIntoArena(
+                            nested_row.values[nested_col],
+                            string_arena,
+                        ) catch {
+                            setError(result, "nested relation output string arena exhausted");
+                            return false;
+                        };
+                    }
+                    result.rows[output_count] = out;
+                    output_count += 1;
+                }
+            },
+            .spill => |spill| {
+                spill.collector.iteration_started = false;
+                var nested_iter = spill.collector.iterator();
+                var nested_read_arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
+                var nested_read_arena = scan_mod.StringArena.init(&nested_read_arena_buf);
+                var nested_row = ResultRow.init();
+                while (true) {
+                    nested_read_arena.reset();
+                    const has_nested = nested_iter.next(&nested_row, &nested_read_arena) catch {
+                        setError(result, "nested relation right-side spill read failed");
                         return false;
                     };
+                    if (!has_nested) break;
+                    if (@as(usize, output_count) >= caps.join_output_rows) {
+                        setError(result, "join output row capacity exceeded");
+                        return false;
+                    }
+                    const total_columns = @as(usize, left_row.column_count) +
+                        @as(usize, nested_row.column_count);
+                    if (total_columns > scan_mod.max_columns) {
+                        setError(result, "join column capacity exceeded");
+                        return false;
+                    }
+
+                    var out = ResultRow.init();
+                    out.column_count = @intCast(total_columns);
+                    out.row_id = left_row.row_id;
+                    @memcpy(
+                        out.values[0..left_row.column_count],
+                        left_row.values[0..left_row.column_count],
+                    );
+                    var nested_col: u16 = 0;
+                    while (nested_col < nested_row.column_count) : (nested_col += 1) {
+                        out.values[left_row.column_count + nested_col] = copyNestedValueIntoArena(
+                            nested_row.values[nested_col],
+                            string_arena,
+                        ) catch {
+                            setError(result, "nested relation output string arena exhausted");
+                            return false;
+                        };
+                    }
+                    result.rows[output_count] = out;
+                    output_count += 1;
                 }
-                result.rows[output_count] = out;
-                output_count += 1;
-            }
+            },
         }
     }
     result.row_count = output_count;
@@ -2428,66 +2617,167 @@ fn applySingleNestedSelectionJoin(
 fn applyNestedReadOperatorsPerParent(
     ctx: *const ExecContext,
     result: *QueryResult,
+    row_set: *NestedRowSet,
     model_id: ModelId,
     ops: *const [max_operators]OpDescriptor,
     op_count: u16,
     caps: *const capacity_mod.OperatorCapacities,
     string_arena: *scan_mod.StringArena,
 ) bool {
+    var active_row_set = row_set.*;
+    switch (active_row_set) {
+        .flat => |flat| {
+            result.rows = flat.rows;
+            result.row_count = flat.count;
+            result.collector = null;
+            result.collector_output_offset = 0;
+            result.collector_output_count = 0;
+        },
+        .spill => |spill| {
+            result.collector = spill.collector;
+            result.collector_output_offset = spill.offset;
+            result.collector_output_count = spill.count;
+            result.row_count = @intCast(@min(spill.count, scan_mod.scan_batch_size));
+        },
+    }
+
     var group_runtime = GroupRuntime{};
     const schema = &ctx.catalog.models[model_id].row_schema;
     var i: u16 = 0;
     while (i < op_count) : (i += 1) {
         const op = ops[i];
-        switch (op.kind) {
-            .where_filter => applyWhereFilter(
-                ctx,
-                result,
-                op.node,
-                schema,
-                &group_runtime,
-                string_arena,
-            ),
-            .having_filter => applyWhereFilter(
-                ctx,
-                result,
-                op.node,
-                schema,
-                &group_runtime,
-                string_arena,
-            ),
-            .group_op => {
-                if (!aggregation_mod.applyGroup(
-                    ctx,
-                    result,
-                    op.node,
-                    schema,
-                    ops,
-                    op_count,
-                    i,
-                    caps,
-                    &group_runtime,
-                    string_arena,
-                )) return false;
+        switch (active_row_set) {
+            .flat => {
+                switch (op.kind) {
+                    .where_filter => applyWhereFilter(
+                        ctx,
+                        result,
+                        op.node,
+                        schema,
+                        &group_runtime,
+                        string_arena,
+                    ),
+                    .having_filter => applyWhereFilter(
+                        ctx,
+                        result,
+                        op.node,
+                        schema,
+                        &group_runtime,
+                        string_arena,
+                    ),
+                    .group_op => {
+                        if (!aggregation_mod.applyGroup(
+                            ctx,
+                            result,
+                            op.node,
+                            schema,
+                            ops,
+                            op_count,
+                            i,
+                            caps,
+                            &group_runtime,
+                            string_arena,
+                        )) return false;
+                    },
+                    .limit_op => applyLimit(ctx, result, op.node, string_arena),
+                    .offset_op => applyOffset(ctx, result, op.node, &group_runtime, string_arena),
+                    .sort_op => {
+                        if (!applySortNoScratch(
+                            ctx,
+                            result,
+                            op.node,
+                            schema,
+                            caps,
+                            &group_runtime,
+                            string_arena,
+                        )) return false;
+                    },
+                    .inspect_op => {},
+                    .insert_op, .update_op, .delete_op => {},
+                }
+                active_row_set = .{
+                    .flat = .{
+                        .rows = result.rows,
+                        .count = result.row_count,
+                    },
+                };
             },
-            .limit_op => applyLimit(ctx, result, op.node, string_arena),
-            .offset_op => applyOffset(ctx, result, op.node, &group_runtime, string_arena),
-            .sort_op => {
-                if (!applySortNoScratch(
-                    ctx,
-                    result,
-                    op.node,
-                    schema,
-                    caps,
-                    &group_runtime,
-                    string_arena,
-                )) return false;
+            .spill => |spill| {
+                result.collector = spill.collector;
+                result.collector_output_offset = spill.offset;
+                result.collector_output_count = spill.count;
+                switch (op.kind) {
+                    .where_filter, .having_filter, .limit_op, .offset_op => {
+                        var single_op_list: [max_operators]OpDescriptor = undefined;
+                        single_op_list[0] = op;
+                        if (!rewriteCollectorForPostOps(
+                            ctx,
+                            result,
+                            model_id,
+                            &single_op_list,
+                            1,
+                            string_arena,
+                        )) return false;
+                    },
+                    .group_op => {
+                        const spill_collector = result.collector orelse {
+                            setError(result, "nested spill group requires collector");
+                            return false;
+                        };
+                        if (!hash_aggregate_mod.applyHashAggregate(
+                            ctx,
+                            result,
+                            spill_collector,
+                            op.node,
+                            i,
+                            schema,
+                            ops,
+                            op_count,
+                            caps,
+                            &group_runtime,
+                            string_arena,
+                        )) return false;
+                    },
+                    .sort_op => {
+                        const spill_collector = result.collector orelse {
+                            setError(result, "nested spill sort requires collector");
+                            return false;
+                        };
+                        if (!external_sort_mod.applyExternalSort(
+                            ctx,
+                            result,
+                            spill_collector,
+                            op.node,
+                            schema,
+                            string_arena,
+                        )) return false;
+                    },
+                    .inspect_op => {},
+                    .insert_op, .update_op, .delete_op => {},
+                }
+
+                if (result.collector) |current_collector| {
+                    active_row_set = .{
+                        .spill = .{
+                            .collector = current_collector,
+                            .offset = 0,
+                            .count = current_collector.totalRowCount(),
+                        },
+                    };
+                } else {
+                    active_row_set = .{
+                        .flat = .{
+                            .rows = result.rows,
+                            .count = result.row_count,
+                        },
+                    };
+                }
             },
-            .inspect_op => {},
-            .insert_op, .update_op, .delete_op => {},
         }
         if (result.has_error) return false;
     }
+
+    row_set.* = active_row_set;
     return true;
 }
 
