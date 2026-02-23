@@ -90,10 +90,20 @@ pub fn insertIndexKey(
     key_value: Value,
     row_id: RowId,
 ) MutationError!void {
+    try insertIndexKeyNoSync(btree, key_value, row_id);
+    syncIndexBTreeState(catalog, model_id, index_id, btree);
+}
+
+/// Encode a key Value and insert into the B+ tree for any index without
+/// syncing catalog state. Call `syncIndexBTreeState` once after batching.
+pub fn insertIndexKeyNoSync(
+    btree: *BTree,
+    key_value: Value,
+    row_id: RowId,
+) MutationError!void {
     var key_buf: [max_row_buf_size]u8 = undefined;
     const key = index_key_mod.encodeValue(key_value, &key_buf);
     btree.insert(key, row_id) catch |e| return mapBTreeError(e);
-    syncIndexBTreeState(catalog, model_id, index_id, btree);
 }
 
 /// Delete a key from any index's B+ tree. Silently succeeds if the key is
@@ -209,7 +219,21 @@ pub fn insertPrimaryKey(
     row_id: RowId,
 ) MutationError!void {
     const idx_id = catalog_mod.findPrimaryKeyIndex(catalog, model_id) orelse return error.Corruption;
-    return insertIndexKey(catalog, btree, model_id, idx_id, pk_value, row_id);
+    try insertPrimaryKeyNoSync(catalog, model_id, btree, pk_value, row_id);
+    syncIndexBTreeState(catalog, model_id, idx_id, btree);
+}
+
+/// Encode a PK Value and insert into the B+ tree without syncing catalog state.
+/// Call `syncBTreeState` once after batching.
+pub fn insertPrimaryKeyNoSync(
+    catalog: *const Catalog,
+    model_id: ModelId,
+    btree: *BTree,
+    pk_value: Value,
+    row_id: RowId,
+) MutationError!void {
+    _ = catalog_mod.findPrimaryKeyIndex(catalog, model_id) orelse return error.Corruption;
+    return insertIndexKeyNoSync(btree, pk_value, row_id);
 }
 
 /// Delete a PK key from the B+ tree. Silently succeeds if the key is not

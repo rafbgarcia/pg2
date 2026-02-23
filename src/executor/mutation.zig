@@ -80,10 +80,13 @@ const enforceNonPkUniqueness = constraints_mod.enforceNonPkUniqueness;
 const index_maintenance_mod = @import("index_maintenance.zig");
 const openPrimaryKeyIndex = index_maintenance_mod.openPrimaryKeyIndex;
 const insertPrimaryKey = index_maintenance_mod.insertPrimaryKey;
+const insertPrimaryKeyNoSync = index_maintenance_mod.insertPrimaryKeyNoSync;
 const primaryKeyExists = index_maintenance_mod.primaryKeyExists;
 const primaryKeyVisibleInIndex = index_maintenance_mod.primaryKeyVisibleInIndex;
 const openIndex = index_maintenance_mod.openIndex;
 const insertIndexKey = index_maintenance_mod.insertIndexKey;
+const insertIndexKeyNoSync = index_maintenance_mod.insertIndexKeyNoSync;
+const syncIndexBTreeState = index_maintenance_mod.syncIndexBTreeState;
 const index_key_mod = @import("../storage/index_key.zig");
 
 // Value builder delegation
@@ -198,7 +201,7 @@ pub const ReturningCapture = struct {
     string_arena: *scan_mod.StringArena,
 };
 
-const PkHashEntry = struct {
+const UniqueHashEntry = struct {
     row_group: NodeIndex,
     hash: u64,
 };
@@ -502,6 +505,8 @@ pub fn executeBulkInsertWithDiagnosticAndParameters(
     out_row_ids: []RowId,
     out_row_count: *u16,
 ) MutationError!u32 {
+    std.debug.assert(model_id < catalog.model_count);
+    const model = &catalog.models[model_id];
     const schema = &catalog.models[model_id].row_schema;
     var inserted_count: u32 = 0;
     out_row_count.* = 0;
@@ -516,88 +521,34 @@ pub fn executeBulkInsertWithDiagnosticAndParameters(
         group_cursor = group_node.next;
     }
 
-    // Fail-fast on in-batch PK duplicates before any heap/index writes.
-    if (catalog_mod.findPrimaryKeyColumnId(catalog, model_id)) |pk_col| {
-        var pk_hash_entries: [scan_mod.scan_batch_size]PkHashEntry = undefined;
-        var string_decode_bytes: [max_row_buf_size]u8 = undefined;
-        var string_arena = scan_mod.StringArena.init(string_decode_bytes[0..]);
-
-        var entry_idx: u16 = 0;
-        var check_group = first_row_group_node;
-        while (check_group != null_node) {
-            var key_buf: [max_row_buf_size]u8 = undefined;
-            const key = try buildPrimaryKeyForRowGroup(
+    // Fail-fast on in-batch duplicates for all single-column unique indexes
+    // backed by B+ trees. This preserves correctness while index writes are
+    // deferred to Phase B.
+    {
+        var idx_id: u16 = 0;
+        while (idx_id < model.index_count) : (idx_id += 1) {
+            const idx = &model.indexes[idx_id];
+            if (!idx.is_unique) continue;
+            if (idx.column_count != 1) continue;
+            if (idx.btree_root_page_id == 0) continue;
+            try precheckInBatchUniqueDuplicates(
                 catalog,
                 model_id,
                 schema,
                 tree,
                 tokens,
                 source,
-                check_group,
+                first_row_group_node,
+                group_count,
                 parameter_bindings,
                 diagnostic,
                 eval_ctx,
-                &string_arena,
-                pk_col,
-                &key_buf,
+                idx.column_ids[0],
             );
-            pk_hash_entries[entry_idx] = .{
-                .row_group = check_group,
-                .hash = std.hash.Wyhash.hash(0, key),
-            };
-            entry_idx += 1;
-            check_group = tree.getNode(check_group).next;
-        }
-
-        std.sort.heap(
-            PkHashEntry,
-            pk_hash_entries[0..group_count],
-            {},
-            lessThanPkHashEntry,
-        );
-
-        var sorted_idx: u16 = 1;
-        while (sorted_idx < group_count) : (sorted_idx += 1) {
-            const prev = pk_hash_entries[sorted_idx - 1];
-            const curr = pk_hash_entries[sorted_idx];
-            if (prev.hash != curr.hash) continue;
-
-            var prev_key_buf: [max_row_buf_size]u8 = undefined;
-            const prev_key = try buildPrimaryKeyForRowGroup(
-                catalog,
-                model_id,
-                schema,
-                tree,
-                tokens,
-                source,
-                prev.row_group,
-                parameter_bindings,
-                diagnostic,
-                eval_ctx,
-                &string_arena,
-                pk_col,
-                &prev_key_buf,
-            );
-            var curr_key_buf: [max_row_buf_size]u8 = undefined;
-            const curr_key = try buildPrimaryKeyForRowGroup(
-                catalog,
-                model_id,
-                schema,
-                tree,
-                tokens,
-                source,
-                curr.row_group,
-                parameter_bindings,
-                diagnostic,
-                eval_ctx,
-                &string_arena,
-                pk_col,
-                &curr_key_buf,
-            );
-            if (std.mem.eql(u8, prev_key, curr_key)) return error.DuplicateKey;
         }
     }
 
+    // Phase A: build+validate rows, then heap insert + WAL append only.
     var row_group = first_row_group_node;
     var bulk_page_hint: u64 = 0;
     var has_bulk_page_hint = false;
@@ -623,26 +574,19 @@ pub fn executeBulkInsertWithDiagnosticAndParameters(
             undo_log,
             snapshot,
             tx_manager,
-            false,
+            true,
             page_hint_ptr,
         ) catch |insert_err| {
-            if (undo_log) |undo| {
-                var i: u16 = 0;
-                while (i < out_row_count.*) : (i += 1) {
-                    try deleteSingleRow(
-                        catalog,
-                        pool,
-                        wal,
-                        undo,
-                        tx_id,
-                        schema,
-                        out_row_ids[i],
-                    );
-                }
-                if (out_row_count.* > 0) {
-                    catalog.decrementRowCount(model_id, out_row_count.*);
-                }
-            }
+            try rollbackBulkInsertedRows(
+                catalog,
+                pool,
+                wal,
+                undo_log,
+                tx_id,
+                schema,
+                model_id,
+                out_row_ids[0..out_row_count.*],
+            );
             out_row_count.* = 0;
             return insert_err;
         };
@@ -655,16 +599,161 @@ pub fn executeBulkInsertWithDiagnosticAndParameters(
         row_group = group_node.next;
     }
 
+    // Phase B: sorted index insertion over collected row metadata.
+    performBulkIndexPhaseB(
+        catalog,
+        pool,
+        wal,
+        model_id,
+        schema,
+        out_row_ids[0..out_row_count.*],
+    ) catch |phase_b_err| {
+        try rollbackBulkInsertedRows(
+            catalog,
+            pool,
+            wal,
+            undo_log,
+            tx_id,
+            schema,
+            model_id,
+            out_row_ids[0..out_row_count.*],
+        );
+        out_row_count.* = 0;
+        return phase_b_err;
+    };
+
     return inserted_count;
 }
 
-fn lessThanPkHashEntry(_: void, lhs: PkHashEntry, rhs: PkHashEntry) bool {
+fn rollbackBulkInsertedRows(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    undo_log: ?*UndoLog,
+    tx_id: TxId,
+    schema: *const RowSchema,
+    model_id: ModelId,
+    row_ids: []const RowId,
+) MutationError!void {
+    const undo = undo_log orelse return;
+    var i: usize = 0;
+    while (i < row_ids.len) : (i += 1) {
+        try deleteSingleRow(
+            catalog,
+            pool,
+            wal,
+            undo,
+            tx_id,
+            schema,
+            row_ids[i],
+        );
+    }
+    if (row_ids.len > 0) {
+        catalog.decrementRowCount(model_id, @intCast(row_ids.len));
+    }
+}
+
+fn precheckInBatchUniqueDuplicates(
+    catalog: *Catalog,
+    model_id: ModelId,
+    schema: *const RowSchema,
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    first_row_group_node: NodeIndex,
+    group_count: u16,
+    parameter_bindings: []const ParameterBinding,
+    diagnostic: ?*MutationDiagnostic,
+    eval_ctx: *const filter_mod.EvalContext,
+    unique_col: u16,
+) MutationError!void {
+    var unique_hash_entries: [scan_mod.scan_batch_size]UniqueHashEntry = undefined;
+    var string_decode_bytes: [max_row_buf_size]u8 = undefined;
+    var string_arena = scan_mod.StringArena.init(string_decode_bytes[0..]);
+
+    var entry_idx: u16 = 0;
+    var check_group = first_row_group_node;
+    while (check_group != null_node) {
+        var key_buf: [max_row_buf_size]u8 = undefined;
+        const key = try buildUniqueKeyForRowGroup(
+            catalog,
+            model_id,
+            schema,
+            tree,
+            tokens,
+            source,
+            check_group,
+            parameter_bindings,
+            diagnostic,
+            eval_ctx,
+            &string_arena,
+            unique_col,
+            &key_buf,
+        );
+        unique_hash_entries[entry_idx] = .{
+            .row_group = check_group,
+            .hash = std.hash.Wyhash.hash(0, key),
+        };
+        entry_idx += 1;
+        check_group = tree.getNode(check_group).next;
+    }
+
+    std.sort.heap(
+        UniqueHashEntry,
+        unique_hash_entries[0..group_count],
+        {},
+        lessThanUniqueHashEntry,
+    );
+
+    var sorted_idx: u16 = 1;
+    while (sorted_idx < group_count) : (sorted_idx += 1) {
+        const prev = unique_hash_entries[sorted_idx - 1];
+        const curr = unique_hash_entries[sorted_idx];
+        if (prev.hash != curr.hash) continue;
+
+        var prev_key_buf: [max_row_buf_size]u8 = undefined;
+        const prev_key = try buildUniqueKeyForRowGroup(
+            catalog,
+            model_id,
+            schema,
+            tree,
+            tokens,
+            source,
+            prev.row_group,
+            parameter_bindings,
+            diagnostic,
+            eval_ctx,
+            &string_arena,
+            unique_col,
+            &prev_key_buf,
+        );
+        var curr_key_buf: [max_row_buf_size]u8 = undefined;
+        const curr_key = try buildUniqueKeyForRowGroup(
+            catalog,
+            model_id,
+            schema,
+            tree,
+            tokens,
+            source,
+            curr.row_group,
+            parameter_bindings,
+            diagnostic,
+            eval_ctx,
+            &string_arena,
+            unique_col,
+            &curr_key_buf,
+        );
+        if (std.mem.eql(u8, prev_key, curr_key)) return error.DuplicateKey;
+    }
+}
+
+fn lessThanUniqueHashEntry(_: void, lhs: UniqueHashEntry, rhs: UniqueHashEntry) bool {
     if (lhs.hash < rhs.hash) return true;
     if (lhs.hash > rhs.hash) return false;
     return lhs.row_group < rhs.row_group;
 }
 
-fn buildPrimaryKeyForRowGroup(
+fn buildUniqueKeyForRowGroup(
     catalog: *Catalog,
     model_id: ModelId,
     schema: *const RowSchema,
@@ -676,7 +765,7 @@ fn buildPrimaryKeyForRowGroup(
     diagnostic: ?*MutationDiagnostic,
     eval_ctx: *const filter_mod.EvalContext,
     string_arena: *scan_mod.StringArena,
-    pk_col: u16,
+    unique_col: u16,
     key_buf: *[max_row_buf_size]u8,
 ) MutationError![]const u8 {
     const row_group_node = tree.getNode(row_group);
@@ -705,7 +794,184 @@ fn buildPrimaryKeyForRowGroup(
         values[0..schema.column_count],
         assigned_columns[0..schema.column_count],
     );
-    return index_key_mod.encodeValue(values[pk_col], key_buf);
+    return index_key_mod.encodeValue(values[unique_col], key_buf);
+}
+
+fn performBulkIndexPhaseB(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    model_id: ModelId,
+    schema: *const RowSchema,
+    row_ids: []const RowId,
+) MutationError!void {
+    if (row_ids.len == 0) return;
+    const model = &catalog.models[model_id];
+    var sorted_row_ids: [scan_mod.scan_batch_size]RowId = undefined;
+    var idx_id: u16 = 0;
+    const pk_col = catalog_mod.findPrimaryKeyColumnId(catalog, model_id);
+
+    while (idx_id < model.index_count) : (idx_id += 1) {
+        const idx = &model.indexes[idx_id];
+        if (!idx.is_unique) continue;
+        if (idx.column_count != 1) continue;
+        if (idx.btree_root_page_id == 0) continue;
+
+        std.mem.copyForwards(RowId, sorted_row_ids[0..row_ids.len], row_ids);
+        try sortRowIdsByIndexKey(
+            catalog,
+            pool,
+            schema,
+            idx.column_ids[0],
+            sorted_row_ids[0..row_ids.len],
+        );
+
+        var btree = openIndex(catalog, pool, wal, model_id, idx_id) orelse return error.Corruption;
+        var decode_buf: [max_row_buf_size]u8 = undefined;
+        var string_arena = scan_mod.StringArena.init(decode_buf[0..]);
+
+        for (sorted_row_ids[0..row_ids.len]) |row_id| {
+            const key_value = try readRowColumnValue(
+                catalog,
+                pool,
+                schema,
+                row_id,
+                idx.column_ids[0],
+                &string_arena,
+            );
+            if (pk_col != null and idx.column_ids[0] == pk_col.?) {
+                try insertPrimaryKeyNoSync(catalog, model_id, &btree, key_value, row_id);
+            } else {
+                try insertIndexKeyNoSync(&btree, key_value, row_id);
+            }
+        }
+        syncIndexBTreeState(catalog, model_id, idx_id, &btree);
+    }
+}
+
+fn sortRowIdsByIndexKey(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    schema: *const RowSchema,
+    key_column_id: u16,
+    row_ids: []RowId,
+) MutationError!void {
+    if (row_ids.len < 2) return;
+    var scratch: [scan_mod.scan_batch_size]RowId = undefined;
+    var run_width: usize = 1;
+    while (run_width < row_ids.len) : (run_width *= 2) {
+        var start: usize = 0;
+        while (start < row_ids.len) : (start += run_width * 2) {
+            const mid = @min(start + run_width, row_ids.len);
+            const end = @min(start + (run_width * 2), row_ids.len);
+            try mergeRowIdsByIndexKey(
+                catalog,
+                pool,
+                schema,
+                key_column_id,
+                row_ids,
+                scratch[0..],
+                start,
+                mid,
+                end,
+            );
+        }
+        std.mem.copyForwards(RowId, row_ids, scratch[0..row_ids.len]);
+    }
+}
+
+fn mergeRowIdsByIndexKey(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    schema: *const RowSchema,
+    key_column_id: u16,
+    row_ids: []const RowId,
+    scratch: []RowId,
+    start: usize,
+    mid: usize,
+    end: usize,
+) MutationError!void {
+    var left = start;
+    var right = mid;
+    var out = start;
+    while (left < mid and right < end) {
+        if (try lessThanRowIdByIndexKey(catalog, pool, schema, key_column_id, row_ids[left], row_ids[right])) {
+            scratch[out] = row_ids[left];
+            left += 1;
+        } else {
+            scratch[out] = row_ids[right];
+            right += 1;
+        }
+        out += 1;
+    }
+    while (left < mid) : (left += 1) {
+        scratch[out] = row_ids[left];
+        out += 1;
+    }
+    while (right < end) : (right += 1) {
+        scratch[out] = row_ids[right];
+        out += 1;
+    }
+}
+
+fn lessThanRowIdByIndexKey(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    schema: *const RowSchema,
+    key_column_id: u16,
+    lhs: RowId,
+    rhs: RowId,
+) MutationError!bool {
+    const order = try compareRowIdsByIndexKey(catalog, pool, schema, key_column_id, lhs, rhs);
+    return order == .lt;
+}
+
+fn compareRowIdsByIndexKey(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    schema: *const RowSchema,
+    key_column_id: u16,
+    lhs: RowId,
+    rhs: RowId,
+) MutationError!std.math.Order {
+    var lhs_buf: [max_row_buf_size]u8 = undefined;
+    var rhs_buf: [max_row_buf_size]u8 = undefined;
+    var lhs_arena = scan_mod.StringArena.init(lhs_buf[0..]);
+    var rhs_arena = scan_mod.StringArena.init(rhs_buf[0..]);
+
+    const lhs_key = try readRowColumnValue(catalog, pool, schema, lhs, key_column_id, &lhs_arena);
+    const rhs_key = try readRowColumnValue(catalog, pool, schema, rhs, key_column_id, &rhs_arena);
+    const key_order = row_mod.compareValues(lhs_key, rhs_key);
+    if (key_order != .eq) return key_order;
+    if (lhs.page_id < rhs.page_id) return .lt;
+    if (lhs.page_id > rhs.page_id) return .gt;
+    return std.math.order(lhs.slot, rhs.slot);
+}
+
+fn readRowColumnValue(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    schema: *const RowSchema,
+    row_id: RowId,
+    column_id: u16,
+    string_arena: *scan_mod.StringArena,
+) MutationError!Value {
+    const page = pool.pin(row_id.page_id) catch |e| return mapPoolError(e);
+    defer pool.unpin(row_id.page_id, false);
+
+    const row_data = HeapPage.read(page, row_id.slot) catch return error.StorageRead;
+    var row = scan_mod.ResultRow.init();
+    row.column_count = schema.column_count;
+    string_arena.reset();
+    try decodeRowWithOverflow(
+        schema,
+        row_data,
+        pool,
+        &catalog.overflow_page_allocator,
+        string_arena,
+        &row.values,
+    );
+    return row.values[column_id];
 }
 
 /// Execute an UPDATE operation.
