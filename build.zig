@@ -3,11 +3,6 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
-    const include_stress_tests = b.option(
-        bool,
-        "include_stress_tests",
-        "Include stress tests in `zig build test`.",
-    ) orelse false;
 
     // Shared pg2 module — all source files import through this.
     const pg2_mod = b.createModule(.{
@@ -56,7 +51,7 @@ pub fn build(b: *std.Build) void {
     const run_t = b.addRunArtifact(t);
     test_step.dependOn(&run_t.step);
 
-    // --- Stress tests (opt-in for regular test step) ---
+    // --- Stress tests ---
     const stress_tests_mod = b.createModule(.{
         .root_source_file = b.path("test/stress/stress_specs_test.zig"),
         .target = target,
@@ -72,9 +67,7 @@ pub fn build(b: *std.Build) void {
     const stress_step = b.step("stress", "Run stress tests");
     stress_step.dependOn(&run_stress_t.step);
 
-    if (include_stress_tests) {
-        test_step.dependOn(&run_stress_t.step);
-    }
+    test_step.dependOn(&run_stress_t.step);
 
     // --- Simulation tests ---
     const sim_test_mod = b.createModule(.{
@@ -91,6 +84,7 @@ pub fn build(b: *std.Build) void {
     const run_sim_t = b.addRunArtifact(sim_t);
     const sim_step = b.step("sim", "Run deterministic simulation tests");
     sim_step.dependOn(&run_sim_t.step);
+    test_step.dependOn(&run_sim_t.step);
 
     // --- Simulation executable ---
     const sim_mod = b.createModule(.{
