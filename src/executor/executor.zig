@@ -554,7 +554,7 @@ fn executeReadPipeline(
         {
             setError(
                 result,
-                "spill path: collector-backed HAVING or nested selection not implemented",
+                "spill path: collector-backed nested selection not implemented",
             );
             captureTempStats(result, ctx.collector);
             return;
@@ -564,15 +564,31 @@ fn executeReadPipeline(
             scan_mod.scan_batch_size,
         ));
         result.collector = ctx.collector;
-        const window = computeCollectorOutputWindow(
-            ctx,
-            ops,
-            op_count,
-            string_arena,
-            ctx.collector.totalRowCount(),
-        );
-        result.collector_output_offset = window.offset;
-        result.collector_output_count = window.count;
+        if (hasCollectorHavingOp(ops, op_count)) {
+            if (!rewriteCollectorForPostOps(
+                ctx,
+                result,
+                model_id,
+                ops,
+                op_count,
+                string_arena,
+            )) {
+                captureTempStats(result, ctx.collector);
+                return;
+            }
+            result.collector_output_offset = 0;
+            result.collector_output_count = result.collector.?.totalRowCount();
+        } else {
+            const window = computeCollectorOutputWindow(
+                ctx,
+                ops,
+                op_count,
+                string_arena,
+                ctx.collector.totalRowCount(),
+            );
+            result.collector_output_offset = window.offset;
+            result.collector_output_count = window.count;
+        }
     } else if (findSortOpNode(ops, op_count) != null and !hasGroupOp(ops, op_count)) {
         // Spill + sort (no GROUP): external merge sort reads from collector
         // directly, avoiding the scan_batch_size reload truncation.
@@ -590,20 +606,36 @@ fn executeReadPipeline(
             {
                 setError(
                     result,
-                    "spill path: collector-backed HAVING or nested selection not implemented",
+                    "spill path: collector-backed nested selection not implemented",
                 );
                 captureTempStats(result, ctx.collector);
                 return;
             }
-            const window = computeCollectorOutputWindow(
-                ctx,
-                ops,
-                op_count,
-                string_arena,
-                ctx.collector.totalRowCount(),
-            );
-            result.collector_output_offset = window.offset;
-            result.collector_output_count = window.count;
+            if (hasCollectorHavingOp(ops, op_count)) {
+                if (!rewriteCollectorForPostOps(
+                    ctx,
+                    result,
+                    model_id,
+                    ops,
+                    op_count,
+                    string_arena,
+                )) {
+                    captureTempStats(result, ctx.collector);
+                    return;
+                }
+                result.collector_output_offset = 0;
+                result.collector_output_count = result.collector.?.totalRowCount();
+            } else {
+                const window = computeCollectorOutputWindow(
+                    ctx,
+                    ops,
+                    op_count,
+                    string_arena,
+                    ctx.collector.totalRowCount(),
+                );
+                result.collector_output_offset = window.offset;
+                result.collector_output_count = window.count;
+            }
         } else {
             // Apply remaining post-sort operators (HAVING, LIMIT, OFFSET).
             // Sort is done; skip WHERE (already per-chunk) and SORT.
@@ -1239,12 +1271,18 @@ fn hasUnsupportedCollectorBackedPostOps(
     ops: *const [max_operators]OpDescriptor,
     op_count: u16,
 ) bool {
+    _ = ops;
+    _ = op_count;
+    return false;
+}
+
+fn hasCollectorHavingOp(
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+) bool {
     var i: u16 = 0;
     while (i < op_count) : (i += 1) {
-        switch (ops[i].kind) {
-            .having_filter => return true,
-            else => {},
-        }
+        if (ops[i].kind == .having_filter) return true;
     }
     return false;
 }
@@ -1336,6 +1374,197 @@ fn collectorWindowCount(total_rows: u64, offset: u64, count: u64) u64 {
     if (offset >= total_rows) return 0;
     const available = total_rows - offset;
     return @min(available, count);
+}
+
+const CollectorPostOpKind = enum {
+    having_filter,
+    limit_op,
+    offset_op,
+};
+
+const CollectorPostOp = struct {
+    kind: CollectorPostOpKind,
+    node: NodeIndex = null_node,
+    count: ?u64 = null,
+    remaining: u64 = 0,
+};
+
+/// Rewrite collector output by applying HAVING/LIMIT/OFFSET in pipeline order.
+///
+/// Used when collector-backed output contains HAVING, since simple offset/count
+/// windowing cannot preserve all ordering semantics for mixed operators.
+fn rewriteCollectorForPostOps(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    model_id: ModelId,
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+    string_arena: *scan_mod.StringArena,
+) bool {
+    const collector = result.collector orelse return true;
+    const source_schema = &ctx.catalog.models[model_id].row_schema;
+
+    var stages: [max_operators]CollectorPostOp = undefined;
+    var stage_count: u16 = 0;
+
+    var i: u16 = 0;
+    while (i < op_count) : (i += 1) {
+        const op = ops[i];
+        switch (op.kind) {
+            .having_filter => {
+                stages[stage_count] = .{
+                    .kind = .having_filter,
+                    .node = op.node,
+                };
+                stage_count += 1;
+            },
+            .limit_op => {
+                const n = evaluateCollectorCountExpr(ctx, op.node, string_arena);
+                stages[stage_count] = .{
+                    .kind = .limit_op,
+                    .count = n,
+                    .remaining = n orelse 0,
+                };
+                stage_count += 1;
+            },
+            .offset_op => {
+                const n = evaluateCollectorCountExpr(ctx, op.node, string_arena);
+                stages[stage_count] = .{
+                    .kind = .offset_op,
+                    .count = n,
+                    .remaining = n orelse 0,
+                };
+                stage_count += 1;
+            },
+            else => {},
+        }
+    }
+
+    if (stage_count == 0) return true;
+
+    var iter = collector.iterator();
+    var read_arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
+    var read_arena = scan_mod.StringArena.init(&read_arena_buf);
+    var row = scan_mod.ResultRow.init();
+
+    var output_page_ids: [max_spill_pages]u64 = undefined;
+    var output_page_count: u32 = 0;
+    var output_rows: u64 = 0;
+    var writer = SpillPageWriter.init();
+
+    while (true) {
+        read_arena.reset();
+        const has_row = iter.next(&row, &read_arena) catch {
+            setError(result, "spill post-operator read failed");
+            return false;
+        };
+        if (!has_row) break;
+
+        var keep = true;
+        var stage_idx: u16 = 0;
+        while (stage_idx < stage_count and keep) : (stage_idx += 1) {
+            var stage = &stages[stage_idx];
+            switch (stage.kind) {
+                .having_filter => {
+                    const predicate = ctx.ast.getNode(stage.node).data.unary;
+                    if (predicate == null_node) continue;
+
+                    var exec_eval = evalContextForExec(ctx, string_arena);
+                    const matches = filter_mod.evaluatePredicateFull(
+                        ctx.ast,
+                        ctx.tokens,
+                        ctx.source,
+                        predicate,
+                        row.values[0..row.column_count],
+                        source_schema,
+                        null,
+                        &exec_eval.eval_ctx,
+                    ) catch |err| switch (err) {
+                        error.UndefinedParameter => {
+                            setError(result, "undefined parameter in where predicate");
+                            return false;
+                        },
+                        error.ClockUnavailable => {
+                            setError(result, "clock unavailable in where predicate");
+                            return false;
+                        },
+                        else => false,
+                    };
+                    if (!matches) keep = false;
+                },
+                .limit_op => {
+                    if (stage.count == null) continue;
+                    if (stage.remaining == 0) {
+                        keep = false;
+                    } else {
+                        stage.remaining -= 1;
+                    }
+                },
+                .offset_op => {
+                    if (stage.count == null) continue;
+                    if (stage.remaining > 0) {
+                        stage.remaining -= 1;
+                        keep = false;
+                    }
+                },
+            }
+        }
+
+        if (!keep) continue;
+
+        const appended = writer.appendRow(&row) catch {
+            setError(result, "spill post-operator write failed");
+            return false;
+        };
+        if (!appended) {
+            if (output_page_count >= max_spill_pages) {
+                setError(result, "spill post-operator temp page budget exhausted");
+                return false;
+            }
+            const payload = writer.finalize();
+            const page_id = collector.temp_mgr.allocateAndWrite(payload, temp_mod.TempPage.null_page_id) catch {
+                setError(result, "spill post-operator temp page budget exhausted");
+                return false;
+            };
+            output_page_ids[output_page_count] = page_id;
+            output_page_count += 1;
+            writer.reset();
+            const retried = writer.appendRow(&row) catch {
+                setError(result, "spill post-operator write failed");
+                return false;
+            };
+            std.debug.assert(retried);
+        }
+
+        output_rows += 1;
+    }
+
+    if (writer.row_count > 0) {
+        if (output_page_count >= max_spill_pages) {
+            setError(result, "spill post-operator temp page budget exhausted");
+            return false;
+        }
+        const payload = writer.finalize();
+        const page_id = collector.temp_mgr.allocateAndWrite(payload, temp_mod.TempPage.null_page_id) catch {
+            setError(result, "spill post-operator temp page budget exhausted");
+            return false;
+        };
+        output_page_ids[output_page_count] = page_id;
+        output_page_count += 1;
+    }
+
+    @memcpy(
+        collector.spill_page_ids[0..output_page_count],
+        output_page_ids[0..output_page_count],
+    );
+    collector.spill_page_count = output_page_count;
+    collector.hot_count = 0;
+    collector.hot_bytes = 0;
+    collector.total_rows = output_rows;
+    collector.iteration_started = false;
+    result.collector = collector;
+
+    return true;
 }
 
 /// Returns true if the selection set contains at least one nested relation.

@@ -383,7 +383,7 @@ test "collector-backed spill path applies computed projection correctly" {
     try std.testing.expect(std.mem.indexOf(u8, result, "\n31\n41\n") != null);
 }
 
-test "collector-backed spill path fails explicitly for having" {
+test "collector-backed spill path applies having correctly" {
     var env: FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
@@ -397,18 +397,48 @@ test "collector-backed spill path fails explicitly for having" {
 
     try insertRows(executor, "HavingSpillTable", 4200);
 
-    const result = try executor.run(
+    var large_buf: [64 * 1024]u8 = undefined;
+    const result = try runWithBuffer(
+        executor,
         "HavingSpillTable |> having(id > 100) |> inspect { id }",
+        &large_buf,
     );
 
-    try std.testing.expect(std.mem.startsWith(u8, result, "ERR query: "));
+    try std.testing.expect(std.mem.startsWith(u8, result, "OK returned_rows=4100 "));
     try std.testing.expect(
         std.mem.indexOf(
             u8,
             result,
-            "collector-backed HAVING or nested selection not implemented",
+            "\n101\n102\n103\n",
         ) != null,
     );
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n4200\n") != null);
+}
+
+test "collector-backed spill path preserves having-limit order semantics" {
+    var env: FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\HavingLimitOrderTable {
+        \\  field(id, i64, notNull, primaryKey)
+        \\}
+    );
+
+    try insertRows(executor, "HavingLimitOrderTable", 4200);
+
+    const result_a = try executor.run(
+        "HavingLimitOrderTable |> having(id > 4000) |> limit(3) |> inspect { id }",
+    );
+    try std.testing.expect(std.mem.startsWith(u8, result_a, "OK returned_rows=3 "));
+    try std.testing.expect(std.mem.indexOf(u8, result_a, "\n4001\n4002\n4003\n") != null);
+
+    const result_b = try executor.run(
+        "HavingLimitOrderTable |> limit(3) |> having(id > 4000) |> inspect { id }",
+    );
+    try std.testing.expect(std.mem.startsWith(u8, result_b, "OK returned_rows=0 "));
 }
 
 test "collector-backed spill path fails explicitly for nested selection" {
@@ -450,7 +480,7 @@ test "collector-backed spill path fails explicitly for nested selection" {
         std.mem.indexOf(
             u8,
             result,
-            "collector-backed HAVING or nested selection not implemented",
+            "collector-backed nested selection not implemented",
         ) != null,
     );
 }

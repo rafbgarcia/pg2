@@ -56,11 +56,12 @@ Queries should degrade performance under memory pressure before failing, using p
 ### Progress Update (2026-02-23, after review)
 - Safety slice is partially landed:
   - Collector-backed wrong-result risk for LIMIT/OFFSET is removed by explicit collector-window semantics in executor/serialization.
+  - Collector-backed HAVING now executes with stream-stage semantics (and preserves pipeline order interactions with LIMIT/OFFSET).
   - Collector-backed projection now rewrites spill rows before serialization (flat field + computed select expressions).
   - Regression coverage exists for spill + LIMIT, spill + OFFSET+LIMIT, and spill + external-sort + LIMIT.
   - Regression coverage now includes spill + flat projection and spill + computed projection.
-  - Regression coverage now locks explicit fail-closed behavior for collector-backed HAVING and nested selection.
-  - Remaining fail-closed guard currently covers collector-backed HAVING and nested selection.
+  - Regression coverage now locks explicit fail-closed behavior for collector-backed nested selection.
+  - Remaining fail-closed guard currently covers collector-backed nested selection.
 - The unified operator I/O contract (flat buffer vs spill descriptor/iterator chaining) is still pending and remains the next major step.
 
 ## Non-Negotiables
