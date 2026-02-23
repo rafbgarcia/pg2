@@ -92,6 +92,7 @@ pub const MaterializationMode = enum {
 pub const SortStrategy = enum {
     none,
     in_place_insertion,
+    in_memory_merge,
 };
 
 pub const GroupStrategy = enum {
@@ -2023,7 +2024,7 @@ test "execute captures deterministic inspect plan metadata" {
         result.stats.plan.materialization_mode,
     );
     try testing.expectEqual(
-        SortStrategy.in_place_insertion,
+        SortStrategy.in_memory_merge,
         result.stats.plan.sort_strategy,
     );
     try testing.expectEqual(

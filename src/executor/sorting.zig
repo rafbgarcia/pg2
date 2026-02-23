@@ -1,7 +1,11 @@
-//! ORDER BY execution via bounded in-place insertion sort.
+//! ORDER BY execution via stable bottom-up merge sort.
 //!
 //! Supports multi-key sorting with column references and expression keys,
 //! ascending/descending order, and group-aware expression evaluation.
+//!
+//! Uses `scratch_rows_b` from `ExecContext` as the merge auxiliary buffer,
+//! giving O(n log n) worst-case with stability (equal-key rows preserve
+//! their original order).
 const std = @import("std");
 const ast_mod = @import("../parser/ast.zig");
 const row_mod = @import("../storage/row.zig");
@@ -47,7 +51,7 @@ pub fn applySort(
     group_runtime: *GroupRuntime,
     string_arena: *scan_mod.StringArena,
 ) bool {
-    result.stats.plan.sort_strategy = .in_place_insertion;
+    result.stats.plan.sort_strategy = .in_memory_merge;
     const node = ctx.ast.getNode(sort_node);
     const key_count = ctx.ast.listLen(node.data.unary);
     if (key_count == 0) {
@@ -75,7 +79,7 @@ pub fn applySort(
         return false;
     }
 
-    sortRowsInPlace(
+    sortRowsMerge(
         ctx,
         result,
         schema,
@@ -148,7 +152,16 @@ const SortEvalError = error{
     EvalFailed,
 };
 
-fn sortRowsInPlace(
+/// Bottom-up merge sort using `ctx.scratch_rows_b` as auxiliary buffer.
+///
+/// Stable: equal-key rows preserve their original order.
+/// O(n log n) worst-case time, O(n) auxiliary space (the pre-allocated
+/// scratch buffer — no heap allocation).
+///
+/// Group counts are kept in sync with rows so that `COUNT(*)` resolution
+/// via `group_runtime.group_counts[row_index]` remains correct after
+/// sorting.
+fn sortRowsMerge(
     ctx: *const ExecContext,
     result: *QueryResult,
     schema: *const RowSchema,
@@ -156,36 +169,133 @@ fn sortRowsInPlace(
     group_runtime: *GroupRuntime,
     string_arena: *scan_mod.StringArena,
 ) SortEvalError!void {
-    if (result.row_count <= 1) return;
+    const n = result.row_count;
+    if (n <= 1) return;
 
-    var i: u16 = 1;
-    while (i < result.row_count) : (i += 1) {
-        var j: u16 = i;
-        while (j > 0) {
-            const prev_idx = j - 1;
-            const order = compareRowsBySortKeys(
+    const aux_rows = ctx.scratch_rows_b;
+    std.debug.assert(aux_rows.len >= n);
+
+    // Auxiliary group counts buffer (16 KB on stack for scan_batch_size=4096).
+    var aux_counts: [scan_mod.scan_batch_size]u32 = undefined;
+
+    var src_rows: []ResultRow = result.rows[0..n];
+    var dst_rows: []ResultRow = aux_rows[0..n];
+    var in_result = true;
+
+    var width: u16 = 1;
+    while (width < n) {
+        // Merge pass: merge adjacent runs of `width` from src into dst.
+        var i: u16 = 0;
+        while (i < n) {
+            const mid = @min(i +| width, n);
+            const end = @min(mid +| width, n);
+
+            try mergeAdjacentRuns(
                 ctx,
                 schema,
                 group_runtime,
-                prev_idx,
-                j,
-                &result.rows[prev_idx],
-                &result.rows[j],
                 sort_keys,
                 string_arena,
-            ) catch return error.EvalFailed;
-            if (order != .gt) break;
-            const temp = result.rows[prev_idx];
-            result.rows[prev_idx] = result.rows[j];
-            result.rows[j] = temp;
-            if (group_runtime.active) {
-                const count_tmp = group_runtime.group_counts[prev_idx];
-                group_runtime.group_counts[prev_idx] =
-                    group_runtime.group_counts[j];
-                group_runtime.group_counts[j] = count_tmp;
-            }
-            j -= 1;
+                src_rows,
+                dst_rows,
+                &group_runtime.group_counts,
+                &aux_counts,
+                i,
+                mid,
+                end,
+            );
+
+            i = end;
         }
+
+        // After the merge pass, merged counts are in aux_counts.
+        // Copy back to group_runtime.group_counts so the next pass's
+        // comparisons (which resolve aggregates via row_index into
+        // group_runtime) read the correct values.
+        if (group_runtime.active) {
+            @memcpy(group_runtime.group_counts[0..n], aux_counts[0..n]);
+        }
+
+        // Swap row buffers for the next pass.
+        const tmp = src_rows;
+        src_rows = dst_rows;
+        dst_rows = tmp;
+        in_result = !in_result;
+
+        // Prevent u16 overflow on the final doubling.
+        if (width > n / 2) break;
+        width *= 2;
+    }
+
+    // Ensure sorted rows end up in result.rows.
+    if (!in_result) {
+        @memcpy(result.rows[0..n], src_rows);
+    }
+    // group_runtime.group_counts is already correct (copied after each pass).
+}
+
+/// Merge two adjacent sorted runs [left..mid) and [mid..right) from `src`
+/// into `dst`, maintaining stability (left run wins ties).
+///
+/// Group counts are merged in parallel from `src_counts` to `dst_counts`.
+fn mergeAdjacentRuns(
+    ctx: *const ExecContext,
+    schema: *const RowSchema,
+    group_runtime: *const GroupRuntime,
+    sort_keys: []const SortKeyDescriptor,
+    string_arena: *scan_mod.StringArena,
+    src: []const ResultRow,
+    dst: []ResultRow,
+    src_counts: *const [scan_mod.scan_batch_size]u32,
+    dst_counts: *[scan_mod.scan_batch_size]u32,
+    left: u16,
+    mid: u16,
+    right: u16,
+) SortEvalError!void {
+    var l = left;
+    var r = mid;
+    var out = left;
+
+    while (l < mid and r < right) {
+        const order = compareRowsBySortKeys(
+            ctx,
+            schema,
+            group_runtime,
+            l,
+            r,
+            &src[l],
+            &src[r],
+            sort_keys,
+            string_arena,
+        ) catch return error.EvalFailed;
+
+        if (order != .gt) {
+            // Left <= right: take left (preserves stability).
+            dst[out] = src[l];
+            if (group_runtime.active) dst_counts[out] = src_counts[l];
+            l += 1;
+        } else {
+            dst[out] = src[r];
+            if (group_runtime.active) dst_counts[out] = src_counts[r];
+            r += 1;
+        }
+        out += 1;
+    }
+
+    // Copy remaining left run.
+    while (l < mid) {
+        dst[out] = src[l];
+        if (group_runtime.active) dst_counts[out] = src_counts[l];
+        l += 1;
+        out += 1;
+    }
+
+    // Copy remaining right run.
+    while (r < right) {
+        dst[out] = src[r];
+        if (group_runtime.active) dst_counts[out] = src_counts[r];
+        r += 1;
+        out += 1;
     }
 }
 
