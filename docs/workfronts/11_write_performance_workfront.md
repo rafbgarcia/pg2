@@ -19,43 +19,48 @@ Eliminate O(n²) insert degradation by wiring the existing B+ tree into primary 
 - Index-only scans or covering indexes.
 - Concurrent index builds or online reindexing.
 
-## Phase 1: Automatic PK Index Creation and Maintenance
+## Phase 1: Automatic PK Index Creation and Maintenance ✅
 
 ### Design Decisions
 - **PK gets an implicit `IndexInfo` entry.** When `applyDefinitions` processes a model with a `primaryKey` column, it auto-creates an `IndexInfo` with `is_unique = true` and allocates a B+ tree root page. This mirrors PostgreSQL's behavior where a PRIMARY KEY constraint implicitly creates a unique index.
 - **Key encoding.** The B+ tree operates on `[]const u8` keys. PK values (`Value` union) must be serialized to a byte representation that preserves sort order. For `i64`: big-endian with sign bit flipped (so lexicographic order matches numeric order). For `string`: raw bytes. For other types: type-specific encoding added as needed.
-- **Index maintenance on mutation.** INSERT adds to the B+ tree after heap write. DELETE removes from the B+ tree. UPDATE on a PK column is a delete + insert (PK updates are rare but must be correct).
+- **Index maintenance on mutation (PostgreSQL-style).** INSERT adds to the B+ tree after heap write. DELETE does NOT remove from the B+ tree — dead entries stay and MVCC on the heap determines visibility. UPDATE on a PK column inserts the new key; the old entry remains as a dead pointer. Dead entries are cleaned up opportunistically during INSERT uniqueness checks (when a key maps to an invisible row, the dead entry is removed and the key is reused).
 - **B+ tree page allocation.** Each model's PK index gets a dedicated page region, tracked via `IndexInfo.btree_root_page_id`. Page allocation uses the existing `BTree.allocPage()` mechanism. The catalog must track the next available page ID for index pages so new inserts can allocate split pages.
 
 ### Scope
 - Extend `applyDefinitions` (or the schema loader path) to allocate a B+ tree root page and create an `IndexInfo` entry for columns marked `primaryKey`.
 - Implement key encoding functions (`Value` → `[]const u8`) with sort-preserving properties for `i64` and `string` types.
-- Wire INSERT in `mutation.zig` to insert into the PK B+ tree after successful heap write. The B+ tree's own `DuplicateKey` error replaces the heap-scan uniqueness check.
-- Wire DELETE to remove from the PK B+ tree.
-- Wire UPDATE (when PK column changes) to delete old key + insert new key.
+- Wire INSERT in `mutation.zig` to insert into the PK B+ tree after successful heap write. MVCC-aware uniqueness check (`primaryKeyVisibleInIndex`) follows B+ tree entries to the heap and checks snapshot visibility — dead entries from committed deletes are cleaned up and the key is reused.
+- DELETE leaves B+ tree entries intact (PostgreSQL-style). MVCC visibility on the heap handles aborted/committed deletes correctly.
+- Wire UPDATE (when PK column changes) to insert new key. Old entry stays as dead pointer.
 - Replace `enforceInsertUniqueness` heap scan with a B+ tree `find()` call — O(log n) instead of O(n).
 
 ### Gate
 - Unit tests: key encoding round-trip and sort order for i64 (positive, negative, zero, MIN, MAX) and string types.
 - Unit tests: PK index auto-creation on schema apply — `IndexInfo` populated, `btree_root_page_id` non-zero.
 - Integration: inserting N rows with a PK constraint uses B+ tree lookup, not heap scan. Duplicate key still rejected.
-- Integration: DELETE removes the key from the PK index; re-inserting the same key succeeds.
+- Integration: DELETE leaves B+ tree entry intact; re-inserting the same key succeeds (MVCC-aware uniqueness check detects the invisible row and cleans up the dead entry).
 - Regression: all existing feature and stress tests pass.
 - Performance: 4200 sequential inserts complete in under 2 seconds (down from 20+).
 - Determinism: PK index operations produce identical results under simulation replay.
 
-## Phase 2: PK Index-Assisted Scan
+## Phase 2: PK Index-Assisted Scan ✅
 
 ### Design Decisions
-- **Point lookup.** `WHERE id = <value>` on a PK column should use `BTree.find()` to get the `RowId`, then fetch the single heap row directly — O(log n) instead of a full table scan.
-- **Range scan.** `WHERE id > X AND id < Y` on a PK column should use `BTree.rangeScan()` to iterate matching `RowId`s and fetch heap rows on demand.
-- **Planner integration.** The executor's read pipeline must detect when a WHERE clause filters solely on a PK column with equality or range operators, and choose an index scan path instead of `tableScanInto`. Non-PK filters fall back to the existing heap scan.
+- **Point lookup.** `WHERE id == <value>` on a PK column uses `BTree.find()` to get the `RowId`, then fetches the single heap row directly — O(log n) instead of a full table scan.
+- **Range scan.** `WHERE id > X && id < Y` on a PK column uses `BTree.rangeScan()` to iterate matching `RowId`s and fetch heap rows on demand. Handles `>`, `>=`, `<`, `<=` with correct successor-key encoding for inclusive/exclusive bounds.
+- **Planner integration.** `index_scan_planner.zig` analyzes the WHERE predicate AST for PK-indexable patterns (equality, range, AND combinations, flipped operands like `5 > id`). The executor's `tryIndexScan` dispatches to `executePointLookup` or `executeRangeScan`, skipping the chunked table scan loop entirely. Non-PK filters fall back to the existing heap scan.
+- **MVCC correctness.** Index scans follow B+ tree entries to the heap and apply `resolveVisibleVersion` — dead entries from committed deletes or aborted inserts are correctly filtered. This is critical because DELETE no longer removes B+ tree entries (Phase 1 design).
 - **Scan cursor interaction.** Index scans bypass the chunked heap scan loop entirely — the B+ tree iterator is the driving cursor. Results feed into the same `SpillingResultCollector` pipeline.
 
 ### Scope
-- Add PK-aware scan path in the executor: detect PK equality/range in WHERE, use B+ tree find/rangeScan, fetch heap rows by RowId.
-- Extend `ExecStats` / `INSPECT` output to report when an index scan was used vs. a full table scan.
+- `index_scan_planner.zig`: WHERE clause analysis for PK scan strategy (table_scan, pk_point_lookup, pk_range_scan).
+- `scan.zig`: `indexFind`, `indexRange`, `indexRangeScanInto` — B+ tree scan paths with MVCC visibility.
+- `executor.zig`: `tryIndexScan` wired into read pipeline, `scan_strategy` added to `PlanStats`.
 - Ensure the index scan path works correctly with the spill/degrade pipeline (Phase 2 of workfront 03).
+
+### Bugs fixed during implementation
+- **`syncBTreeState` missing `root_page_id`.** After a B+ tree root split, only `next_page_id` was synced to the catalog. The root page ID was lost, causing lookups to fail on tables with enough inserts to trigger root splits. Pre-existing Phase 1 bug, surfaced by Phase 2 reads.
 
 ### Gate
 - Integration: `WHERE id = X` on a PK column returns the correct row via index lookup (INSPECT shows index scan).
