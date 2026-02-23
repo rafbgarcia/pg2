@@ -198,6 +198,11 @@ pub const ReturningCapture = struct {
     string_arena: *scan_mod.StringArena,
 };
 
+const PkHashEntry = struct {
+    row_group: NodeIndex,
+    hash: u64,
+};
+
 /// Execute an INSERT operation.
 ///
 /// Walks the assignment linked list to build a Value array, encodes the row,
@@ -457,76 +462,95 @@ pub fn executeBulkInsertWithDiagnosticAndParameters(
     var inserted_count: u32 = 0;
     out_row_count.* = 0;
 
+    var group_count: u16 = 0;
+    var group_cursor = first_row_group_node;
+    while (group_cursor != null_node) {
+        const group_node = tree.getNode(group_cursor);
+        if (group_node.tag != .insert_row_group) return error.Corruption;
+        if (group_count >= out_row_ids.len) return error.ResultOverflow;
+        group_count += 1;
+        group_cursor = group_node.next;
+    }
+
     // Fail-fast on in-batch PK duplicates before any heap/index writes.
     if (catalog_mod.findPrimaryKeyColumnId(catalog, model_id)) |pk_col| {
+        var pk_hash_entries: [scan_mod.scan_batch_size]PkHashEntry = undefined;
         var string_decode_bytes: [max_row_buf_size]u8 = undefined;
         var string_arena = scan_mod.StringArena.init(string_decode_bytes[0..]);
 
-        var outer_group = first_row_group_node;
-        while (outer_group != null_node) {
-            const outer_node = tree.getNode(outer_group);
-            if (outer_node.tag != .insert_row_group) return error.Corruption;
-
-            var outer_values: [max_assignments]Value =
-                [_]Value{.{ .null_value = {} }} ** max_assignments;
-            var outer_assigned: [max_assignments]bool = [_]bool{false} ** max_assignments;
-            string_arena.reset();
-            try buildRowFromAssignments(
+        var entry_idx: u16 = 0;
+        var check_group = first_row_group_node;
+        while (check_group != null_node) {
+            var key_buf: [max_row_buf_size]u8 = undefined;
+            const key = try buildPrimaryKeyForRowGroup(
+                catalog,
+                model_id,
+                schema,
                 tree,
                 tokens,
                 source,
-                schema,
-                outer_node.data.unary,
+                check_group,
                 parameter_bindings,
-                &outer_values,
-                &outer_assigned,
                 diagnostic,
-                &string_arena,
                 eval_ctx,
+                &string_arena,
+                pk_col,
+                &key_buf,
             );
-            applyColumnDefaultsForInsert(
+            pk_hash_entries[entry_idx] = .{
+                .row_group = check_group,
+                .hash = std.hash.Wyhash.hash(0, key),
+            };
+            entry_idx += 1;
+            check_group = tree.getNode(check_group).next;
+        }
+
+        std.sort.heap(
+            PkHashEntry,
+            pk_hash_entries[0..group_count],
+            {},
+            lessThanPkHashEntry,
+        );
+
+        var sorted_idx: u16 = 1;
+        while (sorted_idx < group_count) : (sorted_idx += 1) {
+            const prev = pk_hash_entries[sorted_idx - 1];
+            const curr = pk_hash_entries[sorted_idx];
+            if (prev.hash != curr.hash) continue;
+
+            var prev_key_buf: [max_row_buf_size]u8 = undefined;
+            const prev_key = try buildPrimaryKeyForRowGroup(
                 catalog,
                 model_id,
-                outer_values[0..schema.column_count],
-                outer_assigned[0..schema.column_count],
+                schema,
+                tree,
+                tokens,
+                source,
+                prev.row_group,
+                parameter_bindings,
+                diagnostic,
+                eval_ctx,
+                &string_arena,
+                pk_col,
+                &prev_key_buf,
             );
-            var outer_key_buf: [max_row_buf_size]u8 = undefined;
-            const outer_key = index_key_mod.encodeValue(outer_values[pk_col], &outer_key_buf);
-
-            var inner_group = first_row_group_node;
-            while (inner_group != outer_group) {
-                const inner_node = tree.getNode(inner_group);
-                if (inner_node.tag != .insert_row_group) return error.Corruption;
-
-                var inner_values: [max_assignments]Value =
-                    [_]Value{.{ .null_value = {} }} ** max_assignments;
-                var inner_assigned: [max_assignments]bool = [_]bool{false} ** max_assignments;
-                string_arena.reset();
-                try buildRowFromAssignments(
-                    tree,
-                    tokens,
-                    source,
-                    schema,
-                    inner_node.data.unary,
-                    parameter_bindings,
-                    &inner_values,
-                    &inner_assigned,
-                    diagnostic,
-                    &string_arena,
-                    eval_ctx,
-                );
-                applyColumnDefaultsForInsert(
-                    catalog,
-                    model_id,
-                    inner_values[0..schema.column_count],
-                    inner_assigned[0..schema.column_count],
-                );
-                var inner_key_buf: [max_row_buf_size]u8 = undefined;
-                const inner_key = index_key_mod.encodeValue(inner_values[pk_col], &inner_key_buf);
-                if (std.mem.eql(u8, outer_key, inner_key)) return error.DuplicateKey;
-                inner_group = inner_node.next;
-            }
-            outer_group = outer_node.next;
+            var curr_key_buf: [max_row_buf_size]u8 = undefined;
+            const curr_key = try buildPrimaryKeyForRowGroup(
+                catalog,
+                model_id,
+                schema,
+                tree,
+                tokens,
+                source,
+                curr.row_group,
+                parameter_bindings,
+                diagnostic,
+                eval_ctx,
+                &string_arena,
+                pk_col,
+                &curr_key_buf,
+            );
+            if (std.mem.eql(u8, prev_key, curr_key)) return error.DuplicateKey;
         }
     }
 
@@ -581,6 +605,56 @@ pub fn executeBulkInsertWithDiagnosticAndParameters(
     }
 
     return inserted_count;
+}
+
+fn lessThanPkHashEntry(_: void, lhs: PkHashEntry, rhs: PkHashEntry) bool {
+    if (lhs.hash < rhs.hash) return true;
+    if (lhs.hash > rhs.hash) return false;
+    return lhs.row_group < rhs.row_group;
+}
+
+fn buildPrimaryKeyForRowGroup(
+    catalog: *Catalog,
+    model_id: ModelId,
+    schema: *const RowSchema,
+    tree: *const Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    row_group: NodeIndex,
+    parameter_bindings: []const ParameterBinding,
+    diagnostic: ?*MutationDiagnostic,
+    eval_ctx: *const filter_mod.EvalContext,
+    string_arena: *scan_mod.StringArena,
+    pk_col: u16,
+    key_buf: *[max_row_buf_size]u8,
+) MutationError![]const u8 {
+    const row_group_node = tree.getNode(row_group);
+    if (row_group_node.tag != .insert_row_group) return error.Corruption;
+
+    var values: [max_assignments]Value =
+        [_]Value{.{ .null_value = {} }} ** max_assignments;
+    var assigned_columns: [max_assignments]bool = [_]bool{false} ** max_assignments;
+    string_arena.reset();
+    try buildRowFromAssignments(
+        tree,
+        tokens,
+        source,
+        schema,
+        row_group_node.data.unary,
+        parameter_bindings,
+        &values,
+        &assigned_columns,
+        diagnostic,
+        string_arena,
+        eval_ctx,
+    );
+    applyColumnDefaultsForInsert(
+        catalog,
+        model_id,
+        values[0..schema.column_count],
+        assigned_columns[0..schema.column_count],
+    );
+    return index_key_mod.encodeValue(values[pk_col], key_buf);
 }
 
 /// Execute an UPDATE operation.

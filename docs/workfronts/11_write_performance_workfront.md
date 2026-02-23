@@ -6,7 +6,7 @@ Eliminate O(n²) insert degradation by wiring B+ tree indexes into constraint en
 ## Current State
 - **Phases 1-4 complete.** PK B+ tree indexes are auto-created and used for uniqueness checks (O(log n) vs O(n²) heap scan), PK index-assisted point/range scans work, WAL group commit reduces fsyncs from N to ~1 for N sequential inserts, and all unique indexes (PK and non-PK) now have B+ trees for O(log n) constraint enforcement including FK checks.
 - **Phase 4 follow-up fix complete.** Non-PK unique checks are now MVCC-aware when using B+ trees (dead entries from deleted/invisible rows no longer cause false duplicates), and dedicated Phase 4 feature coverage is in place.
-- **Phase 5 in progress.** Parser/AST support for multi-row INSERT syntax has landed, and executor/mutation now dispatch and execute multi-row inserts through a new bulk path (`executeBulkInsertWithDiagnosticAndParameters`) with feature coverage for inserted row counts, RETURNING, and in-batch PK duplicate rejection before writes.
+- **Phase 5 in progress.** Parser/AST support for multi-row INSERT syntax has landed, and executor/mutation now dispatch and execute multi-row inserts through a new bulk path (`executeBulkInsertWithDiagnosticAndParameters`) with feature coverage for inserted row counts, RETURNING, and in-batch PK duplicate rejection before writes. In-batch PK duplicate detection has been upgraded from temporary O(n²) pairwise comparison to O(n log n) sorted-hash precheck with exact key verification on hash collisions.
 
 ## Why (original motivation, for context)
 - INSERT used to perform a full heap scan per row to enforce PK uniqueness. Inserting N rows cost O(N²). 4200 inserts triggered ~8.8M row comparisons. **Fixed by Phase 1.**
