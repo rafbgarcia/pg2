@@ -54,6 +54,7 @@ Turn `--memory` into a planner input that derives runtime capacities automatical
 - `work_memory_bytes_per_slot` scales correctly with `--memory` and `--concurrency` (more memory or less concurrency → larger per-slot budget).
 - `max_active_transactions` and `max_tx_states` scale with effective concurrency (higher `--concurrency` → larger limits).
 - `temp_pages_per_query_slot` is derived and scales inversely with concurrency (fewer slots → more temp pages per slot).
+  - This is a hard dependency for Workfront 13 nested per-parent spill capacity and partition fanout.
 - parser effective capacities scale with memory/concurrency (more memory or fewer slots → larger `max_tokens_effective` / `max_ast_nodes_effective`).
 - parser effective capacities never exceed global hard caps.
 - tokenizer/parser diagnostics distinguish budget exhaustion from hard-cap exhaustion.

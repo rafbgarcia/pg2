@@ -30,10 +30,15 @@ Implement a production-ready, spill-aware nested selection join path that scales
 
 - **Performance-first implementation uses hash join (with spill) as the primary nested selection engine.**
   - No interim O(n\*m) fallback for large spill datasets.
+- **Nested semantics are per-parent and must remain so in spill paths.**
+  - Child operators (`where/sort/limit/offset/having/group`) apply to each parent's child subset independently, then reattach to that parent.
+  - Global child operators across all parents are not allowed in this workfront.
 - **Use the `RowSet` contract end-to-end for nested join inputs/outputs.**
   - Nested join must accept either `flat` or `spill` row sets for both sides.
 - **Grace-hash partition spill for oversized build side.**
   - Deterministic partition assignment via `std.hash.Wyhash` seed `0`.
+- **No runtime allocator usage in executor hot path.**
+  - Any nested spill workspace must be preallocated per query slot and passed through runtime/query buffers.
 - **Keep current semantics for unsupported join predicates.**
   - Nested selection remains key-equality based as today; do not widen SQL semantics in this workfront.
 
@@ -44,18 +49,24 @@ Implement a production-ready, spill-aware nested selection join path that scales
 - Add `hash_join.zig` operator module for spill-aware hash join over `RowSet`.
 - Define input/output descriptors that work with `RowSet`.
 - Move nested selection orchestration in `executor.zig` to call the new operator.
+- Add explicit per-parent join API contract:
+  - input parent stream + child stream + join key mapping
+  - output grouped rows preserving parent association for tree protocol serialization.
 
 ### Phase 2: In-Memory Hash Join Fast Path
 
 - Build/probe hash join for `flat` inputs.
 - Support left join output semantics used by nested selection (emit unmatched left rows with null-filled right projection).
 - Preserve deterministic output ordering policy (documented and tested).
+- Apply child operators per parent (not globally) in this path.
 
 ### Phase 3: Spill-Aware Hash Join
 
 - Add Grace-hash partitioning for oversized build/probe streams.
 - Spill partitions via existing temp page facilities.
 - Partition processing must be deterministic and bounded.
+- Ensure per-parent semantics survive spill:
+  - partition and process by join key while preserving parent identity and per-parent child operator behavior.
 
 ### Phase 4: Pipeline Integration
 
@@ -77,6 +88,7 @@ Implement a production-ready, spill-aware nested selection join path that scales
 - Integration tests:
   - Nested selection with left/right datasets > `scan_batch_size` returns complete results.
   - Nested selection with both sides spilling remains correct and deterministic.
+  - Nested `limit/offset/sort` is verified per parent under spill (example: each parent returns its own top N children).
   - Mixed query with scan spill + sort spill + nested selection completes under default temp budget.
 - Regression:
   - Existing feature/internals/stress suites remain green.

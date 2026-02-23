@@ -66,6 +66,13 @@ Queries should degrade performance under memory pressure before failing, using p
   - Remaining fail-closed guard currently covers collector-backed nested selection; non-spill nested path also fail-closes when right-side child scan exceeds one in-memory batch.
 - The unified operator I/O contract (flat buffer vs spill descriptor/iterator chaining) is still pending and remains the next major step.
 
+### Handoff Update (2026-02-23, latest)
+- Current state: nested selection semantics are per-parent for existing paths, and collector-backed nested selection is implemented, but nested right-side scaling is still bounded in executor internals.
+- Next major implementation for nested spill scalability is tracked in Workfront 13:
+  - `docs/workfronts/13_nested_spill_hash_join_workfront.md`
+  - Specifically: spill-aware hash join with per-parent child-operator semantics.
+- WF03 no longer owns the nested spill engine design; it owns the spill foundations and row-set/operator-chain contracts that WF13 builds on.
+
 ## Non-Negotiables
 1. Core logic must use `Storage` abstraction for temp/spill I/O.
 2. Fail only on hard-stop conditions (disk failures, corruption, impossible resource limits).
