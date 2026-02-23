@@ -636,21 +636,37 @@ fn rollbackBulkInsertedRows(
     row_ids: []const RowId,
 ) MutationError!void {
     const undo = undo_log orelse return;
+    _ = undo;
+    _ = wal;
     var i: usize = 0;
     while (i < row_ids.len) : (i += 1) {
-        try deleteSingleRow(
-            catalog,
-            pool,
-            wal,
-            undo,
-            tx_id,
-            schema,
-            row_ids[i],
-        );
+        try deleteInsertedRowForRollback(catalog, pool, schema, tx_id, row_ids[i]);
     }
     if (row_ids.len > 0) {
         catalog.decrementRowCount(model_id, @intCast(row_ids.len));
     }
+}
+
+/// Compensation delete used only for same-transaction bulk-insert rollback.
+///
+/// It intentionally skips undo/WAL writes: rollback is already represented by
+/// tx abort, and pushing undo here can resurrect rows during abort processing.
+fn deleteInsertedRowForRollback(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    schema: *const RowSchema,
+    tx_id: TxId,
+    row_id: RowId,
+) MutationError!void {
+    _ = catalog;
+    _ = schema;
+    _ = tx_id;
+    var pinned = try PinnedMutationPage.pin(pool, row_id.page_id);
+    defer pinned.release();
+
+    _ = HeapPage.read(pinned.page, row_id.slot) catch return error.StorageRead;
+    HeapPage.delete(pinned.page, row_id.slot) catch return error.StorageRead;
+    pinned.markDirty();
 }
 
 fn precheckInBatchUniqueDuplicates(

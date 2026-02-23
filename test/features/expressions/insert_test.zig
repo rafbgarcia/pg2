@@ -79,6 +79,23 @@ fn buildBulkUserInsertRequest(buf: []u8, start_id: usize, row_count: usize) ![]c
     return stream.getWritten();
 }
 
+fn buildBulkUserWithEmailInsertRequest(buf: []u8, start_id: usize, row_count: usize) ![]const u8 {
+    var stream = std.io.fixedBufferStream(buf);
+    const writer = stream.writer();
+    try writer.writeAll("User |> insert(");
+    var row_index: usize = 0;
+    while (row_index < row_count) : (row_index += 1) {
+        if (row_index > 0) try writer.writeAll(", ");
+        const id = start_id + row_index;
+        try writer.print(
+            "(id = {d}, email = \"user-{d}@test.com\", name = \"User {d}\")",
+            .{ id, id, id },
+        );
+    }
+    try writer.writeAll(") {}");
+    return stream.getWritten();
+}
+
 test "feature insert returns explicit insert count via session path" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
@@ -432,22 +449,9 @@ test "feature multi-row insert large batch maintains non-PK unique index entries
         \\}
     );
 
-    var insert_stream_buf: [12 * 1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(insert_stream_buf[0..]);
-    const writer = stream.writer();
-    try writer.writeAll("User |> insert(");
-    var row_index: usize = 0;
-    while (row_index < 80) : (row_index += 1) {
-        if (row_index > 0) try writer.writeAll(", ");
-        const id = row_index + 1;
-        try writer.print(
-            "(id = {d}, email = \"user-{d}@test.com\", name = \"User {d}\")",
-            .{ id, id, id },
-        );
-    }
-    try writer.writeAll(") {}");
-
-    var result = try executor.run(stream.getWritten());
+    var insert_buf: [12 * 1024]u8 = undefined;
+    const insert_req = try buildBulkUserWithEmailInsertRequest(insert_buf[0..], 1, 80);
+    var result = try executor.run(insert_req);
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=80 updated_rows=0 deleted_rows=0\n",
         result,
@@ -458,6 +462,161 @@ test "feature multi-row insert large batch maintains non-PK unique index entries
     );
     try std.testing.expectEqualStrings(
         "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        result,
+    );
+}
+
+test "feature multi-row insert token-bound batch preserves heap and unique index correctness" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(email, string, notNull)
+        \\  field(name, string, notNull)
+        \\  index(idx_email, [email], unique)
+        \\}
+    );
+
+    var insert_buf: [128 * 1024]u8 = undefined;
+    const insert_req = try buildBulkUserWithEmailInsertRequest(insert_buf[0..], 1, 170);
+    var result = try executor.run(insert_req);
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=170 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run("User |> where(id == 1) { id email }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,user-1@test.com\n",
+        result,
+    );
+    result = try executor.run("User |> where(id == 85) { id email }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n85,user-85@test.com\n",
+        result,
+    );
+    result = try executor.run("User |> where(id == 170) { id email }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n170,user-170@test.com\n",
+        result,
+    );
+
+    // Duplicate email proves non-PK unique index entries were maintained.
+    result = try executor.run(
+        "User |> insert(id = 5001, email = \"user-85@test.com\", name = \"dup\") {}",
+    );
+    try std.testing.expectEqualStrings(
+        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        result,
+    );
+}
+
+test "feature multi-row insert rejects PK duplicate against existing row" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\}
+    );
+
+    var result = try executor.run(
+        "User |> insert(id = 1, name = \"existing\") {}",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run(
+        "User |> insert((id = 1, name = \"dup\"), (id = 2, name = \"new\")) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        result,
+    );
+
+    result = try executor.run("User { id name }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,existing\n",
+        result,
+    );
+}
+
+test "feature multi-row insert enforces FK constraints for valid and invalid batches" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\}
+        \\
+        \\Post {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(user_id, i64, notNull)
+        \\  reference(author, user_id, User.id, withReferentialIntegrity(onDeleteRestrict, onUpdateCascade))
+        \\}
+    );
+
+    var result = try executor.run("User |> insert((id = 1), (id = 2)) {}");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=2 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run(
+        "Post |> insert((id = 10, user_id = 1), (id = 11, user_id = 2)) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=2 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run(
+        "Post |> insert((id = 12, user_id = 1), (id = 13, user_id = 999)) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "ERR query: insert failed; class=fatal; code=ReferentialIntegrityViolation\n",
+        result,
+    );
+
+    result = try executor.run("Post { id user_id }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=2 inserted_rows=0 updated_rows=0 deleted_rows=0\n10,1\n11,2\n",
+        result,
+    );
+}
+
+test "feature multi-row insert applies defaults for omitted columns" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(tier, string, notNull, default, "free")
+        \\  field(marketing_opt_in, bool, notNull, default, false)
+        \\}
+    );
+
+    const result = try executor.run(
+        "User |> insert((id = 1), (id = 2, tier = \"pro\"), (id = 3)) { id tier marketing_opt_in }",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=3 inserted_rows=3 updated_rows=0 deleted_rows=0\n1,free,false\n2,pro,false\n3,free,false\n",
         result,
     );
 }
