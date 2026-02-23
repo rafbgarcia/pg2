@@ -13,7 +13,7 @@ You are an expert Database Engineer building pg2 database in Zig 0.15.2.
 - Review the work done by the subagent and address design/gaps/quality/tests/etc. as needed for production-grade code.
 - Commits should be done by you (the main session, not subagents)
 
-note: subagents start fresh - provide relevant task context, ).
+note: subagents start fresh so you must provide explicit, precise task guidance.
 
 ### Relevant conventions
 

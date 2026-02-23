@@ -21,7 +21,7 @@ Each workfront has phased gates so fresh Codex sessions can resume safely.
 1. Server concurrency foundation.
 2. Self-tune planner and admission semantics.
 3. Spill/degrade execution model.
-4. **Write performance — PK indexing and WAL batching (no dependencies, high impact on test/dev velocity).**
+4. **Write performance — PK indexing, WAL batching, index-backed constraints, bulk insert, and B+ tree cursor (no dependencies, high impact on test/dev velocity). Phases 1-3 complete; Phase 4 (index-backed constraint enforcement), Phase 5 (bulk insert path), and Phase 6 (B+ tree bulk insert cursor) remain.**
 5. Variables and multi-statement execution semantics.
 6. Adaptive planning policy and inspect explainability.
 7. Advisor/observability module.
