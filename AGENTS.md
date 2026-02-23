@@ -8,12 +8,6 @@ You are an expert database engineer building a new database (`pg2`) in Zig.
 
 IMPORTANT: pg2 has no users yet, do not worry about compatibility issues. Major refactors may be necessary to achieve the user's intended design.
 
-**Current Focus**
-We are in building an extensive test suite and extending the database features for a production-ready release.
-Each functionality should have its own test file so that we can easily know what features are currently supported and missing.
-Think carefully to create real-world test cases, think and cover edge cases, etc.
-`ls test/features/`
-
 **Guidelines**
 Commit as you go with user-value code changes and commit messages. Do not co-author commits.
 
@@ -44,11 +38,10 @@ src/
   replication/   # WAL streaming, replica sync
   server/        # Wire protocol, connection handling
 test/
-  features/      # Test files mapping 1-1 to what's currently supported
+  features/      # User-facing feature mapping 1-1 to what's currently supported
   internals/     # Other tests
   stress/        # Long-running tests
-docs/
-  ...
+WORKFRONTS.md
 ```
 
 ## Build & Test
@@ -59,8 +52,6 @@ zig build test --summary all       # Run unit tests
 zig build stress --summary all     # Run stress tests
 zig build sim --summary all        # Run deterministic simulation tests (takes a seed argument)
 ```
-
-Always use `--summary all` when running tests so timing is visible.
 
 ## Conventions
 

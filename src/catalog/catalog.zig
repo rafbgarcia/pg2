@@ -59,6 +59,7 @@ pub const IndexInfo = struct {
     column_count: u8 = 0,
     is_unique: bool = false,
     btree_root_page_id: u32 = 0,
+    btree_next_page_id: u32 = 0,
     // O(1) stats.
     entry_count: u64 = 0,
     distinct_count: u64 = 0,
@@ -801,6 +802,35 @@ fn findPrimaryKeyOrId(
         if (model.columns[i].is_primary_key) return i;
     }
     return catalog.findColumn(model_id, "id");
+}
+
+/// Returns the ColumnId of the primary key column, or null if no PK is defined.
+pub fn findPrimaryKeyColumnId(catalog: *const Catalog, model_id: ModelId) ?ColumnId {
+    std.debug.assert(model_id < catalog.model_count);
+    const model = &catalog.models[model_id];
+    var i: ColumnId = 0;
+    while (i < model.column_count) : (i += 1) {
+        if (model.columns[i].is_primary_key) return i;
+    }
+    return null;
+}
+
+/// Returns the index slot of the PK B+ tree index, or null if none exists.
+pub fn findPrimaryKeyIndex(catalog: *const Catalog, model_id: ModelId) ?u16 {
+    std.debug.assert(model_id < catalog.model_count);
+    const pk_col = findPrimaryKeyColumnId(catalog, model_id) orelse return null;
+    const model = &catalog.models[model_id];
+    var i: u16 = 0;
+    while (i < model.index_count) : (i += 1) {
+        if (model.indexes[i].is_unique and
+            model.indexes[i].column_count == 1 and
+            model.indexes[i].column_ids[0] == pk_col and
+            model.indexes[i].btree_root_page_id != 0)
+        {
+            return i;
+        }
+    }
+    return null;
 }
 
 fn findModelForeignKey(

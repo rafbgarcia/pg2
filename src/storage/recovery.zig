@@ -148,6 +148,15 @@ fn classifyTxReplay(
                 if (saw_begin) return error.Corruption;
                 saw_begin = true;
             },
+            // B+ tree index records use tx_id=0 (no transaction context) and
+            // are structural maintenance — not transactional mutations.
+            .btree_insert,
+            .btree_delete,
+            .btree_split_leaf,
+            .btree_split_internal,
+            .btree_new_root,
+            .checkpoint,
+            => {},
             else => saw_mutation = true,
         }
     }

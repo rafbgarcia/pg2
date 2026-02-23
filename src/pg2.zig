@@ -17,6 +17,7 @@ pub const storage = struct {
     pub const temp = @import("storage/temp.zig");
     pub const recovery = @import("storage/recovery.zig");
     pub const spill_row = @import("storage/spill_row.zig");
+    pub const index_key = @import("storage/index_key.zig");
 };
 
 pub const mvcc = struct {
@@ -45,6 +46,7 @@ pub const executor = struct {
     pub const mutation = @import("executor/mutation.zig");
     pub const spill_collector = @import("executor/spill_collector.zig");
     pub const external_sort = @import("executor/external_sort.zig");
+    pub const index_maintenance = @import("executor/index_maintenance.zig");
 };
 
 pub const simulator = struct {
@@ -83,6 +85,7 @@ comptime {
     _ = storage.temp;
     _ = storage.recovery;
     _ = storage.spill_row;
+    _ = storage.index_key;
     _ = mvcc.transaction;
     _ = mvcc.undo;
     _ = parser.tokenizer;
@@ -99,6 +102,7 @@ comptime {
     _ = executor.mutation;
     _ = executor.spill_collector;
     _ = executor.external_sort;
+    _ = executor.index_maintenance;
     _ = simulator.disk;
     _ = simulator.clock;
     _ = simulator.fault_matrix;

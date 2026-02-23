@@ -30,8 +30,9 @@ test "feature schema reference registers association without implicit index" {
     const post = env.catalog.models[post_id];
 
     try std.testing.expectEqual(@as(u16, 1), user.association_count);
-    try std.testing.expectEqual(@as(u16, 0), user.index_count);
-    try std.testing.expectEqual(@as(u16, 0), post.index_count);
+    // index_count is 1: the auto-created PK B+ tree index.
+    try std.testing.expectEqual(@as(u16, 1), user.index_count);
+    try std.testing.expectEqual(@as(u16, 1), post.index_count);
 
     const posts_assoc = user.associations[0];
     try std.testing.expectEqual(catalog_mod.AssociationKind.has_many, posts_assoc.kind);

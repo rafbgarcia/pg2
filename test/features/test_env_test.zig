@@ -13,6 +13,7 @@ const schema_loader_mod = pg2.catalog.schema_loader;
 const parser_mod = pg2.parser.parse;
 const tokenizer_mod = pg2.parser.tokenizer;
 const heap_mod = pg2.storage.heap;
+const btree_mod = pg2.storage.btree;
 const disk_mod = pg2.simulator.disk;
 const session_mod = pg2.server.session;
 const pool_mod = pg2.server.pool;
@@ -62,6 +63,30 @@ pub const TestExecutor = struct {
             const page = try self.runtime.pool.pin(page_id);
             heap_mod.HeapPage.init(page);
             self.runtime.pool.unpin(page_id, true);
+        }
+
+        // Auto-create PK B+ tree indexes for models with primaryKey columns.
+        var mid: u16 = 0;
+        while (mid < self.catalog.*.model_count) : (mid += 1) {
+            const pk_col = catalog_mod.findPrimaryKeyColumnId(self.catalog, mid) orelse continue;
+
+            const btree_start_page: u32 = 10_000 + @as(u32, mid) * 1000;
+            const btree = btree_mod.BTree.init(
+                &self.runtime.pool,
+                &self.runtime.wal,
+                @as(u64, btree_start_page),
+            ) catch continue;
+
+            const idx_id = self.catalog.addIndex(
+                mid,
+                "pk",
+                &[_]catalog_mod.ColumnId{pk_col},
+                true,
+            ) catch continue;
+
+            self.catalog.models[mid].indexes[idx_id].btree_root_page_id = btree_start_page;
+            self.catalog.models[mid].indexes[idx_id].btree_next_page_id =
+                @intCast(btree.next_page_id);
         }
     }
 

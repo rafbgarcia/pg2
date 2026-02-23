@@ -41,10 +41,27 @@ pub fn enforceInsertUniqueness(
         }
     }
 
+    try enforceNonPkUniqueness(catalog, pool, model_id, values);
+}
+
+/// Enforce uniqueness for non-PK unique indexes only. Used when the PK is
+/// already checked via B+ tree lookup, so only secondary unique indexes
+/// need the heap scan fallback.
+pub fn enforceNonPkUniqueness(
+    catalog: *const Catalog,
+    pool: *BufferPool,
+    model_id: ModelId,
+    values: []const Value,
+) MutationError!void {
+    const model = &catalog.models[model_id];
+    const pk_col = catalog_mod.findPrimaryKeyColumnId(catalog, model_id);
+
     var idx_id: u16 = 0;
     while (idx_id < model.index_count) : (idx_id += 1) {
         const idx = model.indexes[idx_id];
         if (!idx.is_unique or idx.column_count == 0) continue;
+        // Skip the PK index — it's already enforced via B+ tree.
+        if (idx.column_count == 1 and pk_col != null and idx.column_ids[0] == pk_col.?) continue;
         if (uniqueKeyHasNull(values, idx.column_ids[0..idx.column_count])) continue;
         if (rowExistsForUniqueIndex(catalog, pool, model_id, &idx, values)) {
             return error.DuplicateKey;

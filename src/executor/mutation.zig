@@ -74,6 +74,15 @@ const enforceIncomingUpdateReferentialIntegrity = referential_integrity_mod.enfo
 
 // Constraints delegation
 const enforceInsertUniqueness = constraints_mod.enforceInsertUniqueness;
+const enforceNonPkUniqueness = constraints_mod.enforceNonPkUniqueness;
+
+// Index maintenance delegation
+const index_maintenance_mod = @import("index_maintenance.zig");
+const openPrimaryKeyIndex = index_maintenance_mod.openPrimaryKeyIndex;
+const insertPrimaryKey = index_maintenance_mod.insertPrimaryKey;
+const deletePrimaryKey = index_maintenance_mod.deletePrimaryKey;
+const primaryKeyExists = index_maintenance_mod.primaryKeyExists;
+const index_key_mod = @import("../storage/index_key.zig");
 
 // Value builder delegation
 const ParameterBindingContext = value_builder_mod.ParameterBindingContext;
@@ -290,12 +299,18 @@ pub fn executeInsertWithDiagnosticAndParameters(
         values[0..schema.column_count],
         assigned_columns[0..schema.column_count],
     );
-    try enforceInsertUniqueness(
-        catalog,
-        pool,
-        model_id,
-        values[0..schema.column_count],
-    );
+    // PK uniqueness: use B+ tree O(log n) lookup when available, else heap scan.
+    var pk_btree = openPrimaryKeyIndex(catalog, pool, wal, model_id);
+    if (pk_btree != null) {
+        const pk_col = catalog_mod.findPrimaryKeyColumnId(catalog, model_id).?;
+        if (try primaryKeyExists(&pk_btree.?, values[pk_col])) {
+            return error.DuplicateKey;
+        }
+        // Non-PK unique indexes still need heap scan.
+        try enforceNonPkUniqueness(catalog, pool, model_id, values[0..schema.column_count]);
+    } else {
+        try enforceInsertUniqueness(catalog, pool, model_id, values[0..schema.column_count]);
+    }
     try enforceOutgoingReferentialIntegrity(
         catalog,
         pool,
@@ -378,6 +393,12 @@ pub fn executeInsertWithDiagnosticAndParameters(
 
     const result = RowId{ .page_id = page_id, .slot = slot };
     std.debug.assert(result.page_id >= model.heap_first_page_id);
+
+    // Insert into PK B+ tree index after successful heap write.
+    if (pk_btree) |*btree| {
+        const pk_col = catalog_mod.findPrimaryKeyColumnId(catalog, model_id).?;
+        try insertPrimaryKey(catalog, btree, model_id, values[pk_col], result);
+    }
 
     try appendOverflowRelinkWalForRow(
         wal,
@@ -624,6 +645,24 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                 eval_ctx,
             ) catch |e| return e;
 
+            // PK uniqueness enforcement on UPDATE (also maintains B+ tree).
+            var pk_btree_update = openPrimaryKeyIndex(catalog, pool, wal, model_id);
+            var pk_changed = false;
+            if (pk_btree_update != null) {
+                const pk_col_update = catalog_mod.findPrimaryKeyColumnId(catalog, model_id).?;
+                const old_pk = row.values[pk_col_update];
+                const new_pk = new_values[pk_col_update];
+                if (row_mod.compareValues(old_pk, new_pk) != .eq) {
+                    pk_changed = true;
+                    // Check that the new PK value doesn't already exist.
+                    if (try primaryKeyExists(&pk_btree_update.?, new_pk)) {
+                        return error.DuplicateKey;
+                    }
+                    // Delete old key before heap update.
+                    try deletePrimaryKey(catalog, &pk_btree_update.?, model_id, old_pk);
+                }
+            }
+
             try enforceOutgoingReferentialIntegrity(
                 catalog,
                 pool,
@@ -650,6 +689,14 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                 row.row_id,
                 new_values[0..row.column_count],
             );
+
+            // Insert new PK key after successful heap update.
+            if (pk_changed) {
+                if (pk_btree_update) |*btree| {
+                    const pk_col_update = catalog_mod.findPrimaryKeyColumnId(catalog, model_id).?;
+                    try insertPrimaryKey(catalog, btree, model_id, new_values[pk_col_update], row.row_id);
+                }
+            }
             if (returning_capture) |capture| {
                 try appendReturningRow(
                     capture,
@@ -858,6 +905,7 @@ pub fn executeDeleteWithReturningAndParameters(
                 wal,
                 undo_log,
                 tx_id,
+                model_id,
                 schema,
                 row.row_id,
             );
@@ -901,13 +949,14 @@ fn cloneValueForReturning(
     };
 }
 
-/// Delete a single matched row: undo push, tombstone, WAL append.
+/// Delete a single matched row: undo push, tombstone, WAL append, PK index removal.
 pub fn deleteSingleRow(
     catalog: *Catalog,
     pool: *BufferPool,
     wal: *Wal,
     undo_log: *UndoLog,
     tx_id: TxId,
+    model_id: ModelId,
     schema: *const RowSchema,
     row_id: RowId,
 ) MutationError!void {
@@ -917,6 +966,17 @@ pub fn deleteSingleRow(
     // Read old data for undo.
     const old_data = HeapPage.read(pinned.page, row_id.slot) catch
         return error.StorageRead;
+
+    // Remove from PK B+ tree index before tombstoning.
+    // Decode only the PK column — not the full row — so that overflow strings
+    // in other columns don't cause a spurious Corruption error.
+    var pk_btree = openPrimaryKeyIndex(catalog, pool, wal, model_id);
+    if (pk_btree) |*btree| {
+        const pk_col = catalog_mod.findPrimaryKeyColumnId(catalog, model_id).?;
+        const pk_value = row_mod.decodeColumnChecked(schema, old_data, pk_col) catch
+            return error.Corruption;
+        try deletePrimaryKey(catalog, btree, model_id, pk_value);
+    }
 
     _ = undo_log.push(
         tx_id,
