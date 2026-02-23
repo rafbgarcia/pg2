@@ -8,12 +8,18 @@
 const std = @import("std");
 const row_mod = @import("../storage/row.zig");
 const overflow_mod = @import("../storage/overflow.zig");
+const btree_mod = @import("../storage/btree.zig");
+const buffer_pool_mod = @import("../storage/buffer_pool.zig");
+const wal_mod = @import("../storage/wal.zig");
 
 const ColumnType = row_mod.ColumnType;
 const RowSchema = row_mod.RowSchema;
 const Value = row_mod.Value;
 const OverflowPageIdAllocator = overflow_mod.PageIdAllocator;
 const OverflowReclaimQueue = overflow_mod.ReclaimQueue;
+const BTree = btree_mod.BTree;
+const BufferPool = buffer_pool_mod.BufferPool;
+const Wal = wal_mod.Wal;
 
 /// Capacity limits.
 pub const max_models = 256;
@@ -563,6 +569,41 @@ pub const Catalog = struct {
             .reclaimed_pages_total = self.overflow_reclaim_stats.reclaimed_pages_total,
             .reclaim_failures_total = self.overflow_reclaim_stats.reclaim_failures_total,
         };
+    }
+
+    /// Allocate B+ trees for all unique indexes that do not yet have one.
+    ///
+    /// Each unique index with `btree_root_page_id == 0` gets a freshly
+    /// initialized B+ tree rooted at the current `next_index_page_id.*`.
+    /// After allocation, the page-id cursor advances by `page_region_size`
+    /// to leave room for splits between indexes.
+    ///
+    /// Idempotent: indexes that already have a non-zero root are skipped.
+    pub fn initializeIndexTrees(
+        self: *Catalog,
+        pool: *BufferPool,
+        wal: *Wal,
+        next_index_page_id: *u32,
+    ) !void {
+        // Pages reserved per index to accommodate splits before the next
+        // index region begins. Must be large enough that normal insert
+        // workloads never collide with the adjacent index's page region.
+        const page_region_size: u32 = 100;
+
+        for (0..self.model_count) |mi| {
+            const model = &self.models[mi];
+            for (0..model.index_count) |ii| {
+                const index = &model.indexes[ii];
+                if (!index.is_unique) continue;
+                if (index.btree_root_page_id != 0) continue;
+
+                const start_page_id: u64 = @as(u64, next_index_page_id.*);
+                const btree = try BTree.init(pool, wal, start_page_id);
+                index.btree_root_page_id = next_index_page_id.*;
+                index.btree_next_page_id = @intCast(btree.next_page_id);
+                next_index_page_id.* += page_region_size;
+            }
+        }
     }
 
     /// Seal the catalog. No further additions allowed.
@@ -1173,4 +1214,116 @@ test "resolve associations rejects belongs_to without explicit RI mode" {
     try cat.setAssociationKeys(post_id, assoc_id, "user_id", "id");
 
     try testing.expectError(error.InvalidAssociationConfig, cat.resolveAssociations());
+}
+
+test "initializeIndexTrees allocates B+ trees for all unique indexes" {
+    const bootstrap_mod = @import("../runtime/bootstrap.zig");
+    const disk_mod = @import("../simulator/disk.zig");
+
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+    const backing = try std.testing.allocator.alloc(u8, 256 * 1024 * 1024);
+    defer std.testing.allocator.free(backing);
+    var runtime = try bootstrap_mod.BootstrappedRuntime.init(
+        backing,
+        disk.storage(),
+        .{ .max_query_slots = 1 },
+    );
+    defer runtime.deinit();
+
+    // Build catalog: 2 models, each with a PK unique index + a non-PK unique
+    // index + a non-unique index.
+    var cat = Catalog{};
+
+    // Model 0: "User"
+    const user_id = try cat.addModel("User");
+    const user_pk_col = try cat.addColumn(user_id, "id", .i64, false);
+    const user_email_col = try cat.addColumn(user_id, "email", .string, false);
+    _ = try cat.addColumn(user_id, "name", .string, true);
+    // PK unique index
+    _ = try cat.addIndex(user_id, "user_pk", &[_]ColumnId{user_pk_col}, true);
+    // Non-PK unique index
+    _ = try cat.addIndex(user_id, "user_email_uniq", &[_]ColumnId{user_email_col}, true);
+    // Non-unique index (should NOT get a btree)
+    _ = try cat.addIndex(user_id, "user_name_idx", &[_]ColumnId{2}, false);
+
+    // Model 1: "Post"
+    const post_id = try cat.addModel("Post");
+    const post_pk_col = try cat.addColumn(post_id, "id", .i64, false);
+    const post_slug_col = try cat.addColumn(post_id, "slug", .string, false);
+    _ = try cat.addColumn(post_id, "body", .string, true);
+    // PK unique index
+    _ = try cat.addIndex(post_id, "post_pk", &[_]ColumnId{post_pk_col}, true);
+    // Non-PK unique index
+    _ = try cat.addIndex(post_id, "post_slug_uniq", &[_]ColumnId{post_slug_col}, true);
+    // Non-unique index
+    _ = try cat.addIndex(post_id, "post_body_idx", &[_]ColumnId{2}, false);
+
+    var next_page_id: u32 = 10_000;
+    try cat.initializeIndexTrees(&runtime.pool, &runtime.wal, &next_page_id);
+
+    // All 4 unique indexes should have btree_root_page_id != 0.
+    // user_pk at 10_000, user_email_uniq at 10_100, post_pk at 10_200, post_slug_uniq at 10_300.
+    try testing.expect(cat.models[user_id].indexes[0].btree_root_page_id != 0);
+    try testing.expectEqual(@as(u32, 10_000), cat.models[user_id].indexes[0].btree_root_page_id);
+    try testing.expect(cat.models[user_id].indexes[1].btree_root_page_id != 0);
+    try testing.expectEqual(@as(u32, 10_100), cat.models[user_id].indexes[1].btree_root_page_id);
+
+    try testing.expect(cat.models[post_id].indexes[0].btree_root_page_id != 0);
+    try testing.expectEqual(@as(u32, 10_200), cat.models[post_id].indexes[0].btree_root_page_id);
+    try testing.expect(cat.models[post_id].indexes[1].btree_root_page_id != 0);
+    try testing.expectEqual(@as(u32, 10_300), cat.models[post_id].indexes[1].btree_root_page_id);
+
+    // Non-unique indexes must remain unallocated.
+    try testing.expectEqual(@as(u32, 0), cat.models[user_id].indexes[2].btree_root_page_id);
+    try testing.expectEqual(@as(u32, 0), cat.models[post_id].indexes[2].btree_root_page_id);
+
+    // btree_next_page_id must be set (root + 1 for a fresh tree).
+    try testing.expectEqual(@as(u32, 10_001), cat.models[user_id].indexes[0].btree_next_page_id);
+    try testing.expectEqual(@as(u32, 10_101), cat.models[user_id].indexes[1].btree_next_page_id);
+
+    // next_index_page_id cursor should have advanced by 100 per unique index (4 total).
+    try testing.expectEqual(@as(u32, 10_400), next_page_id);
+}
+
+test "initializeIndexTrees is idempotent" {
+    const bootstrap_mod = @import("../runtime/bootstrap.zig");
+    const disk_mod = @import("../simulator/disk.zig");
+
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+    const backing = try std.testing.allocator.alloc(u8, 256 * 1024 * 1024);
+    defer std.testing.allocator.free(backing);
+    var runtime = try bootstrap_mod.BootstrappedRuntime.init(
+        backing,
+        disk.storage(),
+        .{ .max_query_slots = 1 },
+    );
+    defer runtime.deinit();
+
+    var cat = Catalog{};
+    const mid = try cat.addModel("Item");
+    const pk_col = try cat.addColumn(mid, "id", .i64, false);
+    const code_col = try cat.addColumn(mid, "code", .string, false);
+    _ = try cat.addIndex(mid, "item_pk", &[_]ColumnId{pk_col}, true);
+    _ = try cat.addIndex(mid, "item_code_uniq", &[_]ColumnId{code_col}, true);
+
+    var next_page_id: u32 = 20_000;
+    try cat.initializeIndexTrees(&runtime.pool, &runtime.wal, &next_page_id);
+
+    // Capture values after first call.
+    const root_0 = cat.models[mid].indexes[0].btree_root_page_id;
+    const root_1 = cat.models[mid].indexes[1].btree_root_page_id;
+    const next_0 = cat.models[mid].indexes[0].btree_next_page_id;
+    const next_1 = cat.models[mid].indexes[1].btree_next_page_id;
+    const cursor_after_first = next_page_id;
+
+    // Second call must be a no-op: values unchanged, cursor not advanced.
+    try cat.initializeIndexTrees(&runtime.pool, &runtime.wal, &next_page_id);
+
+    try testing.expectEqual(root_0, cat.models[mid].indexes[0].btree_root_page_id);
+    try testing.expectEqual(root_1, cat.models[mid].indexes[1].btree_root_page_id);
+    try testing.expectEqual(next_0, cat.models[mid].indexes[0].btree_next_page_id);
+    try testing.expectEqual(next_1, cat.models[mid].indexes[1].btree_next_page_id);
+    try testing.expectEqual(cursor_after_first, next_page_id);
 }

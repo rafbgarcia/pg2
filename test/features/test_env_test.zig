@@ -65,29 +65,43 @@ pub const TestExecutor = struct {
             self.runtime.pool.unpin(page_id, true);
         }
 
-        // Auto-create PK B+ tree indexes for models with primaryKey columns.
-        var mid: u16 = 0;
-        while (mid < self.catalog.*.model_count) : (mid += 1) {
-            const pk_col = catalog_mod.findPrimaryKeyColumnId(self.catalog, mid) orelse continue;
-
-            const btree_start_page: u32 = 10_000 + @as(u32, mid) * 1000;
-            const btree = btree_mod.BTree.init(
-                &self.runtime.pool,
-                &self.runtime.wal,
-                @as(u64, btree_start_page),
-            ) catch continue;
-
-            const idx_id = self.catalog.addIndex(
-                mid,
-                "pk",
-                &[_]catalog_mod.ColumnId{pk_col},
-                true,
-            ) catch continue;
-
-            self.catalog.models[mid].indexes[idx_id].btree_root_page_id = btree_start_page;
-            self.catalog.models[mid].indexes[idx_id].btree_next_page_id =
-                @intCast(btree.next_page_id);
+        // Auto-create PK IndexInfo entries for models with primaryKey columns
+        // that don't already have a PK index in the catalog.
+        {
+            var mid: u16 = 0;
+            while (mid < self.catalog.*.model_count) : (mid += 1) {
+                const pk_col = catalog_mod.findPrimaryKeyColumnId(self.catalog, mid) orelse continue;
+                // Check if a unique index already covers this PK column.
+                const model = &self.catalog.models[mid];
+                var has_pk_index = false;
+                var ii: u16 = 0;
+                while (ii < model.index_count) : (ii += 1) {
+                    if (model.indexes[ii].is_unique and
+                        model.indexes[ii].column_count == 1 and
+                        model.indexes[ii].column_ids[0] == pk_col)
+                    {
+                        has_pk_index = true;
+                        break;
+                    }
+                }
+                if (!has_pk_index) {
+                    _ = self.catalog.addIndex(
+                        mid,
+                        "pk",
+                        &[_]catalog_mod.ColumnId{pk_col},
+                        true,
+                    ) catch continue;
+                }
+            }
         }
+
+        // Initialize B+ tree indexes for all unique indexes (PK and non-PK).
+        var next_index_page_id: u32 = 10_000;
+        try self.catalog.initializeIndexTrees(
+            &self.runtime.pool,
+            &self.runtime.wal,
+            &next_index_page_id,
+        );
     }
 
     pub fn run(self: *TestExecutor, request: []const u8) ![]const u8 {

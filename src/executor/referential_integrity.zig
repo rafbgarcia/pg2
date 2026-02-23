@@ -13,6 +13,7 @@ const catalog_mod = @import("../catalog/catalog.zig");
 const tx_mod = @import("../mvcc/transaction.zig");
 const undo_mod = @import("../mvcc/undo.zig");
 const scan_mod = @import("scan.zig");
+const index_maintenance_mod = @import("index_maintenance.zig");
 
 const mutation = @import("mutation.zig");
 const MutationError = mutation.MutationError;
@@ -35,6 +36,7 @@ const UndoLog = undo_mod.UndoLog;
 pub fn enforceOutgoingReferentialIntegrity(
     catalog: *const Catalog,
     pool: *BufferPool,
+    wal: *Wal,
     model_id: ModelId,
     row_values: []const Value,
 ) MutationError!void {
@@ -57,6 +59,29 @@ pub fn enforceOutgoingReferentialIntegrity(
         const fk_value = row_values[local_idx];
         if (fk_value == .null_value) continue;
 
+        // Try B+ tree lookup when FK references the target's PK column.
+        const target_pk_col = catalog_mod.findPrimaryKeyColumnId(
+            catalog,
+            assoc.target_model_id,
+        );
+        if (target_pk_col != null and assoc.foreign_key_column_id == target_pk_col.?) {
+            // Target FK column is the PK — use B+ tree if available.
+            var pk_btree = index_maintenance_mod.openPrimaryKeyIndex(
+                catalog,
+                pool,
+                wal,
+                assoc.target_model_id,
+            );
+            if (pk_btree != null) {
+                const exists = index_maintenance_mod.primaryKeyExists(
+                    &pk_btree.?,
+                    fk_value,
+                ) catch |e| return e;
+                if (!exists) return error.ReferentialIntegrityViolation;
+                continue;
+            }
+        }
+        // Fallback: heap scan.
         if (!rowExistsForValue(
             catalog,
             pool,

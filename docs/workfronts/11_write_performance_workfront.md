@@ -4,8 +4,8 @@
 Eliminate O(n²) insert degradation by wiring B+ tree indexes into constraint enforcement, query execution, and bulk mutation paths. Reduce per-insert WAL overhead through group commit.
 
 ## Current State
-- **Phases 1-3 complete.** PK B+ tree indexes are auto-created and used for uniqueness checks (O(log n) vs O(n²) heap scan), PK index-assisted point/range scans work, and WAL group commit reduces fsyncs from N to ~1 for N sequential inserts.
-- **Phase 4 next.** FK checks and non-PK unique constraints still use O(n) heap scans despite B+ tree infrastructure existing. The index system is PK-only — generalization to all unique indexes is needed before bulk insert can be built on a solid foundation.
+- **Phases 1-4 complete.** PK B+ tree indexes are auto-created and used for uniqueness checks (O(log n) vs O(n²) heap scan), PK index-assisted point/range scans work, WAL group commit reduces fsyncs from N to ~1 for N sequential inserts, and all unique indexes (PK and non-PK) now have B+ trees for O(log n) constraint enforcement including FK checks.
+- **Phase 5 next.** Multi-row INSERT syntax and bulk insert path.
 
 ## Why (original motivation, for context)
 - INSERT used to perform a full heap scan per row to enforce PK uniqueness. Inserting N rows cost O(N²). 4200 inserts triggered ~8.8M row comparisons. **Fixed by Phase 1.**
@@ -107,7 +107,7 @@ Eliminate O(n²) insert degradation by wiring B+ tree indexes into constraint en
 - Performance: 4200 sequential inserts see measurable improvement from reduced fsync count.
 - Determinism: WAL batching behavior is deterministic under simulation.
 
-## Phase 4: Index-Backed Constraint Enforcement
+## Phase 4: Index-Backed Constraint Enforcement ✅
 
 ### Why
 Constraint enforcement is the dominant per-row cost in the INSERT pipeline. Two paths use O(n) heap scans where O(log n) index lookups are possible:

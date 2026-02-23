@@ -1,9 +1,10 @@
-//! Primary-key B+ tree maintenance for mutation operations.
+//! B+ tree index maintenance for mutation operations.
 //!
 //! Responsibilities in this file:
-//! - Constructs transient BTree handles from catalog metadata.
-//! - Provides insert/delete helpers that encode PK values and sync state.
+//! - Constructs transient BTree handles from catalog metadata (any index).
+//! - Provides insert/delete helpers that encode key values and sync state.
 //! - Maps BTreeError to MutationError.
+//! - Primary-key wrappers delegate to generic index functions.
 //!
 //! Why this exists:
 //! - Keeps B+ tree plumbing out of mutation.zig's already-large codepath.
@@ -25,6 +26,7 @@ const Value = row_mod.Value;
 const RowId = heap_mod.RowId;
 const Catalog = catalog_mod.Catalog;
 const ModelId = catalog_mod.ModelId;
+const IndexId = catalog_mod.IndexId;
 const BufferPool = buffer_pool_mod.BufferPool;
 const Wal = wal_mod.Wal;
 const HeapPage = heap_mod.HeapPage;
@@ -36,16 +38,24 @@ const mutation = @import("mutation.zig");
 const MutationError = mutation.MutationError;
 const max_row_buf_size = mutation.max_row_buf_size;
 
+// ---------------------------------------------------------------------------
+// Generic index functions (work with any index by index_id)
+// ---------------------------------------------------------------------------
+
 /// Construct a transient BTree from catalog IndexInfo + runtime pool/wal.
-/// Returns null if the model has no PK index with an allocated B+ tree.
-pub fn openPrimaryKeyIndex(
+/// Returns null if the index's btree_root_page_id is 0 (tree not yet allocated).
+pub fn openIndex(
     catalog: *const Catalog,
     pool: *BufferPool,
     wal: *Wal,
     model_id: ModelId,
+    index_id: IndexId,
 ) ?BTree {
-    const idx_id = catalog_mod.findPrimaryKeyIndex(catalog, model_id) orelse return null;
-    const idx = &catalog.models[model_id].indexes[idx_id];
+    std.debug.assert(model_id < catalog.model_count);
+    const model = &catalog.models[model_id];
+    std.debug.assert(index_id < model.index_count);
+    const idx = &model.indexes[index_id];
+    if (idx.btree_root_page_id == 0) return null;
     return BTree{
         .root_page_id = @as(u64, idx.btree_root_page_id),
         .next_page_id = @as(u64, idx.btree_next_page_id),
@@ -54,18 +64,63 @@ pub fn openPrimaryKeyIndex(
     };
 }
 
-/// Persist the BTree's current root_page_id and next_page_id back to the catalog.
-/// Must be called after any BTree mutation that may have allocated pages (insert with split).
+/// Persist the BTree's current root_page_id and next_page_id back to the
+/// catalog for the given index_id. Must be called after any BTree mutation
+/// that may have allocated pages (insert with split).
+pub fn syncIndexBTreeState(
+    catalog: *Catalog,
+    model_id: ModelId,
+    index_id: IndexId,
+    btree: *const BTree,
+) void {
+    std.debug.assert(model_id < catalog.model_count);
+    const model = &catalog.models[model_id];
+    std.debug.assert(index_id < model.index_count);
+    model.indexes[index_id].btree_root_page_id = @intCast(btree.root_page_id);
+    model.indexes[index_id].btree_next_page_id = @intCast(btree.next_page_id);
+}
+
+/// Encode a key Value and insert into the B+ tree for any index.
+/// Returns DuplicateKey on conflict.
+pub fn insertIndexKey(
+    catalog: *Catalog,
+    btree: *BTree,
+    model_id: ModelId,
+    index_id: IndexId,
+    key_value: Value,
+    row_id: RowId,
+) MutationError!void {
+    var key_buf: [max_row_buf_size]u8 = undefined;
+    const key = index_key_mod.encodeValue(key_value, &key_buf);
+    btree.insert(key, row_id) catch |e| return mapBTreeError(e);
+    syncIndexBTreeState(catalog, model_id, index_id, btree);
+}
+
+// ---------------------------------------------------------------------------
+// Primary-key wrappers (delegate to generic functions)
+// ---------------------------------------------------------------------------
+
+/// Construct a transient BTree for the model's primary-key index.
+/// Returns null if the model has no PK index with an allocated B+ tree.
+pub fn openPrimaryKeyIndex(
+    catalog: *const Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    model_id: ModelId,
+) ?BTree {
+    const idx_id = catalog_mod.findPrimaryKeyIndex(catalog, model_id) orelse return null;
+    return openIndex(catalog, pool, wal, model_id, idx_id);
+}
+
+/// Persist the BTree's current root_page_id and next_page_id back to the
+/// catalog for the model's primary-key index.
 pub fn syncBTreeState(
     catalog: *Catalog,
     model_id: ModelId,
     btree: *const BTree,
 ) void {
     const idx_id = catalog_mod.findPrimaryKeyIndex(catalog, model_id) orelse return;
-    catalog.models[model_id].indexes[idx_id].btree_root_page_id =
-        @intCast(btree.root_page_id);
-    catalog.models[model_id].indexes[idx_id].btree_next_page_id =
-        @intCast(btree.next_page_id);
+    syncIndexBTreeState(catalog, model_id, idx_id, btree);
 }
 
 /// Encode a PK Value and insert into the B+ tree. Returns DuplicateKey on conflict.
@@ -76,10 +131,8 @@ pub fn insertPrimaryKey(
     pk_value: Value,
     row_id: RowId,
 ) MutationError!void {
-    var key_buf: [max_row_buf_size]u8 = undefined;
-    const key = index_key_mod.encodeValue(pk_value, &key_buf);
-    btree.insert(key, row_id) catch |e| return mapBTreeError(e);
-    syncBTreeState(catalog, model_id, btree);
+    const idx_id = catalog_mod.findPrimaryKeyIndex(catalog, model_id) orelse return error.Corruption;
+    return insertIndexKey(catalog, btree, model_id, idx_id, pk_value, row_id);
 }
 
 /// Delete a PK key from the B+ tree. Silently succeeds if the key is not

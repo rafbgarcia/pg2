@@ -82,6 +82,8 @@ const openPrimaryKeyIndex = index_maintenance_mod.openPrimaryKeyIndex;
 const insertPrimaryKey = index_maintenance_mod.insertPrimaryKey;
 const primaryKeyExists = index_maintenance_mod.primaryKeyExists;
 const primaryKeyVisibleInIndex = index_maintenance_mod.primaryKeyVisibleInIndex;
+const openIndex = index_maintenance_mod.openIndex;
+const insertIndexKey = index_maintenance_mod.insertIndexKey;
 const index_key_mod = @import("../storage/index_key.zig");
 
 // Value builder delegation
@@ -312,13 +314,14 @@ pub fn executeInsertWithDiagnosticAndParameters(
             return error.DuplicateKey;
         }
         // Non-PK unique indexes still need heap scan.
-        try enforceNonPkUniqueness(catalog, pool, model_id, values[0..schema.column_count]);
+        try enforceNonPkUniqueness(catalog, pool, wal, model_id, values[0..schema.column_count]);
     } else {
-        try enforceInsertUniqueness(catalog, pool, model_id, values[0..schema.column_count]);
+        try enforceInsertUniqueness(catalog, pool, wal, model_id, values[0..schema.column_count]);
     }
     try enforceOutgoingReferentialIntegrity(
         catalog,
         pool,
+        wal,
         model_id,
         values[0..schema.column_count],
     );
@@ -403,6 +406,22 @@ pub fn executeInsertWithDiagnosticAndParameters(
     if (pk_btree) |*btree| {
         const pk_col = catalog_mod.findPrimaryKeyColumnId(catalog, model_id).?;
         try insertPrimaryKey(catalog, btree, model_id, values[pk_col], result);
+    }
+
+    // Insert into non-PK unique indexes after successful heap write.
+    {
+        const pk_col = catalog_mod.findPrimaryKeyColumnId(catalog, model_id);
+        var idx_id: u16 = 0;
+        while (idx_id < model.index_count) : (idx_id += 1) {
+            const idx = &model.indexes[idx_id];
+            if (!idx.is_unique) continue;
+            if (idx.column_count != 1) continue;
+            if (idx.btree_root_page_id == 0) continue;
+            // Skip PK index — already handled above.
+            if (pk_col != null and idx.column_ids[0] == pk_col.?) continue;
+            var idx_btree = openIndex(catalog, pool, wal, model_id, idx_id) orelse continue;
+            try insertIndexKey(catalog, &idx_btree, model_id, idx_id, values[idx.column_ids[0]], result);
+        }
     }
 
     try appendOverflowRelinkWalForRow(
@@ -669,6 +688,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
             try enforceOutgoingReferentialIntegrity(
                 catalog,
                 pool,
+                wal,
                 model_id,
                 new_values[0..row.column_count],
             );

@@ -9,6 +9,12 @@ const buffer_pool_mod = @import("../storage/buffer_pool.zig");
 const row_mod = @import("../storage/row.zig");
 const catalog_mod = @import("../catalog/catalog.zig");
 
+const index_maintenance_mod = @import("index_maintenance.zig");
+const index_key_mod = @import("../storage/index_key.zig");
+const wal_mod = @import("../storage/wal.zig");
+const btree_mod = @import("../storage/btree.zig");
+const Wal = wal_mod.Wal;
+
 const mutation = @import("mutation.zig");
 const MutationError = mutation.MutationError;
 const max_assignments = mutation.max_assignments;
@@ -26,6 +32,7 @@ const ModelId = catalog_mod.ModelId;
 pub fn enforceInsertUniqueness(
     catalog: *const Catalog,
     pool: *BufferPool,
+    wal: *Wal,
     model_id: ModelId,
     values: []const Value,
 ) MutationError!void {
@@ -41,7 +48,7 @@ pub fn enforceInsertUniqueness(
         }
     }
 
-    try enforceNonPkUniqueness(catalog, pool, model_id, values);
+    try enforceNonPkUniqueness(catalog, pool, wal, model_id, values);
 }
 
 /// Enforce uniqueness for non-PK unique indexes only. Used when the PK is
@@ -50,6 +57,7 @@ pub fn enforceInsertUniqueness(
 pub fn enforceNonPkUniqueness(
     catalog: *const Catalog,
     pool: *BufferPool,
+    wal: *Wal,
     model_id: ModelId,
     values: []const Value,
 ) MutationError!void {
@@ -63,6 +71,23 @@ pub fn enforceNonPkUniqueness(
         // Skip the PK index — it's already enforced via B+ tree.
         if (idx.column_count == 1 and pk_col != null and idx.column_ids[0] == pk_col.?) continue;
         if (uniqueKeyHasNull(values, idx.column_ids[0..idx.column_count])) continue;
+        // B+ tree fast path for single-column unique indexes with allocated trees.
+        if (idx.column_count == 1 and idx.btree_root_page_id != 0) {
+            var btree = index_maintenance_mod.openIndex(
+                catalog,
+                pool,
+                wal,
+                model_id,
+                idx_id,
+            );
+            if (btree != null) {
+                var key_buf: [mutation.max_row_buf_size]u8 = undefined;
+                const key = index_key_mod.encodeValue(values[idx.column_ids[0]], &key_buf);
+                const found = btree.?.find(key) catch |e| return index_maintenance_mod.mapBTreeError(e);
+                if (found != null) return error.DuplicateKey;
+                continue;
+            }
+        }
         if (rowExistsForUniqueIndex(catalog, pool, model_id, &idx, values)) {
             return error.DuplicateKey;
         }
