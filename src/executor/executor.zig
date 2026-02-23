@@ -104,6 +104,7 @@ pub const SortStrategy = enum {
 pub const GroupStrategy = enum {
     none,
     in_memory_linear,
+    hash_spill,
 };
 
 pub const ScanStrategy = index_scan_planner.ScanStrategy;

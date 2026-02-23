@@ -177,7 +177,7 @@ pub fn applyGroup(
     return true;
 }
 
-fn collectPostGroupAggregates(
+pub fn collectPostGroupAggregates(
     ctx: *const ExecContext,
     result: *QueryResult,
     ops: *const [max_operators]OpDescriptor,
@@ -241,7 +241,7 @@ fn collectPostGroupAggregates(
     return true;
 }
 
-fn resetAggregateStatesForGroup(
+pub fn resetAggregateStatesForGroup(
     group_runtime: *GroupRuntime,
     group_index: u16,
 ) void {
@@ -412,7 +412,7 @@ fn registerAggregateDescriptor(
     return true;
 }
 
-fn accumulateGroupAggregates(
+pub fn accumulateGroupAggregates(
     ctx: *const ExecContext,
     result: *QueryResult,
     schema: *const RowSchema,
@@ -566,7 +566,7 @@ pub fn updateAggregateState(
     }
 }
 
-fn buildGroupKeyIndices(
+pub fn buildGroupKeyIndices(
     ctx: *const ExecContext,
     result: *QueryResult,
     schema: *const RowSchema,

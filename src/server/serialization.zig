@@ -234,5 +234,6 @@ fn groupStrategyExplain(strategy: exec_mod.GroupStrategy) []const u8 {
     return switch (strategy) {
         .none => "not_applied",
         .in_memory_linear => "groups merged with linear key scan in memory",
+        .hash_spill => "groups aggregated with hash table and partition spill",
     };
 }

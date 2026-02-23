@@ -46,6 +46,7 @@ pub const executor = struct {
     pub const mutation = @import("executor/mutation.zig");
     pub const spill_collector = @import("executor/spill_collector.zig");
     pub const external_sort = @import("executor/external_sort.zig");
+    pub const hash_aggregate = @import("executor/hash_aggregate.zig");
     pub const index_maintenance = @import("executor/index_maintenance.zig");
     pub const index_scan_planner = @import("executor/index_scan_planner.zig");
 };
@@ -103,6 +104,7 @@ comptime {
     _ = executor.mutation;
     _ = executor.spill_collector;
     _ = executor.external_sort;
+    _ = executor.hash_aggregate;
     _ = executor.index_maintenance;
     _ = executor.index_scan_planner;
     _ = simulator.disk;
