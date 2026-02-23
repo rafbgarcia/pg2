@@ -77,6 +77,18 @@ Turn `--memory` into a planner input that derives runtime capacities automatical
   - `effective_limit + 1` fails with capacity diagnostics.
   - `hard_cap + 1` fails with hard-cap diagnostics even if memory budget is large.
 
+#### Statement Size Policy and Coverage
+
+- Keep a strict global statement-size safety boundary, but make normal parser capacity memory-planned per query slot.
+- Document two distinct contracts:
+  - parser effective-budget exhaustion (derived from `--memory` + `--concurrency`)
+  - parser hard-cap exhaustion (global ceiling)
+- Short-term coverage while tokenizer is fixed-capacity:
+  - keep token-bound multi-row insert regressions in [insert_test.zig](/Users/rafa/github.com/rafbgarcia/pg2/test/features/expressions/insert_test.zig)
+- Post migration coverage (when parser/tokenizer are runtime-sized):
+  - add `> scan_batch_size` single-statement bulk-insert coverage in [insert_test.zig](/Users/rafa/github.com/rafbgarcia/pg2/test/features/expressions/insert_test.zig) and stress extension in [stress_mutations_test.zig](/Users/rafa/github.com/rafbgarcia/pg2/test/stress/mutations/stress_mutations_test.zig)
+- Long-term ingest posture: for very large payloads, prefer bounded/streamed batching paths over unbounded single-statement growth.
+
 ## Phase 2: Startup Admission Semantics
 
 ### Scope

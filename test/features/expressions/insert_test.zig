@@ -96,6 +96,33 @@ fn buildBulkUserWithEmailInsertRequest(buf: []u8, start_id: usize, row_count: us
     return stream.getWritten();
 }
 
+fn buildBulkUserNullableEmailInsertRequest(
+    buf: []u8,
+    start_id: usize,
+    row_count: usize,
+    duplicate_non_null_in_batch: bool,
+) ![]const u8 {
+    var stream = std.io.fixedBufferStream(buf);
+    const writer = stream.writer();
+    try writer.writeAll("User |> insert(");
+    var row_index: usize = 0;
+    while (row_index < row_count) : (row_index += 1) {
+        if (row_index > 0) try writer.writeAll(", ");
+        const id = start_id + row_index;
+        try writer.print("(id = {d}, email = ", .{id});
+        if ((row_index % 3) == 0) {
+            try writer.writeAll("null");
+        } else if (duplicate_non_null_in_batch and row_index == row_count - 1) {
+            try writer.print("\"user-{d}@test.com\"", .{start_id + 1});
+        } else {
+            try writer.print("\"user-{d}@test.com\"", .{id});
+        }
+        try writer.print(", name = \"User {d}\")", .{id});
+    }
+    try writer.writeAll(") {}");
+    return stream.getWritten();
+}
+
 test "feature insert returns explicit insert count via session path" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
@@ -645,6 +672,104 @@ test "feature multi-row insert non-PK unique in-batch duplicate fails closed" {
     );
 
     result = try executor.run("User { id email }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+}
+
+test "feature multi-row insert nullable unique skips null keys and still rejects duplicates" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(email, string, nullable)
+        \\  field(name, string, notNull)
+        \\  index(idx_email, [email], unique)
+        \\}
+    );
+
+    var result = try executor.run(
+        "User |> insert((id = 1, email = null, name = \"A\"), (id = 2, email = null, name = \"B\")) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=2 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run(
+        "User |> insert((id = 3, email = \"dup@test.com\", name = \"C\"), (id = 4, email = \"dup@test.com\", name = \"D\")) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        result,
+    );
+
+    result = try executor.run("User { id email name }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=2 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,null,A\n2,null,B\n",
+        result,
+    );
+}
+
+test "feature multi-row insert token-bound mixed nullable unique keys stay correct" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(email, string, nullable)
+        \\  field(name, string, notNull)
+        \\  index(idx_email, [email], unique)
+        \\}
+    );
+
+    const row_count: usize = 170;
+    var insert_buf: [128 * 1024]u8 = undefined;
+    const insert_req = try buildBulkUserNullableEmailInsertRequest(
+        insert_buf[0..],
+        1,
+        row_count,
+        false,
+    );
+    var result = try executor.run(insert_req);
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=170 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run("User |> where(id == 1) { id email }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,null\n",
+        result,
+    );
+
+    result = try executor.run("User |> where(id == 2) { id email }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n2,user-2@test.com\n",
+        result,
+    );
+
+    const dup_req = try buildBulkUserNullableEmailInsertRequest(
+        insert_buf[0..],
+        10001,
+        row_count,
+        true,
+    );
+    result = try executor.run(dup_req);
+    try std.testing.expectEqualStrings(
+        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        result,
+    );
+
+    result = try executor.run("User |> where(id == 10001) { id }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
         result,

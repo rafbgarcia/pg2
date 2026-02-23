@@ -103,6 +103,10 @@ pub const max_row_buf_size = 8000;
 /// Maximum number of field assignments in a single mutation.
 pub const max_assignments = 128;
 
+inline fn shouldSkipUniqueIndexKey(value: Value) bool {
+    return value == .null_value;
+}
+
 pub const MutationError = error{
     // Storage errors
     AllFramesPinned,
@@ -470,6 +474,8 @@ fn executeInsertWithDiagnosticAndParametersWithOptions(
                 if (idx.btree_root_page_id == 0) continue;
                 // Skip PK index — already handled above.
                 if (pk_col != null and idx.column_ids[0] == pk_col.?) continue;
+                // Nullable unique keys with NULL do not participate in uniqueness.
+                if (shouldSkipUniqueIndexKey(values[idx.column_ids[0]])) continue;
                 var idx_btree = openIndex(catalog, pool, wal, model_id, idx_id) orelse continue;
                 try insertIndexKey(catalog, &idx_btree, model_id, idx_id, values[idx.column_ids[0]], result);
             }
@@ -540,7 +546,6 @@ pub fn executeBulkInsertWithDiagnosticAndParameters(
                 tokens,
                 source,
                 first_row_group_node,
-                group_count,
                 parameter_bindings,
                 diagnostic,
                 eval_ctx,
@@ -678,7 +683,6 @@ fn precheckInBatchUniqueDuplicates(
     tokens: *const TokenizeResult,
     source: []const u8,
     first_row_group_node: NodeIndex,
-    group_count: u16,
     parameter_bindings: []const ParameterBinding,
     diagnostic: ?*MutationDiagnostic,
     eval_ctx: *const filter_mod.EvalContext,
@@ -707,23 +711,29 @@ fn precheckInBatchUniqueDuplicates(
             unique_col,
             &key_buf,
         );
+        if (key == null) {
+            check_group = tree.getNode(check_group).next;
+            continue;
+        }
         unique_hash_entries[entry_idx] = .{
             .row_group = check_group,
-            .hash = std.hash.Wyhash.hash(0, key),
+            .hash = std.hash.Wyhash.hash(0, key.?),
         };
         entry_idx += 1;
         check_group = tree.getNode(check_group).next;
     }
 
+    if (entry_idx < 2) return;
+
     std.sort.heap(
         UniqueHashEntry,
-        unique_hash_entries[0..group_count],
+        unique_hash_entries[0..entry_idx],
         {},
         lessThanUniqueHashEntry,
     );
 
     var sorted_idx: u16 = 1;
-    while (sorted_idx < group_count) : (sorted_idx += 1) {
+    while (sorted_idx < entry_idx) : (sorted_idx += 1) {
         const prev = unique_hash_entries[sorted_idx - 1];
         const curr = unique_hash_entries[sorted_idx];
         if (prev.hash != curr.hash) continue;
@@ -744,6 +754,7 @@ fn precheckInBatchUniqueDuplicates(
             unique_col,
             &prev_key_buf,
         );
+        if (prev_key == null) continue;
         var curr_key_buf: [max_row_buf_size]u8 = undefined;
         const curr_key = try buildUniqueKeyForRowGroup(
             catalog,
@@ -760,7 +771,8 @@ fn precheckInBatchUniqueDuplicates(
             unique_col,
             &curr_key_buf,
         );
-        if (std.mem.eql(u8, prev_key, curr_key)) return error.DuplicateKey;
+        if (curr_key == null) continue;
+        if (std.mem.eql(u8, prev_key.?, curr_key.?)) return error.DuplicateKey;
     }
 }
 
@@ -784,7 +796,7 @@ fn buildUniqueKeyForRowGroup(
     string_arena: *scan_mod.StringArena,
     unique_col: u16,
     key_buf: *[max_row_buf_size]u8,
-) MutationError![]const u8 {
+) MutationError!?[]const u8 {
     const row_group_node = tree.getNode(row_group);
     if (row_group_node.tag != .insert_row_group) return error.Corruption;
 
@@ -811,6 +823,7 @@ fn buildUniqueKeyForRowGroup(
         values[0..schema.column_count],
         assigned_columns[0..schema.column_count],
     );
+    if (shouldSkipUniqueIndexKey(values[unique_col])) return null;
     return index_key_mod.encodeValue(values[unique_col], key_buf);
 }
 
@@ -860,6 +873,7 @@ fn performBulkIndexPhaseB(
             if (pk_col != null and idx.column_ids[0] == pk_col.?) {
                 try insertPrimaryKeyWithHintNoSync(catalog, model_id, &btree, key_value, row_id, &leaf_hint);
             } else {
+                if (shouldSkipUniqueIndexKey(key_value)) continue;
                 try insertIndexKeyWithHintNoSync(&btree, key_value, row_id, &leaf_hint);
             }
         }
