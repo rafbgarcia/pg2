@@ -14,18 +14,20 @@ Each workfront has phased gates so fresh Codex sessions can resume safely.
 8. `docs/workfronts/08_expression_language_v1_workfront.md`
 9. `docs/workfronts/09_module_decomposition_workfront.md`
 10. `docs/workfronts/10_iterator_execution_model_workfront.md`
+11. `docs/workfronts/11_write_performance_workfront.md`
 
 ## Recommended Execution Order
 1. Server concurrency foundation.
 2. Self-tune planner and admission semantics.
 3. Spill/degrade execution model.
-4. Variables and multi-statement execution semantics.
-5. Adaptive planning policy and inspect explainability.
-6. Advisor/observability module.
-7. Cross-profile and stress test matrix.
-8. Expression language v1 readiness.
-9. Module decomposition (can run in parallel with any workfront).
-10. Iterator execution model (deferred — needed when subqueries, CTEs, or window functions are prioritized).
+4. **Write performance — PK indexing and WAL batching (no dependencies, high impact on test/dev velocity).**
+5. Variables and multi-statement execution semantics.
+6. Adaptive planning policy and inspect explainability.
+7. Advisor/observability module.
+8. Cross-profile and stress test matrix.
+9. Expression language v1 readiness.
+10. Module decomposition (can run in parallel with any workfront).
+11. Iterator execution model (deferred — needed when subqueries, CTEs, or window functions are prioritized).
 
 ## Cross-Workfront Rules
 1. Core code continues to use `Storage`/`Network` abstractions.

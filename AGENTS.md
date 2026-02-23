@@ -54,10 +54,13 @@ docs/
 ## Build & Test
 
 ```bash
-zig build              # Build the project
-zig build test         # Run unit tests
-zig build sim          # Run deterministic simulation tests (takes a seed argument)
+zig build                          # Build the project
+zig build test --summary all       # Run unit tests
+zig build stress --summary all     # Run stress tests
+zig build sim --summary all        # Run deterministic simulation tests (takes a seed argument)
 ```
+
+Always use `--summary all` when running tests so timing is visible.
 
 ## Conventions
 
