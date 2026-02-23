@@ -404,6 +404,11 @@ fn executeReadPipeline(
     );
 
     // --- 2. Chunked scan loop ---
+    // Scan into scratch_rows_a so the collector's hot batch (result.rows)
+    // is never overwritten by scan output.
+    const scan_buf = ctx.scratch_rows_a[0..scan_mod.scan_batch_size];
+    var chunk_result = QueryResult.init(ctx.scratch_rows_a);
+
     var cursor = scan_mod.ScanCursor.init();
     var total_pages_read: u32 = 0;
     var total_rows_scanned: u32 = 0;
@@ -428,7 +433,7 @@ fn executeReadPipeline(
             }
         }
 
-        // Scan one chunk into result.rows.
+        // Scan one chunk into the scratch buffer.
         const scan_result = scan_mod.tableScanInto(
             ctx.catalog,
             ctx.pool,
@@ -436,7 +441,7 @@ fn executeReadPipeline(
             ctx.snapshot,
             ctx.tx_manager,
             model_id,
-            result.rows[0..scan_mod.scan_batch_size],
+            scan_buf,
             string_arena,
             &cursor,
         ) catch |err| {
@@ -451,19 +456,21 @@ fn executeReadPipeline(
         };
         total_pages_read += scan_result.pages_read;
         total_rows_scanned += scan_result.row_count;
-        result.row_count = scan_result.row_count;
+        chunk_result.row_count = scan_result.row_count;
 
-        // Apply per-chunk operators (WHERE filter).
-        applyPerChunkOperators(ctx, result, model_id, ops, op_count, string_arena);
-        if (result.has_error) {
+        // Apply per-chunk operators (WHERE filter) on the chunk result.
+        applyPerChunkOperators(ctx, &chunk_result, model_id, ops, op_count, string_arena);
+        if (chunk_result.has_error) {
+            // Propagate error to the real result.
+            if (chunk_result.getError()) |msg| setError(result, msg);
             captureTempStats(result, ctx.collector);
             return;
         }
 
         // Feed surviving rows into the collector.
         var row_idx: u16 = 0;
-        while (row_idx < result.row_count) : (row_idx += 1) {
-            ctx.collector.appendRow(&result.rows[row_idx]) catch {
+        while (row_idx < chunk_result.row_count) : (row_idx += 1) {
+            ctx.collector.appendRow(&chunk_result.rows[row_idx]) catch {
                 setError(result, "spill collector append failed");
                 captureTempStats(result, ctx.collector);
                 return;
