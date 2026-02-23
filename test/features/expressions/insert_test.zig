@@ -62,6 +62,23 @@ fn buildWideInsertRequest(buf: []u8, id: usize) ![]const u8 {
     return stream.getWritten();
 }
 
+fn buildBulkUserInsertRequest(buf: []u8, start_id: usize, row_count: usize) ![]const u8 {
+    var stream = std.io.fixedBufferStream(buf);
+    const writer = stream.writer();
+    try writer.writeAll("User |> insert(");
+    var row_index: usize = 0;
+    while (row_index < row_count) : (row_index += 1) {
+        if (row_index > 0) try writer.writeAll(", ");
+        const id = start_id + row_index;
+        try writer.print(
+            "(id = {d}, name = \"user-{d}\", active = true)",
+            .{ id, id },
+        );
+    }
+    try writer.writeAll(") {}");
+    return stream.getWritten();
+}
+
 test "feature insert returns explicit insert count via session path" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
@@ -353,6 +370,122 @@ test "feature multi-row insert duplicate key fails closed and inserts nothing" {
     );
 
     result = try executor.run("User { id name }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+}
+
+test "feature multi-row insert large batch keeps PK index correctness" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\  field(active, bool, notNull)
+        \\}
+    );
+
+    var insert_buf: [8 * 1024]u8 = undefined;
+    const insert_req = try buildBulkUserInsertRequest(insert_buf[0..], 1, 100);
+    var result = try executor.run(insert_req);
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=100 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    var where_buf: [128]u8 = undefined;
+    var expected_buf: [128]u8 = undefined;
+    var id: usize = 1;
+    while (id <= 100) : (id += 1) {
+        const query = try std.fmt.bufPrint(
+            where_buf[0..],
+            "User |> where(id == {d}) {{ id name }}",
+            .{id},
+        );
+        result = try executor.run(query);
+        const expected = try std.fmt.bufPrint(
+            expected_buf[0..],
+            "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n{d},user-{d}\n",
+            .{ id, id },
+        );
+        try std.testing.expectEqualStrings(expected, result);
+    }
+}
+
+test "feature multi-row insert large batch maintains non-PK unique index entries" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(email, string, notNull)
+        \\  field(name, string, notNull)
+        \\  index(idx_email, [email], unique)
+        \\}
+    );
+
+    var insert_stream_buf: [12 * 1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(insert_stream_buf[0..]);
+    const writer = stream.writer();
+    try writer.writeAll("User |> insert(");
+    var row_index: usize = 0;
+    while (row_index < 80) : (row_index += 1) {
+        if (row_index > 0) try writer.writeAll(", ");
+        const id = row_index + 1;
+        try writer.print(
+            "(id = {d}, email = \"user-{d}@test.com\", name = \"User {d}\")",
+            .{ id, id, id },
+        );
+    }
+    try writer.writeAll(") {}");
+
+    var result = try executor.run(stream.getWritten());
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=0 inserted_rows=80 updated_rows=0 deleted_rows=0\n",
+        result,
+    );
+
+    result = try executor.run(
+        "User |> insert(id = 999, email = \"user-40@test.com\", name = \"dup\") {}",
+    );
+    try std.testing.expectEqualStrings(
+        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        result,
+    );
+}
+
+test "feature multi-row insert non-PK unique in-batch duplicate fails closed" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(email, string, notNull)
+        \\  field(name, string, notNull)
+        \\  index(idx_email, [email], unique)
+        \\}
+    );
+
+    var result = try executor.run(
+        "User |> insert((id = 1, email = \"dup@test.com\", name = \"A\"), (id = 2, email = \"dup@test.com\", name = \"B\")) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        result,
+    );
+
+    result = try executor.run("User { id email }");
     try std.testing.expectEqualStrings(
         "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
         result,
