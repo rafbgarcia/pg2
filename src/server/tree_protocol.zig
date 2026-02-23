@@ -9,6 +9,7 @@ const catalog_mod = @import("../catalog/catalog.zig");
 const ast_mod = @import("../parser/ast.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
 const exec_mod = @import("../executor/executor.zig");
+const scan_mod = @import("../executor/scan.zig");
 
 const Value = row_mod.Value;
 const ColumnType = row_mod.ColumnType;
@@ -20,6 +21,8 @@ const Ast = ast_mod.Ast;
 const NodeIndex = ast_mod.NodeIndex;
 const null_node = ast_mod.null_node;
 const serializeValue = session.serializeValue;
+const ResultRow = scan_mod.ResultRow;
+const StringArena = scan_mod.StringArena;
 
 const max_protocol_fields = row_mod.max_columns;
 
@@ -56,6 +59,11 @@ pub fn serializeTreeProtocol(
     source: []const u8,
 ) error{ResponseTooLarge}!void {
     try writeShape(writer, projection, catalog, tokens, source);
+
+    if (result.collector) |_| {
+        try serializeTreeProtocolCollector(writer, result, projection);
+        return;
+    }
 
     if (result.row_count == 0) return;
 
@@ -183,6 +191,7 @@ pub fn countProtocolRootRows(
     result: *const exec_mod.QueryResult,
     projection: *const TreeProjection,
 ) u16 {
+    if (result.collector) |_| return countProtocolRootRowsCollector(result, projection);
     if (result.row_count == 0) return 0;
     var root_count: u16 = 0;
     var row_idx: u16 = 0;
@@ -197,6 +206,199 @@ pub fn countProtocolRootRows(
         row_idx = next_idx;
     }
     return root_count;
+}
+
+fn countProtocolRootRowsCollector(
+    result: *const exec_mod.QueryResult,
+    projection: *const TreeProjection,
+) u16 {
+    const collector = result.collector orelse return 0;
+    var iter = collector.iterator();
+    var arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
+    var arena = StringArena.init(&arena_buf);
+    var row = ResultRow.init();
+    var prev = ResultRow.init();
+    var have_prev = false;
+    var root_count: u16 = 0;
+    var skip = result.collector_output_offset;
+    var remaining = result.collector_output_count;
+
+    while (remaining > 0) {
+        arena.reset();
+        const has_row = iter.next(&row, &arena) catch break;
+        if (!has_row) break;
+        if (skip > 0) {
+            skip -= 1;
+            continue;
+        }
+        remaining -= 1;
+
+        if (!have_prev) {
+            root_count +|= 1;
+            prev = row;
+            have_prev = true;
+            continue;
+        }
+        if (!rowsShareRootValues(&prev, &row, projection)) {
+            root_count +|= 1;
+            prev = row;
+        }
+    }
+    return root_count;
+}
+
+fn serializeTreeProtocolCollector(
+    writer: anytype,
+    result: *const exec_mod.QueryResult,
+    projection: *const TreeProjection,
+) error{ResponseTooLarge}!void {
+    const collector = result.collector orelse return;
+    if (result.collector_output_count == 0) return;
+
+    const nested_idx = findNestedEntryIndex(projection) orelse return;
+    var iter = collector.iterator();
+    var arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
+    var arena = StringArena.init(&arena_buf);
+
+    var row = ResultRow.init();
+    var current_root = ResultRow.init();
+    var has_group = false;
+    var emitted_any_nested = false;
+    var skip = result.collector_output_offset;
+    var remaining = result.collector_output_count;
+
+    while (remaining > 0) {
+        arena.reset();
+        const has_row = iter.next(&row, &arena) catch break;
+        if (!has_row) break;
+        if (skip > 0) {
+            skip -= 1;
+            continue;
+        }
+        remaining -= 1;
+
+        if (!has_group) {
+            current_root = row;
+            try writeRootPrefixUntilNested(writer, &row, projection, nested_idx);
+            emitted_any_nested = false;
+            if (!isNestedNullRow(row.values[0..], projection)) {
+                try writeNestedEntry(writer, &row, projection);
+                emitted_any_nested = true;
+            }
+            has_group = true;
+            continue;
+        }
+
+        if (rowsShareRootValues(&current_root, &row, projection)) {
+            if (!isNestedNullRow(row.values[0..], projection)) {
+                if (emitted_any_nested) {
+                    writer.writeAll(",") catch return error.ResponseTooLarge;
+                }
+                try writeNestedEntry(writer, &row, projection);
+                emitted_any_nested = true;
+            }
+        } else {
+            try writeRootSuffixAfterNested(
+                writer,
+                &current_root,
+                projection,
+                nested_idx,
+            );
+            current_root = row;
+            try writeRootPrefixUntilNested(writer, &row, projection, nested_idx);
+            emitted_any_nested = false;
+            if (!isNestedNullRow(row.values[0..], projection)) {
+                try writeNestedEntry(writer, &row, projection);
+                emitted_any_nested = true;
+            }
+        }
+    }
+
+    if (has_group) {
+        try writeRootSuffixAfterNested(
+            writer,
+            &current_root,
+            projection,
+            nested_idx,
+        );
+    }
+}
+
+fn findNestedEntryIndex(projection: *const TreeProjection) ?u16 {
+    var i: u16 = 0;
+    while (i < projection.entry_count) : (i += 1) {
+        if (projection.entries[i].kind == .nested) return i;
+    }
+    return null;
+}
+
+fn rowsShareRootValues(
+    lhs: *const ResultRow,
+    rhs: *const ResultRow,
+    projection: *const TreeProjection,
+) bool {
+    var i: u16 = 0;
+    while (i < projection.root_scalar_count) : (i += 1) {
+        const pos = projection.root_scalar_positions[i];
+        if (compareValues(lhs.values[pos], rhs.values[pos]) != .eq) return false;
+    }
+    return true;
+}
+
+fn writeRootPrefixUntilNested(
+    writer: anytype,
+    row: *const ResultRow,
+    projection: *const TreeProjection,
+    nested_entry_idx: u16,
+) error{ResponseTooLarge}!void {
+    var entry_index: u16 = 0;
+    while (entry_index <= nested_entry_idx) : (entry_index += 1) {
+        if (entry_index > 0) {
+            writer.writeAll(",") catch return error.ResponseTooLarge;
+        }
+        const entry = projection.entries[entry_index];
+        switch (entry.kind) {
+            .scalar => try writeProtocolValue(
+                writer,
+                row.values[entry.column_pos],
+            ),
+            .nested => writer.writeAll("[") catch return error.ResponseTooLarge,
+        }
+    }
+}
+
+fn writeRootSuffixAfterNested(
+    writer: anytype,
+    row: *const ResultRow,
+    projection: *const TreeProjection,
+    nested_entry_idx: u16,
+) error{ResponseTooLarge}!void {
+    writer.writeAll("]") catch return error.ResponseTooLarge;
+    var entry_index = nested_entry_idx + 1;
+    while (entry_index < projection.entry_count) : (entry_index += 1) {
+        writer.writeAll(",") catch return error.ResponseTooLarge;
+        const entry = projection.entries[entry_index];
+        std.debug.assert(entry.kind == .scalar);
+        try writeProtocolValue(writer, row.values[entry.column_pos]);
+    }
+    writer.writeAll("\n") catch return error.ResponseTooLarge;
+}
+
+fn writeNestedEntry(
+    writer: anytype,
+    row: *const ResultRow,
+    projection: *const TreeProjection,
+) error{ResponseTooLarge}!void {
+    writer.writeAll("[") catch return error.ResponseTooLarge;
+    var col_idx: u16 = 0;
+    while (col_idx < projection.nested_scalar_count) : (col_idx += 1) {
+        if (col_idx > 0) {
+            writer.writeAll(",") catch return error.ResponseTooLarge;
+        }
+        const pos = projection.nested_scalar_positions[col_idx];
+        try writeProtocolValue(writer, row.values[pos]);
+    }
+    writer.writeAll("]") catch return error.ResponseTooLarge;
 }
 
 fn getFinalPipeline(ast: *const Ast) ?NodeIndex {

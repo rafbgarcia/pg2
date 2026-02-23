@@ -463,7 +463,7 @@ test "collector-backed external sort spill applies having correctly" {
     try std.testing.expect(std.mem.indexOf(u8, result, "\n4200\n4199\n4198\n") != null);
 }
 
-test "collector-backed spill path fails explicitly for nested selection" {
+test "collector-backed spill path supports nested selection with empty children" {
     var env: FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
@@ -472,7 +472,6 @@ test "collector-backed spill path fails explicitly for nested selection" {
     try executor.applyDefinitions(
         \\User {
         \\  field(id, i64, notNull, primaryKey)
-        \\  field(name, string, notNull)
         \\  reference(posts, id, Post.user_id, withoutReferentialIntegrity)
         \\}
         \\Post {
@@ -487,24 +486,25 @@ test "collector-backed spill path fails explicitly for nested selection" {
         var query_buf: [256]u8 = undefined;
         const query = std.fmt.bufPrint(
             &query_buf,
-            "User |> insert(id = {d}, name = \"u{d}\") {{}}",
-            .{ i, i },
+            "User |> insert(id = {d}) {{}}",
+            .{i},
         ) catch unreachable;
         _ = try executor.run(query);
     }
+    const seed_insert = try executor.run("Post |> insert(id = 1, user_id = 99999, title = \"seed\") {}");
+    try std.testing.expect(!std.mem.startsWith(u8, seed_insert, "ERR query: "));
 
-    const result = try executor.run(
+    var large_buf: [256 * 1024]u8 = undefined;
+    const result = try runWithBuffer(
+        executor,
         "User |> inspect { id posts |> sort(id asc) { id title } }",
+        &large_buf,
     );
 
-    try std.testing.expect(std.mem.startsWith(u8, result, "ERR query: "));
-    try std.testing.expect(
-        std.mem.indexOf(
-            u8,
-            result,
-            "collector-backed nested selection not implemented",
-        ) != null,
-    );
+    try std.testing.expect(!std.mem.startsWith(u8, result, "ERR query: "));
+    try std.testing.expect(std.mem.indexOf(u8, result, "{id:i64,posts:[{id:i64,title:str}]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "1,[]\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "4200,[]\n") != null);
 }
 
 test "nested selection fails explicitly when child scan exceeds in-memory batch" {

@@ -54,9 +54,14 @@ pub const TestExecutor = struct {
 
         try schema_loader_mod.loadSchema(self.catalog, &parsed.ast, &tokens, source);
 
+        // Reserve disjoint heap page regions per model in tests so one model's
+        // growth cannot overwrite another model's base page.
+        const heap_region_start: u32 = 100;
+        const heap_region_stride_pages: u32 = 512;
         var model_id: u16 = 0;
         while (model_id < self.catalog.*.model_count) : (model_id += 1) {
-            const page_id: u32 = @as(u32, 100) + model_id;
+            const page_id: u32 = heap_region_start +
+                @as(u32, model_id) * heap_region_stride_pages;
             self.catalog.models[model_id].heap_first_page_id = page_id;
             self.catalog.models[model_id].total_pages = 1;
 
