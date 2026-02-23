@@ -114,8 +114,8 @@ const RunInfo = struct {
     page_id_start: u32,
     /// Number of temp pages in this run.
     page_count: u32,
-    /// Number of rows in this run.
-    row_count: u64,
+    /// Number of rows in this run (bounded by scan_batch_size per run).
+    row_count: u32,
 };
 
 // ---------------------------------------------------------------------------
@@ -1174,34 +1174,10 @@ test "two-run merge" {
     var disk = disk_mod.SimulatedDisk.init(testing.allocator);
     defer disk.deinit();
 
-    // Use a very small work memory budget to force two runs.
-    // With 8 rows, we need 2 runs of 4 each (scan_batch_size-limited).
-    // Instead, use a tiny hot batch + many rows.
+    // Test k-way merge directly with two manually created sorted runs.
     var hot: [2]ResultRow = undefined;
     const mgr = TempStorageManager.initDefault(0, disk.storage()) catch unreachable;
     var collector = SpillingResultCollector.init(&hot, mgr, 4 * 1024 * 1024);
-
-    // Generate more than scan_batch_size rows for two runs.
-    // But scan_batch_size is 4096, that's a lot. Instead, we test the
-    // merge logic directly by creating two runs manually.
-    // For a direct test, populate 10 rows and use a custom batch size approach.
-    // Actually, let's test with a smaller number by verifying the k-way merge
-    // code path works with 2 pre-generated runs.
-
-    // Populate 10 rows with decreasing order.
-    var i: i64 = 10;
-    while (i >= 1) : (i -= 1) {
-        const row = makeRow(&.{.{ .i64 = i }});
-        collector.appendRow(&row) catch unreachable;
-    }
-    try testing.expect(collector.spillTriggered());
-
-    // Since all 10 rows fit in one batch (< 4096), this produces 1 run.
-    // To test 2-run merge, we need to simulate it.
-    // Let's directly test the merge by generating runs manually.
-    if (collector.hot_count > 0) {
-        collector.flushHotBatch() catch unreachable;
-    }
 
     var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
     var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
