@@ -16,6 +16,7 @@ pub const storage = struct {
     pub const overflow = @import("storage/overflow.zig");
     pub const temp = @import("storage/temp.zig");
     pub const recovery = @import("storage/recovery.zig");
+    pub const spill_row = @import("storage/spill_row.zig");
 };
 
 pub const mvcc = struct {
@@ -79,6 +80,7 @@ comptime {
     _ = storage.overflow;
     _ = storage.temp;
     _ = storage.recovery;
+    _ = storage.spill_row;
     _ = mvcc.transaction;
     _ = mvcc.undo;
     _ = parser.tokenizer;
