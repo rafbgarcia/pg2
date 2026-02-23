@@ -22,6 +22,7 @@ const tx_mod = @import("../mvcc/transaction.zig");
 
 const BTree = btree_mod.BTree;
 const BTreeError = btree_mod.BTreeError;
+pub const LeafHint = btree_mod.LeafHint;
 const Value = row_mod.Value;
 const RowId = heap_mod.RowId;
 const Catalog = catalog_mod.Catalog;
@@ -104,6 +105,18 @@ pub fn insertIndexKeyNoSync(
     var key_buf: [max_row_buf_size]u8 = undefined;
     const key = index_key_mod.encodeValue(key_value, &key_buf);
     btree.insert(key, row_id) catch |e| return mapBTreeError(e);
+}
+
+/// Encode a key Value and insert into the B+ tree using a threaded leaf hint.
+pub fn insertIndexKeyWithHintNoSync(
+    btree: *BTree,
+    key_value: Value,
+    row_id: RowId,
+    hint: *LeafHint,
+) MutationError!void {
+    var key_buf: [max_row_buf_size]u8 = undefined;
+    const key = index_key_mod.encodeValue(key_value, &key_buf);
+    btree.insertWithHint(key, row_id, hint) catch |e| return mapBTreeError(e);
 }
 
 /// Delete a key from any index's B+ tree. Silently succeeds if the key is
@@ -234,6 +247,19 @@ pub fn insertPrimaryKeyNoSync(
 ) MutationError!void {
     _ = catalog_mod.findPrimaryKeyIndex(catalog, model_id) orelse return error.Corruption;
     return insertIndexKeyNoSync(btree, pk_value, row_id);
+}
+
+/// Encode a PK Value and insert into the B+ tree using a threaded leaf hint.
+pub fn insertPrimaryKeyWithHintNoSync(
+    catalog: *const Catalog,
+    model_id: ModelId,
+    btree: *BTree,
+    pk_value: Value,
+    row_id: RowId,
+    hint: *LeafHint,
+) MutationError!void {
+    _ = catalog_mod.findPrimaryKeyIndex(catalog, model_id) orelse return error.Corruption;
+    return insertIndexKeyWithHintNoSync(btree, pk_value, row_id, hint);
 }
 
 /// Delete a PK key from the B+ tree. Silently succeeds if the key is not

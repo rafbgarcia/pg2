@@ -93,7 +93,7 @@ fn copyOwnedExistingKeys(
 // Split operations
 // ============================================================================
 
-pub fn splitAndInsert(self: *BTree, leaf_id: u64, key: []const u8, row_id: RowId, path: []const PathEntry) BTreeError!void {
+pub fn splitAndInsert(self: *BTree, leaf_id: u64, key: []const u8, row_id: RowId, path: []const PathEntry) BTreeError!u64 {
     // Collect all existing cells + the new one, then redistribute.
     // Keys point into page content, so we must copy them into a contiguous
     // buffer BEFORE re-initializing the page.
@@ -196,9 +196,12 @@ pub fn splitAndInsert(self: *BTree, leaf_id: u64, key: []const u8, row_id: RowId
     self.pool.unpin(leaf_id, true);
     self.pool.unpin(right_id, true);
 
+    const inserted_leaf_id = if (key_plan.insert_pos < mid) leaf_id else right_id;
+
     // Promote separator key (first key of right page) to parent.
     // entries[mid].key is already in our owned key_buf, safe to use.
     try insertIntoParent(self, leaf_id, entries[mid].key, right_id, path);
+    return inserted_leaf_id;
 }
 
 pub fn insertIntoParent(self: *BTree, left_id: u64, key: []const u8, right_id: u64, path: []const PathEntry) BTreeError!void {

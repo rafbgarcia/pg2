@@ -78,6 +78,17 @@ pub const PathEntry = struct {
     child_index: u16,
 };
 
+pub const LeafHint = struct {
+    leaf_page_id: u64 = 0,
+    valid: bool = false,
+    fast_path_inserts: u64 = 0,
+    fallback_traversals: u64 = 0,
+
+    pub fn invalidate(self: *LeafHint) void {
+        self.valid = false;
+    }
+};
+
 pub const BTree = struct {
     root_page_id: u64,
     next_page_id: u64,
@@ -144,6 +155,78 @@ pub const BTree = struct {
 
     /// Insert a key/RowId pair. Handles splits automatically.
     pub fn insert(self: *BTree, key: []const u8, row_id: RowId) BTreeError!void {
+        _ = try self.insertFromRoot(key, row_id);
+    }
+
+    /// Insert a key/RowId pair using a leaf cursor hint for sorted workloads.
+    /// Falls back to full root traversal when the hint is stale or not applicable.
+    pub fn insertWithHint(self: *BTree, key: []const u8, row_id: RowId, hint: *LeafHint) BTreeError!void {
+        if (hint.valid) {
+            if (try self.tryInsertInHintedLeaf(key, row_id, hint)) {
+                hint.fast_path_inserts += 1;
+                return;
+            }
+            hint.invalidate();
+        }
+
+        hint.fallback_traversals += 1;
+        const inserted_leaf_id = try self.insertFromRoot(key, row_id);
+        hint.leaf_page_id = inserted_leaf_id;
+        hint.valid = true;
+    }
+
+    fn tryInsertInHintedLeaf(self: *BTree, key: []const u8, row_id: RowId, hint: *LeafHint) BTreeError!bool {
+        const page_id = hint.leaf_page_id;
+        const leaf_page = self.pool.pin(page_id) catch |e| return mapPoolError(e);
+        if (leaf_page.header.page_type != .btree_leaf or !validateLeafStructure(&leaf_page.content)) {
+            self.pool.unpin(page_id, false);
+            return false;
+        }
+
+        const search = LeafNode.search(&leaf_page.content, key);
+        if (search.found) {
+            self.pool.unpin(page_id, false);
+            return error.DuplicateKey;
+        }
+
+        const count = LeafNode.cellCount(&leaf_page.content);
+        const is_append = search.index == count;
+        const is_rightmost = LeafNode.rightSibling(&leaf_page.content) == LeafNode.no_sibling;
+        if (!is_append or !is_rightmost) {
+            self.pool.unpin(page_id, false);
+            return false;
+        }
+
+        const leaf_result = LeafNode.insert(&leaf_page.content, key, row_id);
+        if (leaf_result) |_| {
+            if (self.wal) |wal| {
+                const lsn = wal.append(0, .btree_insert, page_id, key) catch |e| {
+                    self.pool.unpin(page_id, false);
+                    return mapWalAppendError(e);
+                };
+                leaf_page.header.lsn = lsn;
+            }
+            self.pool.unpin(page_id, true);
+            hint.leaf_page_id = page_id;
+            hint.valid = true;
+            return true;
+        } else |err| switch (err) {
+            error.PageFull => {
+                self.pool.unpin(page_id, false);
+                return false;
+            },
+            error.DuplicateKey => {
+                self.pool.unpin(page_id, false);
+                return error.DuplicateKey;
+            },
+            else => {
+                self.pool.unpin(page_id, false);
+                return err;
+            },
+        }
+    }
+
+    fn insertFromRoot(self: *BTree, key: []const u8, row_id: RowId) BTreeError!u64 {
         // Build path from root to leaf.
         var path: [max_btree_depth]PathEntry = undefined;
         var depth: usize = 0;
@@ -204,17 +287,19 @@ pub const BTree = struct {
         if (leaf_result) |_| {
             // Log WAL record after successful modification.
             if (self.wal) |wal| {
-                const lsn = wal.append(0, .btree_insert, page_id, key) catch |e|
+                const lsn = wal.append(0, .btree_insert, page_id, key) catch |e| {
+                    self.pool.unpin(page_id, false);
                     return mapWalAppendError(e);
+                };
                 leaf_page.header.lsn = lsn;
             }
             self.pool.unpin(page_id, true);
-            return;
+            return page_id;
         } else |err| switch (err) {
             error.PageFull => {
                 self.pool.unpin(page_id, false);
                 // Need to split — split path handles its own WAL records.
-                try self.splitAndInsert(page_id, key, row_id, path[0..depth]);
+                return try self.splitAndInsert(page_id, key, row_id, path[0..depth]);
             },
             error.DuplicateKey => {
                 self.pool.unpin(page_id, false);
@@ -547,6 +632,12 @@ pub fn mapWalAppendError(err: wal_mod.WalError) BTreeError {
 // ============================================================================
 
 const testing = std.testing;
+
+fn encodeBigEndianU64(value: u64, out: *[8]u8) []const u8 {
+    const be = std.mem.nativeToBig(u64, value);
+    @memcpy(out, std.mem.asBytes(&be));
+    return out[0..];
+}
 
 // --- Leaf Node Tests ---
 
@@ -983,6 +1074,139 @@ test "btree: multiple inserts and finds" {
     try testing.expectEqual(@as(u64, 1), r3.?.page_id);
     const r4 = try tree.find("date");
     try testing.expect(r4 == null);
+}
+
+test "btree: insertWithHint is equivalent to insert for identical key sequences" {
+    const disk_mod = @import("../simulator/disk.zig");
+
+    var disk_a = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk_a.deinit();
+    var pool_a = try BufferPool.init(testing.allocator, disk_a.storage(), 64);
+    defer pool_a.deinit();
+    var tree_a = try BTree.init(&pool_a, null, 0);
+
+    var disk_b = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk_b.deinit();
+    var pool_b = try BufferPool.init(testing.allocator, disk_b.storage(), 64);
+    defer pool_b.deinit();
+    var tree_b = try BTree.init(&pool_b, null, 0);
+    var hint = LeafHint{};
+
+    const n: u64 = 700;
+    var key_buf: [8]u8 = undefined;
+    var i: u64 = 0;
+    while (i < n) : (i += 1) {
+        const key_num = (i * 37) % n;
+        const key = encodeBigEndianU64(key_num, &key_buf);
+        const rid = RowId{ .page_id = key_num + 1000, .slot = @intCast(i % std.math.maxInt(u16)) };
+        try tree_a.insert(key, rid);
+        try tree_b.insertWithHint(key, rid, &hint);
+    }
+
+    i = 0;
+    while (i < n) : (i += 1) {
+        const key = encodeBigEndianU64(i, &key_buf);
+        const found_a = try tree_a.find(key);
+        const found_b = try tree_b.find(key);
+        try testing.expect(found_a != null);
+        try testing.expect(found_b != null);
+        try testing.expectEqual(found_a.?.page_id, found_b.?.page_id);
+        try testing.expectEqual(found_a.?.slot, found_b.?.slot);
+    }
+}
+
+test "btree: insertWithHint takes fast path for monotonic keys" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(testing.allocator, disk.storage(), 64);
+    defer pool.deinit();
+
+    var tree = try BTree.init(&pool, null, 0);
+    var hint = LeafHint{};
+    var key_buf: [8]u8 = undefined;
+
+    const n: u64 = 900;
+    var i: u64 = 0;
+    while (i < n) : (i += 1) {
+        const key = encodeBigEndianU64(i, &key_buf);
+        try tree.insertWithHint(key, RowId{ .page_id = i + 10, .slot = 0 }, &hint);
+    }
+
+    try testing.expect(hint.fast_path_inserts > 0);
+    try testing.expect(hint.fast_path_inserts > hint.fallback_traversals);
+}
+
+test "btree: insertWithHint split fallback preserves correctness" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(testing.allocator, disk.storage(), 64);
+    defer pool.deinit();
+
+    var tree = try BTree.init(&pool, null, 0);
+    var hint = LeafHint{};
+    var key_buf: [8]u8 = undefined;
+
+    var saw_split_fallback = false;
+    var i: u64 = 0;
+    while (i < 3000) : (i += 1) {
+        const before_fallback = hint.fallback_traversals;
+        const key = encodeBigEndianU64(i, &key_buf);
+        try tree.insertWithHint(key, RowId{ .page_id = i + 200, .slot = 0 }, &hint);
+        if (i > 0 and hint.fallback_traversals > before_fallback) {
+            saw_split_fallback = true;
+            break;
+        }
+    }
+    try testing.expect(saw_split_fallback);
+
+    var verify_key: [8]u8 = undefined;
+    var j: u64 = 0;
+    while (j <= i) : (j += 1) {
+        const key = encodeBigEndianU64(j, &verify_key);
+        try testing.expect((try tree.find(key)) != null);
+    }
+}
+
+test "btree: insertWithHint reduces buffer-pool pin operations for sorted batch" {
+    const disk_mod = @import("../simulator/disk.zig");
+
+    var disk_a = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk_a.deinit();
+    var pool_a = try BufferPool.init(testing.allocator, disk_a.storage(), 64);
+    defer pool_a.deinit();
+    var tree_a = try BTree.init(&pool_a, null, 0);
+
+    var disk_b = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk_b.deinit();
+    var pool_b = try BufferPool.init(testing.allocator, disk_b.storage(), 64);
+    defer pool_b.deinit();
+    var tree_b = try BTree.init(&pool_b, null, 0);
+    var hint = LeafHint{};
+
+    const n: u64 = 1600;
+    var key_buf: [8]u8 = undefined;
+
+    const base_before = pool_a.hits + pool_a.misses;
+    var i: u64 = 0;
+    while (i < n) : (i += 1) {
+        const key = encodeBigEndianU64(i, &key_buf);
+        try tree_a.insert(key, RowId{ .page_id = i + 1, .slot = 0 });
+    }
+    const baseline_pin_ops = (pool_a.hits + pool_a.misses) - base_before;
+
+    const hint_before = pool_b.hits + pool_b.misses;
+    i = 0;
+    while (i < n) : (i += 1) {
+        const key = encodeBigEndianU64(i, &key_buf);
+        try tree_b.insertWithHint(key, RowId{ .page_id = i + 1, .slot = 0 }, &hint);
+    }
+    const hinted_pin_ops = (pool_b.hits + pool_b.misses) - hint_before;
+
+    try testing.expect(hinted_pin_ops < baseline_pin_ops);
 }
 
 test "btree: duplicate key returns error" {

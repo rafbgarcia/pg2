@@ -80,13 +80,14 @@ const enforceNonPkUniqueness = constraints_mod.enforceNonPkUniqueness;
 const index_maintenance_mod = @import("index_maintenance.zig");
 const openPrimaryKeyIndex = index_maintenance_mod.openPrimaryKeyIndex;
 const insertPrimaryKey = index_maintenance_mod.insertPrimaryKey;
-const insertPrimaryKeyNoSync = index_maintenance_mod.insertPrimaryKeyNoSync;
+const insertPrimaryKeyWithHintNoSync = index_maintenance_mod.insertPrimaryKeyWithHintNoSync;
 const primaryKeyExists = index_maintenance_mod.primaryKeyExists;
 const primaryKeyVisibleInIndex = index_maintenance_mod.primaryKeyVisibleInIndex;
 const openIndex = index_maintenance_mod.openIndex;
 const insertIndexKey = index_maintenance_mod.insertIndexKey;
-const insertIndexKeyNoSync = index_maintenance_mod.insertIndexKeyNoSync;
+const insertIndexKeyWithHintNoSync = index_maintenance_mod.insertIndexKeyWithHintNoSync;
 const syncIndexBTreeState = index_maintenance_mod.syncIndexBTreeState;
+const LeafHint = index_maintenance_mod.LeafHint;
 const index_key_mod = @import("../storage/index_key.zig");
 
 // Value builder delegation
@@ -845,6 +846,7 @@ fn performBulkIndexPhaseB(
         var btree = openIndex(catalog, pool, wal, model_id, idx_id) orelse return error.Corruption;
         var decode_buf: [max_row_buf_size]u8 = undefined;
         var string_arena = scan_mod.StringArena.init(decode_buf[0..]);
+        var leaf_hint = LeafHint{};
 
         for (sorted_row_ids[0..row_ids.len]) |row_id| {
             const key_value = try readRowColumnValue(
@@ -856,9 +858,9 @@ fn performBulkIndexPhaseB(
                 &string_arena,
             );
             if (pk_col != null and idx.column_ids[0] == pk_col.?) {
-                try insertPrimaryKeyNoSync(catalog, model_id, &btree, key_value, row_id);
+                try insertPrimaryKeyWithHintNoSync(catalog, model_id, &btree, key_value, row_id, &leaf_hint);
             } else {
-                try insertIndexKeyNoSync(&btree, key_value, row_id);
+                try insertIndexKeyWithHintNoSync(&btree, key_value, row_id, &leaf_hint);
             }
         }
         syncIndexBTreeState(catalog, model_id, idx_id, &btree);
