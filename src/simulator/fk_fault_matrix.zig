@@ -237,6 +237,7 @@ fn runFkRestrictCrashRestart(seed: u64) !ScenarioOutcome {
         );
         try tm.commit(tx_insert);
         _ = try wal.commitTx(tx_insert);
+        try wal.forceFlush();
         try pool.flushAll();
 
         const tx_delete = try tm.begin();
@@ -382,6 +383,7 @@ fn runFkCascadeCrashRestart(seed: u64) !ScenarioOutcome {
         );
         try tm.commit(tx_insert);
         _ = try wal.commitTx(tx_insert);
+        try wal.forceFlush();
 
         const tx_delete = try tm.begin();
         var snap_delete = try tm.snapshot(tx_delete);
@@ -400,6 +402,7 @@ fn runFkCascadeCrashRestart(seed: u64) !ScenarioOutcome {
         try std.testing.expectEqual(@as(u32, 1), deleted_before_crash);
         try tm.commit(tx_delete);
         _ = try wal.commitTx(tx_delete);
+        try wal.forceFlush();
         try pool.flushAll();
     }
 
@@ -512,6 +515,7 @@ fn runFkUpdateSetNullCrashRestart(seed: u64) !ScenarioOutcome {
         );
         try tm.commit(tx_insert);
         _ = try wal.commitTx(tx_insert);
+        try wal.forceFlush();
 
         const tx_update = try tm.begin();
         var snap_update = try tm.snapshot(tx_update);
@@ -530,6 +534,7 @@ fn runFkUpdateSetNullCrashRestart(seed: u64) !ScenarioOutcome {
         try std.testing.expectEqual(@as(u32, 1), updated_before_crash);
         try tm.commit(tx_update);
         _ = try wal.commitTx(tx_update);
+        try wal.forceFlush();
         try pool.flushAll();
     }
 

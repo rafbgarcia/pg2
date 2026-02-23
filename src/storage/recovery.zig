@@ -343,6 +343,7 @@ test "replayCommittedOverflowLifecycle reclaims chain and is idempotent" {
         1,
     );
     _ = try wal.commitTx(tx);
+    try wal.forceFlush();
 
     var replay_wal = Wal.init(std.testing.allocator, disk.storage());
     defer replay_wal.deinit();

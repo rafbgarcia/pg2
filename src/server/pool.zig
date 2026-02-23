@@ -97,6 +97,7 @@ pub const ConnectionPool = struct {
         if (conn.pinned) return error.PoolConnPinned;
 
         _ = try self.runtime.wal.commitTx(conn.tx_id);
+        _ = try self.runtime.wal.flushIfNeeded();
         conn.snapshot.deinit();
         try self.runtime.tx_manager.commit(conn.tx_id);
         try self.runtime.releaseQueryBuffers(conn.slot_index);

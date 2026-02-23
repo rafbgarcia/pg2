@@ -40,7 +40,8 @@ pub const BootstrapConfig = struct {
     buffer_pool_frames: u16 = 16,
     undo_max_entries: u32 = 1024,
     undo_max_data_bytes: u32 = 64 * 1024,
-    wal_buffer_capacity_bytes: usize = io_mod.page_size,
+    wal_buffer_capacity_bytes: usize = 128 * 1024,
+    wal_flush_threshold_bytes: usize = 64 * 1024,
     max_query_slots: u16 = 8,
     query_string_arena_bytes_per_slot: usize = 4 * 1024 * 1024,
     temp_pages_per_query_slot: u64 = 1024,
@@ -104,10 +105,15 @@ pub const BootstrappedRuntime = struct {
         ) catch return error.OutOfMemory;
         errdefer runtime.pool.deinit();
 
+        if (config.wal_flush_threshold_bytes > 0) {
+            std.debug.assert(config.wal_buffer_capacity_bytes >= config.wal_flush_threshold_bytes);
+        }
+
         runtime.wal = Wal.init(allocator, storage);
         errdefer runtime.wal.deinit();
         runtime.wal.reserveBufferCapacity(config.wal_buffer_capacity_bytes) catch
             return error.OutOfMemory;
+        runtime.wal.flush_threshold_bytes = config.wal_flush_threshold_bytes;
 
         runtime.undo_log = UndoLog.init(
             allocator,
@@ -328,6 +334,7 @@ test "bootstrap seals allocator before runtime operations" {
             .undo_max_entries = 128,
             .undo_max_data_bytes = 16 * 1024,
             .wal_buffer_capacity_bytes = 512,
+            .wal_flush_threshold_bytes = 0,
             .max_query_slots = 1,
         },
     );
@@ -361,6 +368,7 @@ test "runtime wal growth beyond startup cap fails closed" {
             .undo_max_entries = 64,
             .undo_max_data_bytes = 8 * 1024,
             .wal_buffer_capacity_bytes = 32,
+            .wal_flush_threshold_bytes = 0,
             .max_query_slots = 1,
         },
     );

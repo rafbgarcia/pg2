@@ -126,6 +126,7 @@ pub const TestExecutor = struct {
             };
         }
         try self.pool.checkin(&pool_conn);
+        try self.runtime.wal.forceFlush();
         return self.response_buf[0..result.bytes_written];
     }
 };

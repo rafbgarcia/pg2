@@ -255,6 +255,13 @@ pub const Session = struct {
                 response_buf[0..response.bytes_written],
             );
         }
+
+        // Session closing — force-flush any deferred WAL commits
+        // so all transactions from this session are durable.
+        self.runtime.wal.forceFlush() catch |err| {
+            std.log.err("WAL force flush on session close failed: {s}", .{@errorName(err)});
+            @panic("WAL force flush failed on session close");
+        };
     }
 
     /// Accept and serve all currently pending connections.

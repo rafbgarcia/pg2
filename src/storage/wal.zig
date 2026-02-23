@@ -281,6 +281,9 @@ pub const Wal = struct {
     buffer_fixed_capacity: bool = false,
     /// LSN of the most recent record in the buffer (unflushed).
     buffer_max_lsn: u64 = 0,
+    /// Minimum buffer occupancy before `flushIfNeeded` will flush.
+    /// When 0, `flushIfNeeded` always flushes (legacy / test behavior).
+    flush_threshold_bytes: usize = 0,
 
     /// Page ID used for WAL storage. We use a simple scheme: WAL data
     /// is stored in sequential pages starting at a high page_id range
@@ -521,11 +524,28 @@ pub const Wal = struct {
         return self.append(tx_id, .tx_begin, 0, &.{});
     }
 
-    /// Convenience: commit a transaction. Flushes the WAL (group commit point).
+    /// Convenience: commit a transaction. Appends the commit record but does
+    /// NOT flush — the caller (or group-commit loop) decides when to flush.
     pub fn commitTx(self: *Wal, tx_id: u64) WalError!u64 {
-        const lsn = try self.append(tx_id, .tx_commit, 0, &.{});
+        return self.append(tx_id, .tx_commit, 0, &.{});
+    }
+
+    /// Flush the WAL buffer if it has reached the configured byte threshold.
+    /// When flush_threshold_bytes is 0, always flushes (legacy behavior).
+    pub fn flushIfNeeded(self: *Wal) WalError!bool {
+        if (self.buffer_len == 0) return false;
+        if (self.flush_threshold_bytes > 0 and self.buffer_len < self.flush_threshold_bytes) {
+            return false;
+        }
         try self.flush();
-        return lsn;
+        return true;
+    }
+
+    /// Force an immediate WAL flush regardless of threshold.
+    /// Used at session boundaries to ensure durability.
+    pub fn forceFlush(self: *Wal) WalError!void {
+        if (self.buffer_len == 0) return;
+        try self.flush();
     }
 
     /// Convenience: abort a transaction.
@@ -693,7 +713,7 @@ test "WAL append and flush" {
     try std.testing.expectEqual(@as(u64, 1), wal.flushes);
 }
 
-test "WAL commitTx flushes automatically" {
+test "WAL commitTx appends without flushing" {
     const disk_mod = @import("../simulator/disk.zig");
     var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
     defer disk.deinit();
@@ -706,9 +726,13 @@ test "WAL commitTx flushes automatically" {
     const commit_lsn = try wal.commitTx(1);
 
     try std.testing.expectEqual(@as(u64, 3), commit_lsn);
+    // commitTx no longer flushes — data is buffered.
+    try std.testing.expectEqual(@as(u64, 0), wal.flushed_lsn);
+    try std.testing.expectEqual(@as(u64, 0), disk.fsyncs);
+
+    // Explicit flush makes it durable.
+    try wal.forceFlush();
     try std.testing.expectEqual(@as(u64, 3), wal.flushed_lsn);
-    // WAL is durable — verify fsync was called.
-    // One fsync for WAL data, one for recovery envelope.
     try std.testing.expectEqual(@as(u64, 2), disk.fsyncs);
 }
 
@@ -727,6 +751,7 @@ test "WAL readFrom filters by LSN" {
     _ = try wal.beginTx(2); // lsn 4
     _ = try wal.append(2, .insert, 6, "b"); // lsn 5
     _ = try wal.commitTx(2); // lsn 6
+    try wal.forceFlush();
 
     // Read from LSN 4 onwards.
     var records_buf: [8]Record = undefined;
@@ -751,6 +776,7 @@ test "WAL survives crash after flush" {
         _ = try wal.beginTx(1);
         _ = try wal.append(1, .insert, 5, "important");
         _ = try wal.commitTx(1);
+        try wal.forceFlush();
         // WAL is flushed and fsynced. Simulate crash.
     }
 
@@ -811,6 +837,7 @@ test "WAL recover restores offsets from envelope" {
     _ = try wal.beginTx(1);
     _ = try wal.append(1, .insert, 42, "envelope");
     _ = try wal.commitTx(1);
+    try wal.forceFlush();
 
     var wal2 = Wal.init(std.testing.allocator, disk.storage());
     defer wal2.deinit();
@@ -832,6 +859,7 @@ test "WAL recover detects corrupt envelope" {
 
     _ = try wal.beginTx(1);
     _ = try wal.commitTx(1);
+    try wal.forceFlush();
 
     var meta_page: [io.page_size]u8 = undefined;
     try disk.storage().read(wal.wal_meta_page_id, &meta_page);
@@ -889,6 +917,7 @@ test "WAL recover handles deterministic torn-write corruption" {
         _ = try wal.beginTx(1);
         _ = try wal.append(1, .insert, 99, "faulty");
         _ = try wal.commitTx(1);
+        try wal.forceFlush();
     }
 
     disk.crash();
@@ -917,6 +946,7 @@ test "WAL readFromInto decodes records with caller-owned buffers" {
     _ = try wal.beginTx(1);
     _ = try wal.append(1, .insert, 11, "abc");
     _ = try wal.commitTx(1);
+    try wal.forceFlush();
 
     var records_buf: [8]Record = undefined;
     var payload_buf: [64]u8 = undefined;
@@ -940,6 +970,7 @@ test "WAL readFromInto returns RecordBufferTooSmall" {
     _ = try wal.beginTx(1);
     _ = try wal.append(1, .insert, 22, "x");
     _ = try wal.commitTx(1);
+    try wal.forceFlush();
 
     var tiny_records: [2]Record = undefined;
     var payload_buf: [64]u8 = undefined;
@@ -960,8 +991,109 @@ test "WAL readFromInto returns PayloadBufferTooSmall" {
     _ = try wal.beginTx(1);
     _ = try wal.append(1, .insert, 33, &payload);
     _ = try wal.commitTx(1);
+    try wal.forceFlush();
 
     var records_buf: [8]Record = undefined;
     var tiny_payload: [8]u8 = undefined;
     try std.testing.expectError(error.PayloadBufferTooSmall, wal.readFromInto(1, &records_buf, &tiny_payload));
+}
+
+test "WAL flushIfNeeded respects byte threshold" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+    try wal.reserveBufferCapacity(4096);
+    wal.flush_threshold_bytes = 200;
+
+    _ = try wal.beginTx(1);
+    _ = try wal.append(1, .insert, 10, "small");
+    _ = try wal.commitTx(1);
+
+    // Below threshold — no flush.
+    const flushed = try wal.flushIfNeeded();
+    try std.testing.expect(!flushed);
+    try std.testing.expectEqual(@as(u64, 0), wal.flushed_lsn);
+
+    // Append more to exceed threshold.
+    _ = try wal.beginTx(2);
+    var big_payload: [150]u8 = undefined;
+    @memset(&big_payload, 0xCC);
+    _ = try wal.append(2, .insert, 11, &big_payload);
+    _ = try wal.commitTx(2);
+
+    const flushed2 = try wal.flushIfNeeded();
+    try std.testing.expect(flushed2);
+    try std.testing.expect(wal.flushed_lsn > 0);
+}
+
+test "WAL forceFlush always flushes regardless of threshold" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+    try wal.reserveBufferCapacity(4096);
+    wal.flush_threshold_bytes = 64 * 1024;
+
+    _ = try wal.beginTx(1);
+    _ = try wal.append(1, .insert, 10, "data");
+    _ = try wal.commitTx(1);
+
+    // Well below threshold, but forceFlush should flush anyway.
+    try wal.forceFlush();
+    try std.testing.expect(wal.flushed_lsn > 0);
+    try std.testing.expectEqual(@as(u64, 2), disk.fsyncs);
+}
+
+test "WAL flushIfNeeded with threshold=0 always flushes" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+    wal.flush_threshold_bytes = 0;
+
+    _ = try wal.beginTx(1);
+    _ = try wal.commitTx(1);
+
+    const flushed = try wal.flushIfNeeded();
+    try std.testing.expect(flushed);
+    try std.testing.expect(wal.flushed_lsn > 0);
+}
+
+test "WAL group commit batches multiple transactions" {
+    const disk_mod = @import("../simulator/disk.zig");
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+    try wal.reserveBufferCapacity(8192);
+    wal.flush_threshold_bytes = 512;
+
+    // Commit several small transactions — should batch.
+    var i: u64 = 1;
+    while (i <= 5) : (i += 1) {
+        _ = try wal.beginTx(i);
+        _ = try wal.append(i, .insert, i, "row");
+        _ = try wal.commitTx(i);
+        _ = try wal.flushIfNeeded();
+    }
+
+    // With threshold=512 and small records, we expect fewer flushes than 5.
+    try std.testing.expect(disk.fsyncs < 10); // < 5 flushes * 2 fsyncs each
+
+    // Force final flush to make everything durable.
+    try wal.forceFlush();
+
+    // All 15 records (3 per tx: begin, insert, commit) should be readable.
+    var records_buf: [16]Record = undefined;
+    var payload_buf: [512]u8 = undefined;
+    const decoded = try wal.readFromInto(1, &records_buf, &payload_buf);
+    try std.testing.expectEqual(@as(usize, 15), decoded.records_len);
 }

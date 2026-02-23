@@ -82,6 +82,7 @@ fn runWalPartialWriteRecovery(seed: u64) !ScenarioOutcome {
     _ = try wal.beginTx(1);
     _ = try wal.append(1, .insert, rand.uintLessThan(u64, 1000), payload[0..payload_len]);
     _ = try wal.commitTx(1);
+    try wal.forceFlush();
 
     disk.crash();
 
@@ -198,6 +199,7 @@ fn runWalMultiFaultInterleaving(seed: u64) !ScenarioOutcome {
     _ = try wal.beginTx(1);
     _ = try wal.append(1, .insert, 100 + rand.uintLessThan(u64, 32), payload1[0..payload1_len]);
     _ = try wal.commitTx(1);
+    try wal.forceFlush();
 
     disk.crash();
 
@@ -216,9 +218,10 @@ fn runWalMultiFaultInterleaving(seed: u64) !ScenarioOutcome {
     rand.bytes(payload2[0..payload2_len]);
     _ = try recovered.beginTx(2);
     _ = try recovered.append(2, .insert, 200 + rand.uintLessThan(u64, 32), payload2[0..payload2_len]);
+    _ = try recovered.commitTx(2);
     const before_failed_flush = recovered.flushed_lsn;
     disk.failFsyncAt(disk.fsyncs + 1);
-    try std.testing.expectError(error.WalFsyncError, recovered.commitTx(2));
+    try std.testing.expectError(error.WalFsyncError, recovered.forceFlush());
     try std.testing.expectEqual(before_failed_flush, recovered.flushed_lsn);
     try recovered.flush();
     try std.testing.expect(recovered.flushed_lsn > before_failed_flush);
@@ -336,8 +339,9 @@ fn runWalRepeatedCrashRecoveryCycles(seed: u64) !ScenarioOutcome {
 
         _ = try wal.beginTx(1);
         _ = try wal.append(1, .insert, 300 + rand.uintLessThan(u64, 32), payload1[0..payload1_len]);
+        _ = try wal.commitTx(1);
         disk.failFsyncAt(disk.fsyncs + 1);
-        try std.testing.expectError(error.WalFsyncError, wal.commitTx(1));
+        try std.testing.expectError(error.WalFsyncError, wal.forceFlush());
         const failed_flush_lsn = wal.flushed_lsn;
         try wal.flush();
         try std.testing.expect(wal.flushed_lsn > failed_flush_lsn);
@@ -360,6 +364,7 @@ fn runWalRepeatedCrashRecoveryCycles(seed: u64) !ScenarioOutcome {
         _ = try wal.beginTx(2);
         _ = try wal.append(2, .insert, 400 + rand.uintLessThan(u64, 32), payload2[0..payload2_len]);
         _ = try wal.commitTx(2);
+        try wal.forceFlush();
     }
 
     disk.crash();
@@ -376,6 +381,7 @@ fn runWalRepeatedCrashRecoveryCycles(seed: u64) !ScenarioOutcome {
         _ = try wal.beginTx(3);
         _ = try wal.append(3, .insert, 500 + rand.uintLessThan(u64, 32), payload3[0..payload3_len]);
         _ = try wal.commitTx(3);
+        try wal.forceFlush();
     }
 
     disk.crash();
@@ -1016,6 +1022,7 @@ fn runWalUndoCrashVisibilityConsistency(seed: u64) !ScenarioOutcome {
         }
         try tm.commit(tx_insert);
         _ = try wal.commitTx(tx_insert);
+        try wal.forceFlush();
         try pool.flushAll();
 
         try wal.reserveBufferCapacity(wal_fixed_capacity);
