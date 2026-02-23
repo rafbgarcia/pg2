@@ -382,3 +382,75 @@ test "collector-backed spill path applies computed projection correctly" {
     try std.testing.expect(std.mem.startsWith(u8, result, "OK returned_rows=2 "));
     try std.testing.expect(std.mem.indexOf(u8, result, "\n31\n41\n") != null);
 }
+
+test "collector-backed spill path fails explicitly for having" {
+    var env: FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\HavingSpillTable {
+        \\  field(id, i64, notNull, primaryKey)
+        \\}
+    );
+
+    try insertRows(executor, "HavingSpillTable", 4200);
+
+    const result = try executor.run(
+        "HavingSpillTable |> having(id > 100) |> inspect { id }",
+    );
+
+    try std.testing.expect(std.mem.startsWith(u8, result, "ERR query: "));
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            result,
+            "collector-backed HAVING or nested selection not implemented",
+        ) != null,
+    );
+}
+
+test "collector-backed spill path fails explicitly for nested selection" {
+    var env: FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\  reference(posts, id, Post.user_id, withoutReferentialIntegrity)
+        \\}
+        \\Post {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(user_id, i64, notNull)
+        \\  field(title, string, notNull)
+        \\}
+    );
+
+    var i: u32 = 1;
+    while (i <= 4200) : (i += 1) {
+        var query_buf: [256]u8 = undefined;
+        const query = std.fmt.bufPrint(
+            &query_buf,
+            "User |> insert(id = {d}, name = \"u{d}\") {{}}",
+            .{ i, i },
+        ) catch unreachable;
+        _ = try executor.run(query);
+    }
+
+    const result = try executor.run(
+        "User |> inspect { id posts |> sort(id asc) { id title } }",
+    );
+
+    try std.testing.expect(std.mem.startsWith(u8, result, "ERR query: "));
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            result,
+            "collector-backed HAVING or nested selection not implemented",
+        ) != null,
+    );
+}

@@ -59,6 +59,7 @@ Queries should degrade performance under memory pressure before failing, using p
   - Collector-backed projection now rewrites spill rows before serialization (flat field + computed select expressions).
   - Regression coverage exists for spill + LIMIT, spill + OFFSET+LIMIT, and spill + external-sort + LIMIT.
   - Regression coverage now includes spill + flat projection and spill + computed projection.
+  - Regression coverage now locks explicit fail-closed behavior for collector-backed HAVING and nested selection.
   - Remaining fail-closed guard currently covers collector-backed HAVING and nested selection.
 - The unified operator I/O contract (flat buffer vs spill descriptor/iterator chaining) is still pending and remains the next major step.
 
