@@ -266,6 +266,8 @@ fn accumulateStatementStats(total: *ExecStats, current: *const ExecStats) void {
     total.temp_pages_reclaimed +|= current.temp_pages_reclaimed;
     total.temp_bytes_written +|= current.temp_bytes_written;
     total.temp_bytes_read +|= current.temp_bytes_read;
+    total.spill_triggered = total.spill_triggered or current.spill_triggered;
+    total.result_bytes_accumulated +|= current.result_bytes_accumulated;
     total.plan = current.plan;
 }
 

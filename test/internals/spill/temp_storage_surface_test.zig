@@ -193,6 +193,56 @@ test "inspect includes spill stats at zero when no spilling occurs" {
     );
 }
 
+test "inspect reports non-zero spill telemetry when spill is triggered" {
+    const internal = @import("../../features/test_env_test.zig");
+
+    // Use a tiny work-memory budget so that a few rows exceed it and trigger spill.
+    var env: internal.FeatureEnv = undefined;
+    try env.initWithConfig(.{
+        .max_query_slots = 1,
+        .work_memory_bytes_per_slot = 50,
+    });
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\SpillUser {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\}
+    );
+
+    // Insert several rows. Each row serializes to more than ~20 bytes,
+    // so 3-4 rows will exceed the 50-byte budget and force a spill.
+    _ = try executor.run("SpillUser |> insert(id = 1, name = \"Alice\") {}");
+    _ = try executor.run("SpillUser |> insert(id = 2, name = \"Bob\") {}");
+    _ = try executor.run("SpillUser |> insert(id = 3, name = \"Charlie\") {}");
+    _ = try executor.run("SpillUser |> insert(id = 4, name = \"Diana\") {}");
+
+    const result = try executor.run("SpillUser |> inspect {}");
+
+    // spill_triggered must be true.
+    try std.testing.expect(
+        std.mem.indexOf(u8, result, "spill_triggered=true") != null,
+    );
+
+    // result_bytes_accumulated must be non-zero (rows were scanned).
+    // Verify it does NOT say result_bytes_accumulated=0.
+    try std.testing.expect(
+        std.mem.indexOf(u8, result, "result_bytes_accumulated=0 ") == null,
+    );
+
+    // temp_bytes_written must be non-zero (data was spilled to disk).
+    try std.testing.expect(
+        std.mem.indexOf(u8, result, "temp_bytes_written=0 ") == null,
+    );
+
+    // temp_pages_allocated must be non-zero.
+    try std.testing.expect(
+        std.mem.indexOf(u8, result, "temp_pages_allocated=0 ") == null,
+    );
+}
+
 test "temp long chain traversal" {
     var disk = SimulatedDisk.init(std.testing.allocator);
     defer disk.deinit();
