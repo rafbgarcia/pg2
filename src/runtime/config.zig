@@ -7,9 +7,11 @@
 const std = @import("std");
 
 pub const default_memory_bytes: usize = 512 * 1024 * 1024;
+pub const default_concurrency: u16 = 1;
 
 pub const ConfigError = error{
     InvalidMemoryValue,
+    InvalidConcurrencyValue,
     Overflow,
 };
 
@@ -67,6 +69,16 @@ pub fn parseMemoryBytes(raw: []const u8) ConfigError!usize {
     return std.math.mul(usize, number, multiplier) catch error.Overflow;
 }
 
+/// Parse worker concurrency for --concurrency.
+pub fn parseConcurrency(raw: []const u8) ConfigError!u16 {
+    const input = std.mem.trim(u8, raw, " \t\r\n");
+    if (input.len == 0) return error.InvalidConcurrencyValue;
+    const value = std.fmt.parseInt(u16, input, 10) catch
+        return error.InvalidConcurrencyValue;
+    if (value == 0) return error.InvalidConcurrencyValue;
+    return value;
+}
+
 test "parse memory bytes plain integer" {
     try std.testing.expectEqual(
         @as(usize, 536_870_912),
@@ -100,5 +112,31 @@ test "parse memory bytes rejects invalid input" {
     try std.testing.expectError(
         error.InvalidMemoryValue,
         parseMemoryBytes("0"),
+    );
+}
+
+test "parse concurrency accepts positive integer" {
+    try std.testing.expectEqual(
+        @as(u16, 1),
+        try parseConcurrency("1"),
+    );
+    try std.testing.expectEqual(
+        @as(u16, 32),
+        try parseConcurrency(" 32 "),
+    );
+}
+
+test "parse concurrency rejects invalid values" {
+    try std.testing.expectError(
+        error.InvalidConcurrencyValue,
+        parseConcurrency(""),
+    );
+    try std.testing.expectError(
+        error.InvalidConcurrencyValue,
+        parseConcurrency("0"),
+    );
+    try std.testing.expectError(
+        error.InvalidConcurrencyValue,
+        parseConcurrency("abc"),
     );
 }

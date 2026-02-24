@@ -29,7 +29,7 @@ Remove connection-serial request handling so multiple client connections can mak
     - exact deadline timeout boundary (`QueueTimeout`)
     - round-robin fairness across 4 sessions
 - Remaining gaps:
-  - No `--concurrency` runtime cap yet (Phase 3 pending).
+  - `--concurrency` parsing/validation is landed in `src/main.zig` + `src/runtime/config.zig`, but execution remains locked to 1 worker.
   - No transaction pinning semantics in reactor/session state yet (Phase 4 pending).
 
 ### Commits Landed (Latest First)
@@ -195,7 +195,7 @@ Remove connection-serial request handling so multiple client connections can mak
 - Client B request/response progresses while Client A remains connected and active.
 - In-flight execution cap is enforced and observable in stats.
 - Fail-closed behavior when worker queue is saturated.
-- **Status:** ⏳ partially started (reactor progression exists), concurrency cap and worker budget wiring pending.
+- **Status:** ⏳ partially started (reactor progression exists; `--concurrency` CLI validation landed; worker scaling pending).
 
 ## Phase 4: Transaction Pinning Semantics
 

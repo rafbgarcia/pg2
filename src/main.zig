@@ -1,7 +1,7 @@
 //! pg2 process entrypoint and server bootstrap loop.
 //!
 //! Responsibilities in this file:
-//! - Parses CLI flags (`--memory`, `--listen`) and validates startup args.
+//! - Parses CLI flags (`--memory`, `--listen`, `--concurrency`) and validates startup args.
 //! - Bootstraps runtime/canonical in-memory catalog for local process use.
 //! - Starts the server accept loop when listen mode is requested.
 //! - Emits user-facing startup/failure messages at process boundary.
@@ -26,6 +26,7 @@ pub fn main() !void {
 
     var memory_bytes: usize = runtime_config.default_memory_bytes;
     var listen_addr: ?[]const u8 = null;
+    var concurrency: u16 = runtime_config.default_concurrency;
 
     while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--memory")) {
@@ -43,11 +44,21 @@ pub fn main() !void {
                 return;
             };
             listen_addr = raw;
+        } else if (std.mem.eql(u8, arg, "--concurrency")) {
+            const raw = args.next() orelse {
+                try stdout.writeAll("missing value for --concurrency\n");
+                return;
+            };
+            concurrency = runtime_config.parseConcurrency(raw) catch {
+                try stdout.writeAll("invalid --concurrency value\n");
+                return;
+            };
         } else if (std.mem.eql(u8, arg, "--help")) {
             try stdout.writeAll(
-                \\Usage: pg2 [--memory <bytes|MiB|GiB>] [--listen <host:port>]
-                \\  --memory   Startup memory budget (default: 512MiB)
-                \\  --listen   Start server accept loop (Linux-only target)
+                \\Usage: pg2 [--memory <bytes|MiB|GiB>] [--listen <host:port>] [--concurrency <n>]
+                \\  --memory       Startup memory budget (default: 512MiB)
+                \\  --listen       Start server accept loop (Linux-only target)
+                \\  --concurrency  Requested worker concurrency (currently only 1 is supported)
                 \\
             );
             return;
@@ -100,6 +111,13 @@ pub fn main() !void {
     try stdout.writeAll(msg);
 
     if (listen_addr) |raw_listen_addr| {
+        if (concurrency != 1) {
+            try stdout.writeAll(
+                "startup failed: --concurrency > 1 is not enabled yet; use --concurrency 1\n",
+            );
+            return;
+        }
+
         if (builtin.os.tag != .linux) {
             try stdout.writeAll(
                 "server mode is Linux-only; use Docker to run dev/test on macOS\n",
