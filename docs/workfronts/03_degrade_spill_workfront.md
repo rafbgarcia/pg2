@@ -4,7 +4,7 @@
 
 Queries must degrade under memory pressure (spill to temp storage) before failing, while preserving exact SQL semantics.
 
-## Session Handoff Snapshot (2026-02-23)
+## Session Handoff Snapshot (2026-02-24)
 
 ### Decision Lock
 
@@ -23,6 +23,11 @@ Queries must degrade under memory pressure (spill to temp storage) before failin
 - ✅ Per-parent nested child subsets now spill via parent-local collectors (no in-memory subset truncation/failure behavior).
 - ✅ Nested per-parent operator order under spill is wired and covered: `WHERE -> GROUP BY -> HAVING -> ORDER BY -> OFFSET -> LIMIT`.
 - ✅ Nested spill + aggregate `HAVING` path fixed and replay-deterministic under test.
+- ✅ Phase 6 started: nested hash join fast path exists for **no-child-operator** nested selections with deterministic left-major output.
+- ✅ `hash_in_memory` nested strategy is wired for flat-left and collector-left paths when right side is flat-fit.
+- ✅ `hash_spill` nested strategy is wired for flat-left and collector-left paths when right side exceeds flat-fit (deterministic partition spill/read path).
+- ✅ Spill partition probe performance improved with per-partition page chaining + partition-local hash cache (with deterministic fallback).
+- ✅ Determinism coverage now includes repeated-run nested `hash_spill` with alternating left-key partition access.
 
 ### Commits Already Landed (latest relevant)
 
@@ -33,6 +38,12 @@ Queries must degrade under memory pressure (spill to temp storage) before failin
 - `eb8dfbc`: per-parent nested spill execution path and contracts.
 - `4f34fdf`: nested spill aggregate `HAVING` state-budget correctness fix.
 - `8d474db`: nested temp-region isolation hardening + determinism coverage.
+- `ae7ea23`: in-memory nested hash-join fast paths (`hash_in_memory`) + integration wiring/tests.
+- `a4b5636`: deterministic hash-join spill partition primitives.
+- `f8be935`: executor nested `hash_spill` path for large right-side no-op nested joins.
+- `2b2cbf0`: partition probe cache for nested `hash_spill`.
+- `a20026f`: spill page chaining per partition for faster partition iteration.
+- `9fa86e3`: deterministic replay coverage for alternating-partition nested `hash_spill`.
 
 ## Non-Negotiables
 
@@ -155,12 +166,32 @@ Remove per-parent in-memory subset limits by making nested child pipelines spill
 - ✅ Determinism coverage exists for nested spill + aggregate `HAVING` replay.
 - ✅ Full suite currently passing: `zig build test --summary all`.
 
-## Phase 6: Spill-Aware Hash Join (Cross-Tracked with WF13) ⏳ Pending
+## Phase 6: Spill-Aware Hash Join (Cross-Tracked with WF13) 🚧 In Progress
 
 ### Status
 
-- Not implemented in WF03 yet.
+- Implemented slice for **no-child-operator nested selections**:
+  - `hash_in_memory` for flat-fit right side.
+  - `hash_spill` for oversized right side using deterministic partition spill.
+  - Works for both flat-left and collector-left parent paths.
+- Determinism and strategy inspect coverage landed for these slices.
+- Full Phase 6 is not complete yet (see remaining slices below).
 - Detailed design work is tracked in `docs/workfronts/13_nested_spill_hash_join_workfront.md`.
+
+### Completed in Phase 6 so far
+
+1. Nested join operator groundwork (`hash_join.zig`) and deterministic in-memory left-join hash execution.
+2. Executor integration for nested no-op child pipelines on both flat-left and collector-left paths.
+3. Deterministic spill partition primitives + right-side partitioned nested probing path.
+4. Spill probe optimizations: partition-local hash cache + per-partition page chains.
+5. Determinism regression for alternating-partition nested `hash_spill`.
+
+### Remaining Phase 6 slices
+
+1. Extend hash-join path to nested pipelines with child operators (`WHERE/GROUP/HAVING/SORT/OFFSET/LIMIT`) while preserving per-parent semantics.
+2. Eliminate remaining nested-loop dependency for large nested selection cases outside current no-op fast path.
+3. Add explicit stress coverage for mixed root spill + nested hash spill under tighter temp budgets.
+4. Expand telemetry/explain to clearly distinguish nested hash in-memory vs spill decisions across more query shapes.
 
 ### WF03 Ownership
 
@@ -169,9 +200,9 @@ Remove per-parent in-memory subset limits by making nested child pipelines spill
 
 ## Immediate Next Step (for fresh Codex session)
 
-1. Start Phase 6 with WF13 alignment: spill-aware hash join contracts and algorithm slices.
+1. Implement next Phase 6 slice: nested hash-join execution for child-operator pipelines (not only no-op nested child pipelines).
 2. Keep WF03 guardrails explicit in tests: no cross-parent semantic bleed, no serialized rows outside final descriptor, fail-closed only on hard boundaries.
-3. Add Phase 6 determinism + stress coverage once first hash-join spill slice lands.
+3. Add/expand stress coverage for mixed spill scenarios after child-operator hash-join slice lands.
 
 ## Verification Command
 
