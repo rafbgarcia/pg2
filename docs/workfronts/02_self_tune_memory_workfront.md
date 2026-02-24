@@ -2,11 +2,16 @@
 
 ## Objective
 
-Turn `--memory` into a planner input that derives runtime capacities automatically, with explicit overrides.
+Turn `--memory` into a startup planner input that derives runtime capacities automatically.
 
 ## User Decisions Locked
 
-- Override flag name: `--concurrency`.
+- No user-facing `--concurrency` flag in WF02.
+- Tuning is startup-only in WF02 (no runtime re-tuning).
+- Default objective: throughput-first planning.
+- Shared memory split policy: ratio-based.
+- Parser hard caps remain global fixed safety ceilings (not user configurable).
+- Tx sizing ratios (`*4`, `*256`) remain planner policy constants in WF02.
 - Default pool overload policy: `queue`.
 - Default queue timeout: `30s`.
 
@@ -35,11 +40,12 @@ Turn `--memory` into a planner input that derives runtime capacities automatical
 - Inputs:
   - memory budget from `--memory`
   - detected vCPU count
-  - optional overrides (`--concurrency`, future knobs)
 
 ### Initial Rule
 
 - Default effective concurrency = `min(vcpus, memory_limited_slots)` with min 1.
+- vCPU source in production is environment/host detection at startup.
+- Planner tests must stay deterministic by passing explicit vCPU counts directly to planner APIs (no ambient host dependency in tests).
 - `work_memory_bytes_per_slot` = remaining per-slot budget after reserving shared structures (buffer pool, WAL, undo log). Before WF02 lands, Workfront 03 uses a hardcoded default (4 MB, matching PostgreSQL's `work_mem`).
 - `temp_pages_per_query_slot` must be threaded through **all** runtime spill constructors (root collector temp manager and nested spill temp managers). No execution path may fall back to `default_pages_per_query_slot` once planned config is active.
 - parser capacities are primarily memory-bound (`max_*_effective`), but must also be bounded by global hard caps:
@@ -52,8 +58,8 @@ Turn `--memory` into a planner input that derives runtime capacities automatical
 ### Gate
 
 - Unit tests for planner outputs across memory/vCPU combinations.
-- `work_memory_bytes_per_slot` scales correctly with `--memory` and `--concurrency` (more memory or less concurrency → larger per-slot budget).
-- `max_active_transactions` and `max_tx_states` scale with effective concurrency (higher `--concurrency` → larger limits).
+- `work_memory_bytes_per_slot` scales correctly with `--memory` and effective concurrency (more memory or fewer slots → larger per-slot budget).
+- `max_active_transactions` and `max_tx_states` scale with effective concurrency.
 - `temp_pages_per_query_slot` is derived and scales inversely with concurrency (fewer slots → more temp pages per slot).
   - This is a hard dependency for Workfront 13 nested per-parent spill capacity and partition fanout.
 - Coverage proves both root and nested spill paths honor configured `temp_pages_per_query_slot`.
@@ -84,7 +90,7 @@ Turn `--memory` into a planner input that derives runtime capacities automatical
 
 - Keep a strict global statement-size safety boundary, but make normal parser capacity memory-planned per query slot.
 - Document two distinct contracts:
-  - parser effective-budget exhaustion (derived from `--memory` + `--concurrency`)
+  - parser effective-budget exhaustion (derived from `--memory` + startup planner outputs)
   - parser hard-cap exhaustion (global ceiling)
 - Short-term coverage while tokenizer is fixed-capacity:
   - keep token-bound multi-row insert regressions in [insert_test.zig](/Users/rafa/github.com/rafbgarcia/pg2/test/features/expressions/insert_test.zig)
@@ -108,15 +114,15 @@ Turn `--memory` into a planner input that derives runtime capacities automatical
 ### Scope
 
 - Wire planner into startup path.
-- Add `--concurrency` CLI parsing and validation.
+- Remove `--concurrency` CLI parsing and usage.
 - Keep deterministic override behavior for tests.
 
 ### Gate
 
 - CLI tests:
-  - valid memory+concurrency starts
-  - invalid concurrency for budget fails with clear message.
+  - valid memory-only startup with planner-derived concurrency
+  - startup reports clear diagnostics for invalid memory budgets.
 
 # Open questions (non-blocking for Phases 1-3)
 
-- Do we derive the concurrency (number of query executors) based on flag? Or could internal statistics also support this decision? Does the database know better than the user how much concurrency it should have?
+- Should future phases add bounded runtime adaptation (with hysteresis/cooldown), while preserving startup determinism and fail-closed bounds?
