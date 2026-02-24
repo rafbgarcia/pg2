@@ -128,6 +128,56 @@ fn runMixedRootAndNestedHashSpillScenario(out_buf: []u8) ![]const u8 {
     return result;
 }
 
+fn runRootSortSpillAndNestedHashSpillScenario(out_buf: []u8) ![]const u8 {
+    var env: FeatureEnv = undefined;
+    try env.initWithConfig(.{
+        .max_query_slots = 1,
+        .work_memory_bytes_per_slot = 256,
+        .temp_pages_per_query_slot = 256,
+    });
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  reference(posts, id, Post.user_id, withoutReferentialIntegrity)
+        \\}
+        \\Post {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(user_id, i64, notNull)
+        \\}
+    );
+
+    var user_id: u32 = 1;
+    while (user_id <= 4200) : (user_id += 1) {
+        var user_query_buf: [128]u8 = undefined;
+        const user_query = std.fmt.bufPrint(
+            &user_query_buf,
+            "User |> insert(id = {d}) {{}}",
+            .{user_id},
+        ) catch unreachable;
+        _ = try executor.run(user_query);
+    }
+
+    var post_id: u32 = 1;
+    while (post_id <= 5000) : (post_id += 1) {
+        const owner_id: u32 = ((post_id - 1) % 4200) + 1;
+        var post_query_buf: [160]u8 = undefined;
+        const post_query = std.fmt.bufPrint(
+            &post_query_buf,
+            "Post |> insert(id = {d}, user_id = {d}) {{}}",
+            .{ post_id, owner_id },
+        ) catch unreachable;
+        _ = try executor.run(post_query);
+    }
+
+    const query =
+        "User |> sort(id desc) |> limit(3) |> inspect { id posts |> where(id > 0) |> sort(id asc) |> limit(1) { id } }";
+    const result = try runWithBuffer(executor, query, out_buf);
+    return result;
+}
+
 // ---------------------------------------------------------------------------
 // Gate tests
 // ---------------------------------------------------------------------------
@@ -619,4 +669,19 @@ test "mixed root spill and nested hash spill is deterministic under tight temp b
     const run1 = try runMixedRootAndNestedHashSpillScenario(&run1_buf);
     const run2 = try runMixedRootAndNestedHashSpillScenario(&run2_buf);
     try std.testing.expectEqualStrings(run1, run2);
+}
+
+test "root sort spill and nested hash spill compose correctly under tight budget" {
+    var result_buf: [128 * 1024]u8 = undefined;
+    const result = try runRootSortSpillAndNestedHashSpillScenario(&result_buf);
+
+    try std.testing.expect(std.mem.startsWith(u8, result, "OK returned_rows=3 "));
+    try std.testing.expect(std.mem.indexOf(u8, result, "{id:i64,posts:[{id:i64}]}") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n4200,[[4200]]\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n4199,[[4199]]\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n4198,[[4198]]\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "spill_triggered=true") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "join_strategy=hash_spill") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "sort_strategy=external_merge") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "nested_join_breakdown=nested_loop:0,hash_in_memory:0,hash_spill:1") != null);
 }
