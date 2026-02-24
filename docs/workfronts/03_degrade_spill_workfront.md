@@ -1,5 +1,9 @@
 # Workfront 03: Degrade-First Execution and Spill
 
+## Status
+
+✅ COMPLETE (all WF03 phase slices and gates are complete).
+
 ## Objective
 
 Queries must degrade under memory pressure (spill to temp storage) before failing, while preserving exact SQL semantics.
@@ -192,7 +196,7 @@ Remove per-parent in-memory subset limits by making nested child pipelines spill
   - `hash_spill` for oversized right side using deterministic partition spill.
   - Works for both flat-left and collector-left parent paths.
 - Determinism, mixed-spill stress, and inspect strategy-breakdown coverage are landed.
-- WF03 Phase 6 slices are complete; remaining algorithmic refinements continue in WF13.
+- WF03 Phase 6 slices are complete.
 - Detailed design work is tracked in `docs/workfronts/13_nested_spill_hash_join_workfront.md`.
 
 ### Completed in Phase 6 so far
@@ -213,11 +217,11 @@ Remove per-parent in-memory subset limits by making nested child pipelines spill
 ### WF03 Ownership
 
 - WF03 owns executor spill contracts and correctness guardrails.
-- WF13 provides detailed join/nested-spill algorithm work; implementation must still satisfy WF03 gates/non-negotiables.
+- WF13 provided detailed join/nested-spill algorithm work; later work must still satisfy WF03 gates/non-negotiables.
 
 ## Immediate Next Step (for fresh Codex session)
 
-1. Continue spill-aware hash-join algorithm refinements in WF13 while preserving WF03 non-negotiables and guardrails.
+1. Start `docs/workfronts/12_storage_reclamation_workfront.md` per `WORKFRONTS.md` strict sequence.
 
 ## Verification Command
 

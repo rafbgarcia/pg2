@@ -1,5 +1,9 @@
 # Workfront 13: Nested Selection Performance-First (Spill-Aware Hash Join)
 
+## Status
+
+✅ COMPLETE (all WF13 scoped phases and gates are complete).
+
 ## Objective
 
 Implement a production-ready, spill-aware nested selection join path that scales beyond `scan_batch_size` and avoids O(n\*m) nested-loop behavior under large result sets.
@@ -100,20 +104,22 @@ Status: completed (`INSPECT plan` + `INSPECT explain` include nested join breakd
   - Replace current fail-closed nested spill test with correctness tests.
 
 Gate status:
-- Completed and green as of latest run (`zig build test --summary all`).
+- Completed for WF13 scope.
 - Additional hard-boundary coverage includes explicit fail-closed behavior under nested hash spill temp-page exhaustion.
 
-## Suggested Slice Plan (Commit-Oriented)
+## Historical Slice Plan (Completed)
 
 1. Operator API + in-memory hash join skeleton + unit tests.
 2. Spill partition path + deterministic tests.
 3. Executor nested integration + remove fail-closed guard.
 4. Telemetry/explain + gate/stress coverage.
 
-## Remaining Refinements
+## Deferred Non-Blocking Refinements
 
 1. Continue hard-boundary stress expansion (e.g., corruption/read-failure injection for nested hash spill partitions) while preserving deterministic failure signatures.
 2. Tighten performance-oriented instrumentation if WF13 needs deeper per-partition metrics beyond current strategy breakdown counters.
+
+These refinements are optional maintenance and are not required for WF13 completion.
 
 ## Out of Scope
 
