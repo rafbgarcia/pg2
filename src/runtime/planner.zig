@@ -80,13 +80,13 @@ pub fn planWithPolicy(
         return error.InvalidInput;
     }
 
-    const buffer_pool_bytes = ratio(memory_budget_bytes, policy.shared_buffer_pool_ratio_permille);
+    const buffer_pool_bytes = try ratio(memory_budget_bytes, policy.shared_buffer_pool_ratio_permille);
     const wal_budget_bytes = @max(
-        ratio(memory_budget_bytes, policy.shared_wal_ratio_permille),
+        try ratio(memory_budget_bytes, policy.shared_wal_ratio_permille),
         policy.min_wal_buffer_capacity_bytes,
     );
     const undo_budget_bytes = @max(
-        ratio(memory_budget_bytes, policy.shared_undo_ratio_permille),
+        try ratio(memory_budget_bytes, policy.shared_undo_ratio_permille),
         policy.min_undo_data_bytes,
     );
     const query_pool_bytes = memory_budget_bytes -
@@ -238,8 +238,11 @@ fn perSlotFixedBytes(max_active_transactions: u16) usize {
     return row_arrays + nested_arenas + collector + snapshot_ids + 1;
 }
 
-fn ratio(total: usize, permille: u16) usize {
-    return total * permille / 1000;
+fn ratio(total: usize, permille: u16) PlannerError!usize {
+    const product = std.math.mul(usize, total, @as(usize, permille)) catch {
+        return error.Overflow;
+    };
+    return product / 1000;
 }
 
 test "planner derives slots from memory and vcpus deterministically" {
@@ -272,5 +275,23 @@ test "planner fails for impossible memory envelope" {
     try std.testing.expectError(
         error.InsufficientMemoryBudget,
         planFromMemory(2 * 1024 * 1024, 1),
+    );
+}
+
+test "ratio returns overflow when multiplication exceeds usize" {
+    try std.testing.expectError(error.Overflow, ratio(std.math.maxInt(usize), 2));
+}
+
+test "planner returns overflow when wal ratio multiplication overflows" {
+    const policy: PlannerPolicy = .{
+        .shared_buffer_pool_ratio_permille = 0,
+        .shared_wal_ratio_permille = 2048,
+        .shared_undo_ratio_permille = 0,
+        .min_wal_buffer_capacity_bytes = 0,
+        .min_undo_data_bytes = 0,
+    };
+    try std.testing.expectError(
+        error.Overflow,
+        planWithPolicy(std.math.maxInt(usize), 1, policy),
     );
 }
