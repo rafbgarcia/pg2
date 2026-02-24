@@ -82,3 +82,29 @@ test "feature having fails closed on invalid aggregate operand type" {
     );
     try expectContains(result, "ERR query: aggregate evaluation failed");
 }
+
+test "feature having fails closed for non-boolean predicate outputs" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\HavingTypeMismatch {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(status, string, notNull)
+        \\  field(points, i64, notNull)
+        \\}
+    );
+
+    _ = try executor.run("HavingTypeMismatch |> insert(id = 1, status = \"open\", points = 5) {}");
+    _ = try executor.run("HavingTypeMismatch |> insert(id = 2, status = \"open\", points = 7) {}");
+
+    const result = try executor.run(
+        "HavingTypeMismatch |> group(status) |> having(sum(points)) { status }",
+    );
+    try std.testing.expectEqualStrings(
+        "ERR query: where/having predicate must evaluate to boolean (true or false)\n",
+        result,
+    );
+}

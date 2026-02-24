@@ -161,3 +161,32 @@ test "feature delete failure abort keeps previously deleted row visible via sess
         result,
     );
 }
+
+test "feature delete where predicate fails closed for non-boolean outputs" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\DeleteWhereTypeMismatch {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(base, i64, notNull)
+        \\  field(bonus, i64, notNull)
+        \\}
+    );
+
+    _ = try executor.run("DeleteWhereTypeMismatch |> insert(id = 1, base = 2, bonus = 1) {}");
+
+    var result = try executor.run("DeleteWhereTypeMismatch |> where(base + bonus) |> delete {}");
+    try std.testing.expectEqualStrings(
+        "ERR query: delete failed; class=fatal; code=TypeMismatch\n",
+        result,
+    );
+
+    result = try executor.run("DeleteWhereTypeMismatch |> where(id == 1) { id }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1\n",
+        result,
+    );
+}

@@ -349,3 +349,65 @@ test "feature computed select fails closed on incompatible comparison types" {
     );
     try expectContains(result, "ERR query: select computed expression evaluation failed");
 }
+
+test "feature nested child where fails closed for non-boolean predicate outputs" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\  reference(posts, id, Post.user_id, withoutReferentialIntegrity)
+        \\}
+        \\Post {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(user_id, i64, notNull)
+        \\  field(title, string, notNull)
+        \\}
+    );
+
+    _ = try executor.run("User |> insert(id = 1, name = \"Alice\") {}");
+    _ = try executor.run("Post |> insert(id = 10, user_id = 1, title = \"A10\") {}");
+
+    const result = try executor.run(
+        "User |> sort(id asc) { name posts |> where(id + user_id) { id } }",
+    );
+    try std.testing.expectEqualStrings(
+        "ERR query: where/having predicate must evaluate to boolean (true or false)\n",
+        result,
+    );
+}
+
+test "feature nested child having fails closed for non-boolean predicate outputs" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(name, string, notNull)
+        \\  reference(posts, id, Post.user_id, withoutReferentialIntegrity)
+        \\}
+        \\Post {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(user_id, i64, notNull)
+        \\  field(title, string, notNull)
+        \\}
+    );
+
+    _ = try executor.run("User |> insert(id = 1, name = \"Alice\") {}");
+    _ = try executor.run("Post |> insert(id = 10, user_id = 1, title = \"A10\") {}");
+
+    const result = try executor.run(
+        "User |> sort(id asc) { name posts |> having(id + user_id) { id } }",
+    );
+    try std.testing.expectEqualStrings(
+        "ERR query: where/having predicate must evaluate to boolean (true or false)\n",
+        result,
+    );
+}

@@ -196,3 +196,35 @@ test "feature update assignment fails closed on incompatible comparison types" {
         result,
     );
 }
+
+test "feature update where predicate fails closed for non-boolean outputs" {
+    var env: feature.FeatureEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\UpdateWhereTypeMismatch {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(base, i64, notNull)
+        \\  field(bonus, i64, notNull)
+        \\  field(flag, bool, nullable)
+        \\}
+    );
+
+    _ = try executor.run("UpdateWhereTypeMismatch |> insert(id = 1, base = 2, bonus = 1, flag = null) {}");
+
+    var result = try executor.run(
+        "UpdateWhereTypeMismatch |> where(base + bonus) |> update(flag = true) {}",
+    );
+    try std.testing.expectEqualStrings(
+        "ERR query: update failed; class=fatal; code=TypeMismatch\n",
+        result,
+    );
+
+    result = try executor.run("UpdateWhereTypeMismatch |> where(id == 1) { id flag }");
+    try std.testing.expectEqualStrings(
+        "OK returned_rows=1 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,null\n",
+        result,
+    );
+}
