@@ -56,6 +56,9 @@ pub const PartitionSpillDescriptor = struct {
     partition_count: u8,
     page_ids: [max_spill_pages]u64 = undefined,
     page_partition: [max_spill_pages]u8 = undefined,
+    page_next_index: [max_spill_pages]u32 = undefined,
+    partition_first_page: [max_partitions]u32 = [_]u32{no_page_index} ** max_partitions,
+    partition_last_page: [max_partitions]u32 = [_]u32{no_page_index} ** max_partitions,
     page_count: u32 = 0,
     partition_row_counts: [max_partitions]u64 = [_]u64{0} ** max_partitions,
 
@@ -68,6 +71,8 @@ pub const PartitionSpillDescriptor = struct {
         };
     }
 };
+
+const no_page_index: u32 = std.math.maxInt(u32);
 
 pub const PartitionSpillBuilder = struct {
     temp_mgr: *TempStorageManager,
@@ -88,6 +93,8 @@ pub const PartitionSpillBuilder = struct {
         for (0..descriptor.partition_count) |p| {
             builder.writers[p] = SpillPageWriter.init();
             descriptor.partition_row_counts[p] = 0;
+            descriptor.partition_first_page[p] = no_page_index;
+            descriptor.partition_last_page[p] = no_page_index;
         }
         descriptor.page_count = 0;
         return builder;
@@ -123,8 +130,17 @@ pub const PartitionSpillBuilder = struct {
         if (self.descriptor.page_count >= max_spill_pages) return error.SpillPageBudgetExceeded;
         const payload = self.writers[partition].finalize();
         const page_id = try self.temp_mgr.allocateAndWrite(payload, TempPage.null_page_id);
-        self.descriptor.page_ids[self.descriptor.page_count] = page_id;
-        self.descriptor.page_partition[self.descriptor.page_count] = partition;
+        const page_idx = self.descriptor.page_count;
+        self.descriptor.page_ids[page_idx] = page_id;
+        self.descriptor.page_partition[page_idx] = partition;
+        self.descriptor.page_next_index[page_idx] = no_page_index;
+        if (self.descriptor.partition_first_page[partition] == no_page_index) {
+            self.descriptor.partition_first_page[partition] = page_idx;
+        } else {
+            const last = self.descriptor.partition_last_page[partition];
+            self.descriptor.page_next_index[last] = page_idx;
+        }
+        self.descriptor.partition_last_page[partition] = page_idx;
         self.descriptor.page_count += 1;
         self.writers[partition].reset();
     }
@@ -134,7 +150,7 @@ pub const PartitionRowIterator = struct {
     temp_mgr: *TempStorageManager,
     descriptor: *const PartitionSpillDescriptor,
     partition: u8,
-    page_index: u32 = 0,
+    page_index: u32 = no_page_index,
     reader_loaded: bool = false,
     reader: SpillPageReader = undefined,
     current_page: page_mod.Page = undefined,
@@ -149,6 +165,7 @@ pub const PartitionRowIterator = struct {
             .temp_mgr = temp_mgr,
             .descriptor = descriptor,
             .partition = partition,
+            .page_index = descriptor.partition_first_page[partition],
         };
     }
 
@@ -165,12 +182,9 @@ pub const PartitionRowIterator = struct {
             }
 
             var found_next_page = false;
-            while (self.page_index < self.descriptor.page_count) : (self.page_index += 1) {
-                if (self.descriptor.page_partition[self.page_index] != self.partition) {
-                    continue;
-                }
+            while (self.page_index != no_page_index) {
                 const page_id = self.descriptor.page_ids[self.page_index];
-                self.page_index += 1;
+                self.page_index = self.descriptor.page_next_index[self.page_index];
                 const read_result = try self.temp_mgr.readPage(page_id);
                 self.current_page = read_result.page;
                 const chunk = try TempPage.readChunk(&self.current_page);
