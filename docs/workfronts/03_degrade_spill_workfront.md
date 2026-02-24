@@ -32,6 +32,8 @@ Queries must degrade under memory pressure (spill to temp storage) before failin
 - ✅ Stress coverage now includes mixed root spill + nested hash spill under tight temp/storage budgets.
 - ✅ `INSPECT plan`/`INSPECT explain` now expose nested join strategy breakdown counters (`nested_loop`, `hash_in_memory`, `hash_spill`).
 - ✅ Nested selection join execution no longer depends on nested-loop fallback; hash paths are the only execution path for supported nested shapes.
+- ✅ Nested hash spill now honors runtime-configured temp page budgets (no hard-coded default page budget in nested hash spill temp manager init).
+- ✅ Root temp-page budget wiring follow-through landed with runtime/docs updates.
 
 ### Commits Already Landed (latest relevant)
 
@@ -51,6 +53,10 @@ Queries must degrade under memory pressure (spill to temp storage) before failin
 - `084558d`: nested hash-join execution for child-operator pipelines (flat-left and collector-left) + tests.
 - `23298fb`: mixed root spill + nested hash spill stress coverage under tight budgets.
 - `7576907`: inspect/telemetry expansion for nested join strategy breakdown across query shapes.
+- `9c4cad9`: retire nested-loop fallback dependency for nested selection joins.
+- `f3759fc`: stress coverage for root sort spill + nested hash spill composition.
+- `59d641e`: honor configured temp page budget in nested hash spill (runtime -> request -> executor wiring) + fail-closed stress coverage.
+- `4d7e606`: runtime/docs follow-through for root temp-page budget wiring and related workfront tracking.
 
 ## Non-Negotiables
 
