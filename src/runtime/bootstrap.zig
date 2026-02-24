@@ -63,6 +63,7 @@ pub const QueryBuffers = struct {
     nested_decode_arena_bytes: []u8,
     nested_match_arena_bytes: []u8,
     collector: *SpillingResultCollector,
+    temp_pages_per_query_slot: u64,
     work_memory_bytes_per_slot: u64,
 };
 
@@ -85,6 +86,7 @@ pub const BootstrappedRuntime = struct {
     query_nested_match_arenas: []u8,
     query_collectors: []SpillingResultCollector,
     max_query_slots: u16,
+    temp_pages_per_query_slot: u64,
     work_memory_bytes_per_slot: u64,
 
     pub fn init(
@@ -99,6 +101,7 @@ pub const BootstrappedRuntime = struct {
         if (config.undo_max_entries == 0) return error.InvalidConfig;
         if (config.undo_max_data_bytes == 0) return error.InvalidConfig;
         if (config.query_string_arena_bytes_per_slot == 0) return error.InvalidConfig;
+        if (config.temp_pages_per_query_slot == 0) return error.InvalidConfig;
         try validateMemoryBudget(memory_region, storage, config);
 
         var runtime: BootstrappedRuntime = undefined;
@@ -200,6 +203,7 @@ pub const BootstrappedRuntime = struct {
         ) catch return error.OutOfMemory;
         errdefer allocator.free(runtime.query_collectors);
 
+        runtime.temp_pages_per_query_slot = config.temp_pages_per_query_slot;
         runtime.work_memory_bytes_per_slot = config.work_memory_bytes_per_slot;
 
         runtime.tx_manager = TxManager.init(allocator);
@@ -238,6 +242,7 @@ pub const BootstrappedRuntime = struct {
                     .nested_decode_arena_bytes = self.nestedDecodeArenaForSlot(slot_index),
                     .nested_match_arena_bytes = self.nestedMatchArenaForSlot(slot_index),
                     .collector = &self.query_collectors[slot_index],
+                    .temp_pages_per_query_slot = self.temp_pages_per_query_slot,
                     .work_memory_bytes_per_slot = self.work_memory_bytes_per_slot,
                 };
             }
@@ -336,6 +341,7 @@ fn validateMemoryBudget(
     if (config.undo_max_entries == 0) return error.InvalidConfig;
     if (config.undo_max_data_bytes == 0) return error.InvalidConfig;
     if (config.query_string_arena_bytes_per_slot == 0) return error.InvalidConfig;
+    if (config.temp_pages_per_query_slot == 0) return error.InvalidConfig;
 
     var preflight = StaticAllocator.init(memory_region);
     const allocator = preflight.allocator();

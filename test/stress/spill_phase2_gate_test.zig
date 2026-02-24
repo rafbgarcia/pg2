@@ -685,3 +685,48 @@ test "root sort spill and nested hash spill compose correctly under tight budget
     try std.testing.expect(std.mem.indexOf(u8, result, "sort_strategy=external_merge") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "nested_join_breakdown=nested_loop:0,hash_in_memory:0,hash_spill:1") != null);
 }
+
+test "nested hash spill fails closed when temp page budget is exhausted" {
+    var env: FeatureEnv = undefined;
+    try env.initWithConfig(.{
+        .max_query_slots = 1,
+        .work_memory_bytes_per_slot = 256,
+        .temp_pages_per_query_slot = 1,
+    });
+    defer env.deinit();
+
+    const executor = &env.executor;
+    try executor.applyDefinitions(
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  reference(posts, id, Post.user_id, withoutReferentialIntegrity)
+        \\}
+        \\Post {
+        \\  field(id, i64, notNull, primaryKey)
+        \\  field(user_id, i64, notNull)
+        \\}
+    );
+
+    _ = try executor.run("User |> insert(id = 1) {}");
+
+    var post_id: u32 = 1;
+    while (post_id <= 5000) : (post_id += 1) {
+        var post_query_buf: [160]u8 = undefined;
+        const post_query = std.fmt.bufPrint(
+            &post_query_buf,
+            "Post |> insert(id = {d}, user_id = 1) {{}}",
+            .{post_id},
+        ) catch unreachable;
+        _ = try executor.run(post_query);
+    }
+
+    const result = try executor.run(
+        "User |> where(id == 1) |> inspect { id posts |> limit(1) { id } }",
+    );
+    try std.testing.expect(std.mem.startsWith(u8, result, "ERR query: "));
+    try std.testing.expect(std.mem.indexOf(
+        u8,
+        result,
+        "nested relation hash spill temp page budget exhausted",
+    ) != null);
+}

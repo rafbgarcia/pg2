@@ -252,6 +252,7 @@ pub const ExecContext = struct {
     storage: Storage,
     query_slot_index: u16,
     collector: *SpillingResultCollector,
+    temp_pages_per_query_slot: u64 = temp_mod.default_pages_per_query_slot,
     work_memory_bytes_per_slot: u64,
 };
 
@@ -1917,7 +1918,7 @@ fn initParentLocalNestedCollector(
     const temp_mgr = TempStorageManager.init(
         ctx.query_slot_index,
         ctx.storage,
-        temp_mod.default_pages_per_query_slot,
+        ctx.temp_pages_per_query_slot,
         temp_mod.nested_region_start_page_id,
     ) catch {
         setError(result, "nested relation parent-local spill temp init failed");
@@ -2681,7 +2682,7 @@ fn tryApplyNestedSelectionHashJoinFlatWithOps(
         var temp_mgr = TempStorageManager.init(
             ctx.query_slot_index,
             ctx.storage,
-            temp_mod.default_pages_per_query_slot,
+            ctx.temp_pages_per_query_slot,
             temp_mod.nested_region_start_page_id,
         ) catch {
             setError(result, "nested relation hash spill temp init failed");
@@ -2903,7 +2904,7 @@ fn tryApplyNestedSelectionHashJoinCollectorWithOps(
         var temp_mgr = TempStorageManager.init(
             ctx.query_slot_index,
             ctx.storage,
-            temp_mod.default_pages_per_query_slot,
+            ctx.temp_pages_per_query_slot,
             temp_mod.nested_region_start_page_id,
         ) catch {
             setError(result, "nested relation hash spill temp init failed");
@@ -3207,7 +3208,7 @@ fn tryApplyNestedSelectionHashJoinFlatNoOps(
         var temp_mgr = TempStorageManager.init(
             ctx.query_slot_index,
             ctx.storage,
-            temp_mod.default_pages_per_query_slot,
+            ctx.temp_pages_per_query_slot,
             temp_mod.nested_region_start_page_id,
         ) catch {
             setError(result, "nested relation hash spill temp init failed");
@@ -3477,7 +3478,7 @@ fn tryApplyNestedSelectionHashJoinCollectorNoOps(
         var temp_mgr = TempStorageManager.init(
             ctx.query_slot_index,
             ctx.storage,
-            temp_mod.default_pages_per_query_slot,
+            ctx.temp_pages_per_query_slot,
             temp_mod.nested_region_start_page_id,
         ) catch {
             setError(result, "nested relation hash spill temp init failed");

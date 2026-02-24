@@ -20,10 +20,10 @@ Implement a production-ready, spill-aware nested selection join path that scales
 
 - Spill path foundations and row-set contract are in place:
   - `src/executor/executor.zig`: `RowSet`, spill windows, collector-backed LIMIT/OFFSET/HAVING/projection handling.
-- Nested selection still routes through bounded join path:
-  - `src/executor/executor.zig`: `applySingleNestedSelectionJoin` and `applyNestedSelectionJoin`.
-  - `src/executor/joins.zig`: bounded nested-loop implementations.
-- Regression coverage exists for spill semantics and fail-closed nested spill behavior:
+- Nested selection now routes through hash-join execution paths (`hash_in_memory` / `hash_spill`) for supported shapes:
+  - `src/executor/executor.zig`: nested hash join for no-op and child-operator nested pipelines, for both flat-left and collector-left parent streams.
+  - Nested-loop fallback dependency for nested selection has been retired.
+- Regression/stress coverage exists for spill semantics, mixed spill composition, and determinism:
   - `test/stress/spill_phase2_gate_test.zig`.
 
 ## Design Decisions Locked
@@ -52,6 +52,7 @@ Implement a production-ready, spill-aware nested selection join path that scales
 - Add explicit per-parent join API contract:
   - input parent stream + child stream + join key mapping
   - output grouped rows preserving parent association for tree protocol serialization.
+Status: completed.
 
 ### Phase 2: In-Memory Hash Join Fast Path
 
@@ -59,6 +60,7 @@ Implement a production-ready, spill-aware nested selection join path that scales
 - Support left join output semantics used by nested selection (emit unmatched left rows with null-filled right projection).
 - Preserve deterministic output ordering policy (documented and tested).
 - Apply child operators per parent (not globally) in this path.
+Status: completed.
 
 ### Phase 3: Spill-Aware Hash Join
 
@@ -67,17 +69,20 @@ Implement a production-ready, spill-aware nested selection join path that scales
 - Partition processing must be deterministic and bounded.
 - Ensure per-parent semantics survive spill:
   - partition and process by join key while preserving parent identity and per-parent child operator behavior.
+Status: completed.
 
 ### Phase 4: Pipeline Integration
 
 - Replace bounded nested-loop callsites with `RowSet`-based hash join path.
 - Remove fail-closed nested selection guard for spill when gate tests pass.
 - Keep bounded nested-loop only for tiny/no-spill paths if explicitly justified and covered.
+Status: completed for WF13 scope in current engine; no nested-loop fallback dependency remains in nested selection join execution.
 
 ### Phase 5: Telemetry + Explainability
 
 - Extend plan/inspect strategy reporting for nested join strategy choice (in-memory hash vs hash spill).
 - Add explain strings in serialization for operator visibility.
+Status: completed (`INSPECT plan` + `INSPECT explain` include nested join breakdown counters).
 
 ## Gate
 
@@ -89,10 +94,14 @@ Implement a production-ready, spill-aware nested selection join path that scales
   - Nested selection with left/right datasets > `scan_batch_size` returns complete results.
   - Nested selection with both sides spilling remains correct and deterministic.
   - Nested `limit/offset/sort` is verified per parent under spill (example: each parent returns its own top N children).
-  - Mixed query with scan spill + sort spill + nested selection completes under default temp budget.
+  - Mixed query with scan spill + sort spill + nested selection completes under constrained budget.
 - Regression:
   - Existing feature/internals/stress suites remain green.
   - Replace current fail-closed nested spill test with correctness tests.
+
+Gate status:
+- Completed and green as of latest run (`zig build test --summary all`).
+- Additional hard-boundary coverage includes explicit fail-closed behavior under nested hash spill temp-page exhaustion.
 
 ## Suggested Slice Plan (Commit-Oriented)
 
@@ -100,6 +109,11 @@ Implement a production-ready, spill-aware nested selection join path that scales
 2. Spill partition path + deterministic tests.
 3. Executor nested integration + remove fail-closed guard.
 4. Telemetry/explain + gate/stress coverage.
+
+## Remaining Refinements
+
+1. Continue hard-boundary stress expansion (e.g., corruption/read-failure injection for nested hash spill partitions) while preserving deterministic failure signatures.
+2. Tighten performance-oriented instrumentation if WF13 needs deeper per-partition metrics beyond current strategy breakdown counters.
 
 ## Out of Scope
 

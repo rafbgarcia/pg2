@@ -68,6 +68,7 @@ fn makeExecContext(
         .storage = runtime.storage,
         .query_slot_index = request.pool_conn.query_buffers.slot_index,
         .collector = request.pool_conn.query_buffers.collector,
+        .temp_pages_per_query_slot = request.pool_conn.query_buffers.temp_pages_per_query_slot,
         .work_memory_bytes_per_slot = request.pool_conn.query_buffers.work_memory_bytes_per_slot,
     };
 }
