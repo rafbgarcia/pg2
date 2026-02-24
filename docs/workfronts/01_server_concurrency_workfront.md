@@ -17,8 +17,18 @@ Remove connection-serial request handling so multiple client connections can mak
   - io_uring transport moved from blocking waits to non-blocking poll progression (`copy_cqes(..., 0)` with pending op state).
 - Deterministic internals coverage is landed for progress contracts:
   - `test/internals/server/transport_progress_test.zig` covers `WouldBlock` retry semantics and idempotent close.
+- Phase 2 scheduler layer is now landed:
+  - `src/server/reactor.zig` now uses fixed-capacity `ready_queue`, `dispatch_queue`, and `timeout_heap`.
+  - Queue timeout uses injected `io.Clock` (`RealClock` in `src/main.zig`, deterministic clocks in tests).
+  - One-queued-request-per-session admission is enforced by per-session queue state.
+  - Deterministic overload responses are emitted at scheduler boundary:
+    - `ERR class=overload code=QueueFull`
+    - `ERR class=overload code=QueueTimeout`
+  - Deterministic internals coverage added in `test/internals/server/reactor_queueing_test.zig`:
+    - queue saturation (`QueueFull`)
+    - exact deadline timeout boundary (`QueueTimeout`)
+    - round-robin fairness across 4 sessions
 - Remaining gaps:
-  - No queue/timeout scheduler layer yet (Phase 2 pending).
   - No `--concurrency` runtime cap yet (Phase 3 pending).
   - No transaction pinning semantics in reactor/session state yet (Phase 4 pending).
 
@@ -169,7 +179,7 @@ Remove connection-serial request handling so multiple client connections can mak
   - queue timeout at exact configured deadline;
   - fairness across multiple sessions.
 - Metrics emitted: queue depth, total enqueued, total timed out, max wait.
-- **Status:** ⏳ not started.
+- **Status:** ✅ completed in working tree (2026-02-24); commit pending.
 
 ## Phase 3: Execution Dispatch
 
@@ -212,18 +222,12 @@ Remove connection-serial request handling so multiple client connections can mak
 
 ## Next Commit Slice (Start Here)
 
-1. Implement Phase 2 queueing primitives inside reactor:
-   - `ready_queue`
-   - `dispatch_queue`
-   - `timeout_heap` keyed by enqueue deadline
-2. Enforce admission/backpressure contract:
-   - max one queued request per session
-   - deterministic `QueueFull` and `QueueTimeout` boundary responses
-3. Add deterministic internals tests for:
-   - queue fill + `QueueFull`
-   - timeout expiry at exact tick boundary
-   - round-robin fairness across 3+ sessions
-4. Keep execution worker count at 1 for this slice; do not introduce `--concurrency` yet.
+1. Begin Phase 3 execution dispatch hardening:
+   - keep worker count locked at 1
+   - prove dispatch queue/worker budget semantics under sustained mixed session load
+2. Introduce `--concurrency <n>` parser/validation wiring (without enabling `n > 1` execution yet).
+3. Add deterministic tests that prove accept/read/write progression continues while a dispatch slot is occupied.
+4. Emit/validate in-flight execution gauges from reactor stats path.
 
 ## Hard-Stop Conditions
 

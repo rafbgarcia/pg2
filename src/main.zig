@@ -15,6 +15,7 @@ const reactor_mod = @import("pg2").server.reactor;
 const io_uring_transport_mod = @import("pg2").server.io_uring_transport;
 const catalog_mod = @import("pg2").catalog.meta;
 const disk_mod = @import("pg2").simulator.disk;
+const io_mod = @import("pg2").storage.io;
 
 pub fn main() !void {
     const stdout = std.fs.File.stdout();
@@ -158,9 +159,12 @@ pub fn main() !void {
             .session = &session,
             .pool = &pool,
         };
+        var clock = io_mod.RealClock{};
         var reactor = Reactor.init(.{
             .ctx = &dispatch_ctx,
             .dispatch = &DispatchCtx.dispatch,
+        }, .{
+            .clock = clock.clock(),
         });
         defer reactor.deinit();
 
