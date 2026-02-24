@@ -11,6 +11,7 @@ const runtime_config = @import("pg2").runtime.config;
 const runtime_bootstrap = @import("pg2").runtime.bootstrap;
 const session_mod = @import("pg2").server.session;
 const pool_mod = @import("pg2").server.pool;
+const reactor_mod = @import("pg2").server.reactor;
 const io_uring_transport_mod = @import("pg2").server.io_uring_transport;
 const catalog_mod = @import("pg2").catalog.meta;
 const disk_mod = @import("pg2").simulator.disk;
@@ -114,8 +115,6 @@ pub fn main() !void {
         var session = session_mod.Session.init(&runtime, &catalog);
         var pool = pool_mod.ConnectionPool.init(&runtime);
 
-        var request_buf: [4096]u8 = undefined;
-        var response_buf: [4096]u8 = undefined;
         var io_uring_acceptor = io_uring_transport_mod.IoUringAcceptor.listen(
             listen_address,
             .{ .reuse_address = true },
@@ -137,20 +136,39 @@ pub fn main() !void {
         };
         defer io_uring_acceptor.deinit();
 
+        const Reactor = reactor_mod.ServerReactor(256, 4096, 4096);
+        const DispatchCtx = struct {
+            session: *session_mod.Session,
+            pool: *pool_mod.ConnectionPool,
+
+            fn dispatch(
+                ptr: *anyopaque,
+                request: []const u8,
+                out: []u8,
+            ) session_mod.SessionError!usize {
+                const self: *@This() = @ptrCast(@alignCast(ptr));
+                return self.session.dispatchRequest(
+                    self.pool,
+                    request,
+                    out,
+                );
+            }
+        };
+        var dispatch_ctx = DispatchCtx{
+            .session = &session,
+            .pool = &pool,
+        };
+        var reactor = Reactor.init(.{
+            .ctx = &dispatch_ctx,
+            .dispatch = &DispatchCtx.dispatch,
+        });
+        defer reactor.deinit();
+
         try stdout.writeAll("server accept loop started (io_uring)\n");
         while (true) {
-            const connection = io_uring_acceptor.acceptor().accept() catch {
+            reactor.step(io_uring_acceptor.acceptor()) catch {
                 try stdout.writeAll("accept loop error: accept failed\n");
                 continue;
-            } orelse continue;
-
-            session.serveConnection(
-                connection,
-                &pool,
-                request_buf[0..],
-                response_buf[0..],
-            ) catch {
-                try stdout.writeAll("connection error: request handling failed\n");
             };
         }
     }
