@@ -608,6 +608,9 @@ test "mixed root spill and nested hash spill preserves per-parent results under 
     try std.testing.expect(std.mem.indexOf(u8, result, "\n4200,[[4200]]\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "spill_triggered=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "join_strategy=hash_spill") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "nested_join_hash_spill=1") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "nested_join_hash_in_memory=0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "nested_join_breakdown=nested_loop:0,hash_in_memory:0,hash_spill:1") != null);
 }
 
 test "mixed root spill and nested hash spill is deterministic under tight temp budgets" {

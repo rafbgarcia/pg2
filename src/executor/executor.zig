@@ -130,6 +130,9 @@ pub const PlanStats = struct {
     group_strategy: GroupStrategy = .none,
     scan_strategy: ScanStrategy = .table_scan,
     nested_relation_count: u8 = 0,
+    nested_join_nested_loop_count: u8 = 0,
+    nested_join_hash_in_memory_count: u8 = 0,
+    nested_join_hash_spill_count: u8 = 0,
 };
 
 /// Execution statistics for a query.
@@ -5282,28 +5285,31 @@ fn capturePlanStats(
     }
 }
 
-fn recordNestedJoinPlan(plan: *PlanStats) void {
-    if (plan.nested_relation_count < std.math.maxInt(u8)) {
-        plan.nested_relation_count += 1;
+fn incrementPlanCounter(counter: *u8) void {
+    if (counter.* < std.math.maxInt(u8)) {
+        counter.* += 1;
     }
+}
+
+fn recordNestedJoinPlan(plan: *PlanStats) void {
+    incrementPlanCounter(&plan.nested_relation_count);
+    incrementPlanCounter(&plan.nested_join_nested_loop_count);
     plan.join_strategy = .nested_loop;
     plan.join_order = .source_then_nested;
     plan.materialization_mode = .bounded_row_buffers;
 }
 
 fn recordNestedHashJoinPlan(plan: *PlanStats) void {
-    if (plan.nested_relation_count < std.math.maxInt(u8)) {
-        plan.nested_relation_count += 1;
-    }
+    incrementPlanCounter(&plan.nested_relation_count);
+    incrementPlanCounter(&plan.nested_join_hash_in_memory_count);
     plan.join_strategy = .hash_in_memory;
     plan.join_order = .source_then_nested;
     plan.materialization_mode = .bounded_row_buffers;
 }
 
 fn recordNestedHashSpillJoinPlan(plan: *PlanStats) void {
-    if (plan.nested_relation_count < std.math.maxInt(u8)) {
-        plan.nested_relation_count += 1;
-    }
+    incrementPlanCounter(&plan.nested_relation_count);
+    incrementPlanCounter(&plan.nested_join_hash_spill_count);
     plan.join_strategy = .hash_spill;
     plan.join_order = .source_then_nested;
     plan.materialization_mode = .bounded_row_buffers;
@@ -5836,6 +5842,9 @@ test "execute captures deterministic inspect plan metadata" {
         result.stats.plan.group_strategy,
     );
     try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_relation_count);
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_nested_loop_count);
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_hash_in_memory_count);
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_hash_spill_count);
 }
 
 test "execute captures group strategy in inspect plan metadata" {
@@ -5959,6 +5968,9 @@ test "execute nested relation join through selection set" {
         result.stats.plan.materialization_mode,
     );
     try testing.expectEqual(@as(u8, 1), result.stats.plan.nested_relation_count);
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_nested_loop_count);
+    try testing.expectEqual(@as(u8, 1), result.stats.plan.nested_join_hash_in_memory_count);
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_hash_spill_count);
 }
 
 test "execute nested relation with child operators uses hash in-memory strategy" {
@@ -6030,6 +6042,9 @@ test "execute nested relation with child operators uses hash in-memory strategy"
         MaterializationMode.bounded_row_buffers,
         result.stats.plan.materialization_mode,
     );
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_nested_loop_count);
+    try testing.expectEqual(@as(u8, 1), result.stats.plan.nested_join_hash_in_memory_count);
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_hash_spill_count);
 }
 
 test "execute nested relation without child operators uses hash in-memory strategy" {
@@ -6101,6 +6116,9 @@ test "execute nested relation without child operators uses hash in-memory strate
         MaterializationMode.bounded_row_buffers,
         result.stats.plan.materialization_mode,
     );
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_nested_loop_count);
+    try testing.expectEqual(@as(u8, 1), result.stats.plan.nested_join_hash_in_memory_count);
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_hash_spill_count);
     try testing.expectEqual(@as(u8, 1), result.stats.plan.nested_relation_count);
 }
 
@@ -6261,6 +6279,9 @@ test "execute nested relation collector path without child operators uses hash i
         result.stats.plan.materialization_mode,
     );
     try testing.expectEqual(@as(u8, 1), result.stats.plan.nested_relation_count);
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_nested_loop_count);
+    try testing.expectEqual(@as(u8, 1), result.stats.plan.nested_join_hash_in_memory_count);
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_hash_spill_count);
 }
 
 test "execute nested relation with child operators uses hash spill strategy when right side exceeds flat fit" {
@@ -6338,6 +6359,9 @@ test "execute nested relation with child operators uses hash spill strategy when
         MaterializationMode.bounded_row_buffers,
         result.stats.plan.materialization_mode,
     );
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_nested_loop_count);
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_hash_in_memory_count);
+    try testing.expectEqual(@as(u8, 1), result.stats.plan.nested_join_hash_spill_count);
 }
 
 test "execute nested relation without child operators uses hash spill strategy when right side exceeds flat fit" {
@@ -6581,6 +6605,10 @@ test "execute multiple nested relations through selection set" {
     try testing.expectEqual(@as(i64, 2), result.rows[4].values[0].i64);
     try testing.expectEqual(@as(i64, 15), result.rows[4].values[1].i64);
     try testing.expectEqual(@as(i64, 150), result.rows[4].values[2].i64);
+    try testing.expectEqual(@as(u8, 2), result.stats.plan.nested_relation_count);
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_nested_loop_count);
+    try testing.expectEqual(@as(u8, 2), result.stats.plan.nested_join_hash_in_memory_count);
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_hash_spill_count);
 }
 
 test "execute nested relation fails closed when association is missing" {

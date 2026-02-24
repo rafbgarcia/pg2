@@ -195,7 +195,7 @@ fn serializeInspectStats(
         }
     }
     writer.print(
-        " join_strategy={s} join_order={s} materialization={s} sort_strategy={s} group_strategy={s} nested_relations={d}\n",
+        " join_strategy={s} join_order={s} materialization={s} sort_strategy={s} group_strategy={s} nested_relations={d} nested_join_nested_loop={d} nested_join_hash_in_memory={d} nested_join_hash_spill={d}\n",
         .{
             @tagName(exec_stats.plan.join_strategy),
             @tagName(exec_stats.plan.join_order),
@@ -203,13 +203,19 @@ fn serializeInspectStats(
             @tagName(exec_stats.plan.sort_strategy),
             @tagName(exec_stats.plan.group_strategy),
             exec_stats.plan.nested_relation_count,
+            exec_stats.plan.nested_join_nested_loop_count,
+            exec_stats.plan.nested_join_hash_in_memory_count,
+            exec_stats.plan.nested_join_hash_spill_count,
         },
     ) catch return error.ResponseTooLarge;
     writer.print(
-        "INSPECT explain sort={s} group={s}\n",
+        "INSPECT explain sort={s} group={s} nested_join_breakdown=nested_loop:{d},hash_in_memory:{d},hash_spill:{d}\n",
         .{
             sortStrategyExplain(exec_stats.plan.sort_strategy),
             groupStrategyExplain(exec_stats.plan.group_strategy),
+            exec_stats.plan.nested_join_nested_loop_count,
+            exec_stats.plan.nested_join_hash_in_memory_count,
+            exec_stats.plan.nested_join_hash_spill_count,
         },
     ) catch return error.ResponseTooLarge;
 }
