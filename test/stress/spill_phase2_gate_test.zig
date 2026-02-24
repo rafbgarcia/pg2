@@ -83,7 +83,7 @@ fn runMixedRootAndNestedHashSpillScenario(out_buf: []u8) ![]const u8 {
     try env.initWithConfig(.{
         .max_query_slots = 1,
         .work_memory_bytes_per_slot = 256,
-        .temp_pages_per_query_slot = 128,
+        .temp_pages_per_query_slot = 256,
     });
     defer env.deinit();
 

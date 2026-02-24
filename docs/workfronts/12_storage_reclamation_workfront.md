@@ -61,6 +61,7 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
 - **Reclamation site.** Slot reclamation happens at well-defined points in the transaction lifecycle: (a) at commit time for the deleting transaction's own slots if no concurrent snapshots exist, and (b) at the start of any subsequent transaction that touches the same page, checking the reclaimable list against the current `oldest_active`.
 - **Slot reuse.** A reclaimed slot's space is made available for new row inserts on the same page. The slot entry in the page header is marked as free (available for reuse by `HeapPage.insertRow`). This requires extending the heap page format to distinguish between "never used" and "reclaimed" slots, or simply allowing insert to reuse any slot with `deleted_len`.
 - **Undo log interaction.** Before reclaiming a slot, verify that no undo chain entries reference it from a still-needed snapshot. The undo log's existing truncation based on `oldest_active` should ensure this, but the invariant must be explicitly checked.
+- **Undo lifecycle hygiene.** Commit/abort boundaries must immediately run undo maintenance (`undo_log.truncate(tx_manager.getOldestActive())` and `tx_manager.cleanupBefore(oldest_active)`) so long-running uptime does not retain stale undo history or drift the tx-state base window.
 - **WAL logging.** Slot reclamation is a physical page modification and must be WAL-logged for crash recovery. A new WAL record type (e.g., `reclaim_slot`) records the page ID and slot index.
 
 ### Scope
@@ -69,6 +70,7 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
 - Extend `HeapPage` to support slot reuse after reclamation.
 - Add WAL record type for slot reclamation.
 - Wire reclamation into the DELETE commit path and the page-access path.
+- Wire undo maintenance into connection/session commit and abort paths (not only tests/simulation paths).
 
 ### Gate
 - Tombstoned slots are reclaimed without any background process.

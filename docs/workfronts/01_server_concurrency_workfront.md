@@ -9,6 +9,7 @@ Remove connection-serial request handling so multiple client connections can mak
 
 ## Inputs
 - `ideas/CONNECTION_POOL.md` two-layer model (client sockets vs pool execution contexts).
+- `docs/workfronts/14_runtime_storage_backend_workfront.md` for production storage backend wiring; WF01 keeps transport/scheduling concerns isolated from storage implementation details.
 
 ## Phase 1: Non-blocking Accept + Session Registry
 ### Scope

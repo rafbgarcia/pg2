@@ -491,9 +491,11 @@ fn executeReadPipeline(
     const caps = capacity_mod.OperatorCapacities.defaults();
 
     // --- 1. Init temp storage and collector for this query slot ---
-    const temp_mgr = TempStorageManager.initDefault(
+    const temp_mgr = TempStorageManager.init(
         ctx.query_slot_index,
         ctx.storage,
+        ctx.temp_pages_per_query_slot,
+        temp_mod.default_region_start_page_id,
     ) catch |err| {
         setBoundaryError(
             result,

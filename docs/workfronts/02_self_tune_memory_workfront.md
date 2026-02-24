@@ -41,6 +41,7 @@ Turn `--memory` into a planner input that derives runtime capacities automatical
 
 - Default effective concurrency = `min(vcpus, memory_limited_slots)` with min 1.
 - `work_memory_bytes_per_slot` = remaining per-slot budget after reserving shared structures (buffer pool, WAL, undo log). Before WF02 lands, Workfront 03 uses a hardcoded default (4 MB, matching PostgreSQL's `work_mem`).
+- `temp_pages_per_query_slot` must be threaded through **all** runtime spill constructors (root collector temp manager and nested spill temp managers). No execution path may fall back to `default_pages_per_query_slot` once planned config is active.
 - parser capacities are primarily memory-bound (`max_*_effective`), but must also be bounded by global hard caps:
   - `max_tokens_effective <= hard_max_tokens`
   - `max_ast_nodes_effective <= hard_max_ast_nodes`
@@ -55,6 +56,7 @@ Turn `--memory` into a planner input that derives runtime capacities automatical
 - `max_active_transactions` and `max_tx_states` scale with effective concurrency (higher `--concurrency` → larger limits).
 - `temp_pages_per_query_slot` is derived and scales inversely with concurrency (fewer slots → more temp pages per slot).
   - This is a hard dependency for Workfront 13 nested per-parent spill capacity and partition fanout.
+- Coverage proves both root and nested spill paths honor configured `temp_pages_per_query_slot`.
 - parser effective capacities scale with memory/concurrency (more memory or fewer slots → larger `max_tokens_effective` / `max_ast_nodes_effective`).
 - parser effective capacities never exceed global hard caps.
 - tokenizer/parser diagnostics distinguish budget exhaustion from hard-cap exhaustion.
