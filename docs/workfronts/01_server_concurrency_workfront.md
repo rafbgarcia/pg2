@@ -32,14 +32,14 @@ Remove connection-serial request handling so multiple client connections can mak
   - `--concurrency` parser/validation + reactor worker scaling are landed in `src/main.zig` + `src/runtime/config.zig` + `src/server/reactor.zig`.
   - Deterministic mixed completion ordering coverage for `max_inflight = 2` is landed in `test/internals/server/reactor_queueing_test.zig`.
   - User-facing feature coverage for concurrent reactor/session progress at `max_inflight = 2` is landed in `test/features/server_concurrency/multi_worker_progress_test.zig`.
-  - Phase 4 pinning semantics are now partially landed:
+  - Phase 4 pinning semantics are now fully landed:
     - explicit `BEGIN`/`COMMIT`/`ROLLBACK` pin transitions at session boundary (`src/server/session.zig`)
     - reactor-driven pinned disconnect cleanup (`src/server/reactor.zig` + dispatcher cleanup hook)
     - deterministic internals + feature coverage for pin lifecycle and leak checks
     - reactor pin observability (`pool_pinned`, `max_pin_wait_ticks`, `max_pin_duration_ticks`)
     - inspect boundary now enforces/emits pool pin invariants (`pin_invariant_ok`, `pool_pinned <= pool_checked_out <= pool_size`)
     - deterministic internals coverage now includes response-write failure after `COMMIT`/`ROLLBACK` dispatch boundary (no pin leaks)
-  - Remaining Phase 4 gap: reactor pin latency metrics (`max_pin_wait_ticks`, `max_pin_duration_ticks`) are not yet exported through inspect/runtime diagnostics.
+  - No remaining Phase 4 gaps for WF01 scope.
 
 ### Commits Landed (Latest First)
 
@@ -220,7 +220,7 @@ Remove connection-serial request handling so multiple client connections can mak
 - Deterministic tests validate interleaved session transactions with correct pin/unpin lifecycle.
 - No pool slot leaks across disconnect/timeout/error paths.
 - Pin stats are surfaced in inspect/runtime diagnostics.
-- **Status:** 🚧 in progress (`BEGIN`/`COMMIT`/`ROLLBACK` pin lifecycle + disconnect cleanup + deterministic pinning coverage + reactor pin stats landed; inspect pool diagnostics now enforce/emits pin invariants; reactor pin latency diagnostics export pending).
+- **Status:** ✅ complete (`BEGIN`/`COMMIT`/`ROLLBACK` pin lifecycle + disconnect cleanup + deterministic pinning coverage + reactor pin stats landed; inspect pool diagnostics enforce/emits pin invariants; reactor pin latency diagnostics are exported through inspect runtime diagnostics).
 
 ## Verification Matrix
 
@@ -231,7 +231,7 @@ Remove connection-serial request handling so multiple client connections can mak
 
 ## Next Commit Slice (Start Here)
 
-1. Export pin metrics into user-visible inspect/runtime diagnostics (align with observability contract section D).
+1. ✅ Export pin metrics into user-visible inspect/runtime diagnostics (align with observability contract section D).
 2. ✅ Add dedicated diagnostics assertions for `pool_pinned <= pool_checked_out <= pool_size` at inspect boundary.
 3. ✅ Extend pin lifecycle tests to cover response-write failure after COMMIT/ROLLBACK dispatch boundary.
 

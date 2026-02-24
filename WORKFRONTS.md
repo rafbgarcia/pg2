@@ -9,7 +9,7 @@ Follow this order strictly. Start the next item only after the current item's ga
 
 | Order | Workfront | Why This Position |
 | --- | --- | --- |
-| 1 | `docs/workfronts/01_server_concurrency_workfront.md` | Runtime request scheduling foundation; later runtime/storage behavior assumes this path is stable. |
+| 1 | `docs/workfronts/01_server_concurrency_workfront.md` (complete) | Runtime request scheduling foundation; later runtime/storage behavior assumes this path is stable. |
 | 2 | `docs/workfronts/02_self_tune_memory_workfront.md` | Turns memory/concurrency into explicit runtime budgets consumed by spill/planner/runtime gates. |
 | 3 | `docs/workfronts/03_degrade_spill_workfront.md` (core complete; guardrail tracking) | Spill/degrade correctness is a prerequisite safety contract for user-facing growth work. |
 | 4 | `docs/workfronts/11_write_performance_workfront.md` (phases 1-6 complete) | Establishes index/WAL/write-path patterns that storage reclamation builds on directly. |
