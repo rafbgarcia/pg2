@@ -954,8 +954,21 @@ test "session inspect appends execution and pool stats" {
         std.mem.indexOf(
             u8,
             output,
-            "INSPECT pool policy=reject size=1 checked_out=1 pinned=0 exhausted_total=0\n",
+            "INSPECT pool policy=reject size=1 checked_out=1 pinned=0 exhausted_total=0 pin_invariant_ok=true\n",
         ) != null,
+    );
+    const pool_line = extractInspectLine(output, "INSPECT pool ") orelse
+        return error.TestUnexpectedResult;
+    const pool_size = parseInspectU64(pool_line, "size") orelse
+        return error.TestUnexpectedResult;
+    const pool_checked_out = parseInspectU64(pool_line, "checked_out") orelse
+        return error.TestUnexpectedResult;
+    const pool_pinned = parseInspectU64(pool_line, "pinned") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(pool_pinned <= pool_checked_out);
+    try std.testing.expect(pool_checked_out <= pool_size);
+    try std.testing.expect(
+        std.mem.indexOf(u8, pool_line, "pin_invariant_ok=true") != null,
     );
     try std.testing.expect(
         std.mem.indexOf(
@@ -1225,4 +1238,22 @@ test "session accept loop emits classified boundary error on pool exhaustion" {
         "ERR class=resource_exhausted code=PoolExhausted\n",
         conn.response_log[0][0..conn.response_lens[0]],
     );
+}
+
+fn extractInspectLine(output: []const u8, prefix: []const u8) ?[]const u8 {
+    const start = std.mem.indexOf(u8, output, prefix) orelse return null;
+    const rest = output[start..];
+    const end_rel = std.mem.indexOfScalar(u8, rest, '\n') orelse return null;
+    return rest[0 .. end_rel + 1];
+}
+
+fn parseInspectU64(line: []const u8, key: []const u8) ?u64 {
+    var iter = std.mem.tokenizeScalar(u8, line, ' ');
+    while (iter.next()) |token| {
+        if (!std.mem.startsWith(u8, token, key)) continue;
+        if (token.len <= key.len + 1) return null;
+        if (token[key.len] != '=') continue;
+        return std.fmt.parseInt(u64, token[key.len + 1 ..], 10) catch null;
+    }
+    return null;
 }

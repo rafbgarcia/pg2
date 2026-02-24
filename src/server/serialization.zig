@@ -130,6 +130,10 @@ fn serializeInspectStats(
     pool_stats: PoolStats,
     overflow_stats: OverflowReclaimStatsSnapshot,
 ) error{ResponseTooLarge}!void {
+    const pin_invariant_ok =
+        pool_stats.pinned <= pool_stats.checked_out and
+        pool_stats.checked_out <= pool_stats.pool_size;
+    std.debug.assert(pin_invariant_ok);
     writer.print(
         "INSPECT exec rows_scanned={d} rows_matched={d} rows_returned={d} rows_inserted={d} rows_updated={d} rows_deleted={d} pages_read={d} pages_written={d}\n",
         .{
@@ -144,13 +148,14 @@ fn serializeInspectStats(
         },
     ) catch return error.ResponseTooLarge;
     writer.print(
-        "INSPECT pool policy={s} size={d} checked_out={d} pinned={d} exhausted_total={d}\n",
+        "INSPECT pool policy={s} size={d} checked_out={d} pinned={d} exhausted_total={d} pin_invariant_ok={}\n",
         .{
             @tagName(pool_stats.overload_policy),
             pool_stats.pool_size,
             pool_stats.checked_out,
             pool_stats.pinned,
             pool_stats.pool_exhausted_total,
+            pin_invariant_ok,
         },
     ) catch return error.ResponseTooLarge;
     writer.print(

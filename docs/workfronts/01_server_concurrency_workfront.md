@@ -37,7 +37,9 @@ Remove connection-serial request handling so multiple client connections can mak
     - reactor-driven pinned disconnect cleanup (`src/server/reactor.zig` + dispatcher cleanup hook)
     - deterministic internals + feature coverage for pin lifecycle and leak checks
     - reactor pin observability (`pool_pinned`, `max_pin_wait_ticks`, `max_pin_duration_ticks`)
-  - Remaining Phase 4 gap: pin metrics are not yet exported through inspect/runtime diagnostics.
+    - inspect boundary now enforces/emits pool pin invariants (`pin_invariant_ok`, `pool_pinned <= pool_checked_out <= pool_size`)
+    - deterministic internals coverage now includes response-write failure after `COMMIT`/`ROLLBACK` dispatch boundary (no pin leaks)
+  - Remaining Phase 4 gap: reactor pin latency metrics (`max_pin_wait_ticks`, `max_pin_duration_ticks`) are not yet exported through inspect/runtime diagnostics.
 
 ### Commits Landed (Latest First)
 
@@ -218,7 +220,7 @@ Remove connection-serial request handling so multiple client connections can mak
 - Deterministic tests validate interleaved session transactions with correct pin/unpin lifecycle.
 - No pool slot leaks across disconnect/timeout/error paths.
 - Pin stats are surfaced in inspect/runtime diagnostics.
-- **Status:** 🚧 in progress (`BEGIN`/`COMMIT`/`ROLLBACK` pin lifecycle + disconnect cleanup + deterministic pinning coverage + reactor pin stats landed; inspect/runtime diagnostics export pending).
+- **Status:** 🚧 in progress (`BEGIN`/`COMMIT`/`ROLLBACK` pin lifecycle + disconnect cleanup + deterministic pinning coverage + reactor pin stats landed; inspect pool diagnostics now enforce/emits pin invariants; reactor pin latency diagnostics export pending).
 
 ## Verification Matrix
 
@@ -230,8 +232,8 @@ Remove connection-serial request handling so multiple client connections can mak
 ## Next Commit Slice (Start Here)
 
 1. Export pin metrics into user-visible inspect/runtime diagnostics (align with observability contract section D).
-2. Add dedicated diagnostics assertions for `pool_pinned <= pool_checked_out <= pool_size` at inspect boundary.
-3. Extend pin lifecycle tests to cover response-write failure after COMMIT/ROLLBACK dispatch boundary.
+2. ✅ Add dedicated diagnostics assertions for `pool_pinned <= pool_checked_out <= pool_size` at inspect boundary.
+3. ✅ Extend pin lifecycle tests to cover response-write failure after COMMIT/ROLLBACK dispatch boundary.
 
 ## Hard-Stop Conditions
 
