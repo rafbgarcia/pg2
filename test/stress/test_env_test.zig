@@ -96,6 +96,20 @@ pub const TestExecutor = struct {
     }
 
     pub fn run(self: *TestExecutor, request: []const u8) ![]const u8 {
+        return self.runWithFlush(request, true);
+    }
+
+    /// Faster setup path for stress tests: keep session semantics, but avoid
+    /// forcing durability fsync on every single seed request.
+    pub fn runSeed(self: *TestExecutor, request: []const u8) ![]const u8 {
+        return self.runWithFlush(request, false);
+    }
+
+    fn runWithFlush(
+        self: *TestExecutor,
+        request: []const u8,
+        force_flush_after_checkin: bool,
+    ) ![]const u8 {
         var pool_conn = try self.pool.checkout();
         const result = try self.session.handleRequest(
             &self.pool,
@@ -132,7 +146,9 @@ pub const TestExecutor = struct {
             };
         }
         try self.pool.checkin(&pool_conn);
-        try self.runtime.wal.forceFlush();
+        if (force_flush_after_checkin) {
+            try self.runtime.wal.forceFlush();
+        }
         return self.response_buf[0..result.bytes_written];
     }
 };

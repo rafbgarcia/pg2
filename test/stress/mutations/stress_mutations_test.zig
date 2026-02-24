@@ -30,6 +30,45 @@ fn insertUsers(executor: *feature.TestExecutor, count: usize) !void {
     }
 }
 
+fn insertUsersBatched(
+    executor: *feature.TestExecutor,
+    count: usize,
+    batch_size: usize,
+) !void {
+    var start_id: usize = 1;
+    while (start_id <= count) {
+        const remaining = count - start_id + 1;
+        const batch = @min(batch_size, remaining);
+
+        var req_buf: [16 * 1024]u8 = undefined;
+        var stream = std.io.fixedBufferStream(req_buf[0..]);
+        const writer = stream.writer();
+
+        try writer.writeAll("User |> insert(");
+        var i: usize = 0;
+        while (i < batch) : (i += 1) {
+            if (i > 0) try writer.writeAll(", ");
+            const id = start_id + i;
+            try writer.print(
+                "(id = {d}, name = \"user-{d}\", active = true)",
+                .{ id, id },
+            );
+        }
+        try writer.writeAll(") {}");
+
+        const result = try executor.run(stream.getWritten());
+        var expected_buf: [96]u8 = undefined;
+        const expected = try std.fmt.bufPrint(
+            expected_buf[0..],
+            "OK returned_rows=0 inserted_rows={d} updated_rows=0 deleted_rows=0\n",
+            .{batch},
+        );
+        try std.testing.expectEqualStrings(expected, result);
+
+        start_id += batch;
+    }
+}
+
 test "stress insert high-volume sequential requests remain queryable via session path" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
@@ -70,7 +109,7 @@ test "stress update returning delivery failure aborts mutation via session path"
 
     const executor = &env.executor;
     try applyUserSchema(executor);
-    try insertUsers(executor, 4097);
+    try insertUsersBatched(executor, 4097, 64);
 
     const overflow_result = try executor.run(
         "User |> where(active == true) |> update(active = false) { id }",
@@ -105,7 +144,7 @@ test "stress delete returning delivery failure aborts mutation via session path"
 
     const executor = &env.executor;
     try applyUserSchema(executor);
-    try insertUsers(executor, 4097);
+    try insertUsersBatched(executor, 4097, 64);
 
     const overflow_result = try executor.run(
         "User |> where(active == true) |> delete { id }",

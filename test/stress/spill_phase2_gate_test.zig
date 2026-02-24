@@ -14,6 +14,10 @@ const FeatureEnv = internal.FeatureEnv;
 const TestExecutor = internal.TestExecutor;
 const mutation_mod = pg2.executor.mutation;
 
+const spill_boundary_row_count: u32 = 4097;
+const insert_batch_size_simple: u32 = 128;
+const insert_batch_size_string_heavy: u32 = 8;
+
 /// Execute a query with a caller-provided response buffer, for tests whose
 /// output exceeds the default 16 KB TestExecutor response buffer.
 fn runWithBuffer(executor: *TestExecutor, request: []const u8, buf: []u8) ![]const u8 {
@@ -58,15 +62,154 @@ fn runWithBuffer(executor: *TestExecutor, request: []const u8, buf: []u8) ![]con
 
 /// Insert `count` rows with sequential i64 ids starting at 1.
 fn insertRows(executor: *TestExecutor, model: []const u8, count: u32) !void {
-    var i: u32 = 1;
-    while (i <= count) : (i += 1) {
-        var query_buf: [128]u8 = undefined;
-        const query = std.fmt.bufPrint(
-            &query_buf,
-            "{s} |> insert(id = {d}) {{}}",
-            .{ model, i },
-        ) catch unreachable;
-        _ = try executor.run(query);
+    var start_id: u32 = 1;
+    while (start_id <= count) {
+        const remaining = count - start_id + 1;
+        const batch = @min(insert_batch_size_simple, remaining);
+
+        var query_buf: [16 * 1024]u8 = undefined;
+        var stream = std.io.fixedBufferStream(query_buf[0..]);
+        const writer = stream.writer();
+
+        try writer.print("{s} |> insert(", .{model});
+        var i: u32 = 0;
+        while (i < batch) : (i += 1) {
+            if (i > 0) try writer.writeAll(", ");
+            const id = start_id + i;
+            try writer.print("(id = {d})", .{id});
+        }
+        try writer.writeAll(") {}");
+        _ = try executor.runSeed(stream.getWritten());
+
+        start_id += batch;
+    }
+}
+
+fn insertRowsWithScore(
+    executor: *TestExecutor,
+    model: []const u8,
+    count: u32,
+    score_scale: u32,
+) !void {
+    var start_id: u32 = 1;
+    while (start_id <= count) {
+        const remaining = count - start_id + 1;
+        const batch = @min(insert_batch_size_simple, remaining);
+
+        var query_buf: [16 * 1024]u8 = undefined;
+        var stream = std.io.fixedBufferStream(query_buf[0..]);
+        const writer = stream.writer();
+
+        try writer.print("{s} |> insert(", .{model});
+        var i: u32 = 0;
+        while (i < batch) : (i += 1) {
+            if (i > 0) try writer.writeAll(", ");
+            const id = start_id + i;
+            try writer.print("(id = {d}, score = {d})", .{ id, id * score_scale });
+        }
+        try writer.writeAll(") {}");
+        _ = try executor.runSeed(stream.getWritten());
+
+        start_id += batch;
+    }
+}
+
+fn insertArenaRows(
+    executor: *TestExecutor,
+    count: u32,
+    payload: []const u8,
+) !void {
+    var start_id: u32 = 1;
+    while (start_id <= count) {
+        const remaining = count - start_id + 1;
+        const batch = @min(insert_batch_size_string_heavy, remaining);
+
+        var query_buf: [16 * 1024]u8 = undefined;
+        var stream = std.io.fixedBufferStream(query_buf[0..]);
+        const writer = stream.writer();
+
+        try writer.writeAll("ArenaTable |> insert(");
+        var i: u32 = 0;
+        while (i < batch) : (i += 1) {
+            if (i > 0) try writer.writeAll(", ");
+            const id = start_id + i;
+            const flag_str = if (id <= 4) "true" else "false";
+            try writer.print(
+                "(id = {d}, data = \"{s}\", flag = {s})",
+                .{ id, payload, flag_str },
+            );
+        }
+        try writer.writeAll(") {}");
+        _ = try executor.runSeed(stream.getWritten());
+
+        start_id += batch;
+    }
+}
+
+fn insertDistributedPosts(
+    executor: *TestExecutor,
+    post_count: u32,
+    owner_count: u32,
+) !void {
+    var start_id: u32 = 1;
+    while (start_id <= post_count) {
+        const remaining = post_count - start_id + 1;
+        const batch = @min(insert_batch_size_simple, remaining);
+
+        var query_buf: [16 * 1024]u8 = undefined;
+        var stream = std.io.fixedBufferStream(query_buf[0..]);
+        const writer = stream.writer();
+
+        try writer.writeAll("Post |> insert(");
+        var i: u32 = 0;
+        while (i < batch) : (i += 1) {
+            if (i > 0) try writer.writeAll(", ");
+            const post_id = start_id + i;
+            const owner_id: u32 = ((post_id - 1) % owner_count) + 1;
+            try writer.print(
+                "(id = {d}, user_id = {d})",
+                .{ post_id, owner_id },
+            );
+        }
+        try writer.writeAll(") {}");
+        _ = try executor.runSeed(stream.getWritten());
+
+        start_id += batch;
+    }
+}
+
+fn insertPostsForSingleUser(
+    executor: *TestExecutor,
+    post_count: u32,
+    with_title: bool,
+) !void {
+    var start_id: u32 = 1;
+    while (start_id <= post_count) {
+        const remaining = post_count - start_id + 1;
+        const batch = @min(insert_batch_size_simple, remaining);
+
+        var query_buf: [16 * 1024]u8 = undefined;
+        var stream = std.io.fixedBufferStream(query_buf[0..]);
+        const writer = stream.writer();
+
+        try writer.writeAll("Post |> insert(");
+        var i: u32 = 0;
+        while (i < batch) : (i += 1) {
+            if (i > 0) try writer.writeAll(", ");
+            const post_id = start_id + i;
+            if (with_title) {
+                try writer.print(
+                    "(id = {d}, user_id = 1, title = \"p{d}\")",
+                    .{ post_id, post_id },
+                );
+            } else {
+                try writer.print("(id = {d}, user_id = 1)", .{post_id});
+            }
+        }
+        try writer.writeAll(") {}");
+        _ = try executor.runSeed(stream.getWritten());
+
+        start_id += batch;
     }
 }
 
@@ -100,28 +243,12 @@ fn runMixedRootAndNestedHashSpillScenario(out_buf: []u8) ![]const u8 {
         \\}
     );
 
-    var user_id: u32 = 1;
-    while (user_id <= 4200) : (user_id += 1) {
-        var user_query_buf: [128]u8 = undefined;
-        const user_query = std.fmt.bufPrint(
-            &user_query_buf,
-            "User |> insert(id = {d}) {{}}",
-            .{user_id},
-        ) catch unreachable;
-        _ = try executor.run(user_query);
-    }
-
-    var post_id: u32 = 1;
-    while (post_id <= 5000) : (post_id += 1) {
-        const owner_id: u32 = ((post_id - 1) % 4200) + 1;
-        var post_query_buf: [160]u8 = undefined;
-        const post_query = std.fmt.bufPrint(
-            &post_query_buf,
-            "Post |> insert(id = {d}, user_id = {d}) {{}}",
-            .{ post_id, owner_id },
-        ) catch unreachable;
-        _ = try executor.run(post_query);
-    }
+    try insertRows(executor, "User", spill_boundary_row_count);
+    try insertDistributedPosts(
+        executor,
+        spill_boundary_row_count,
+        spill_boundary_row_count,
+    );
 
     const query =
         "User |> sort(id asc) |> inspect { id posts |> where(id > 0) |> sort(id asc) |> limit(1) { id } }";
@@ -150,28 +277,12 @@ fn runRootSortSpillAndNestedHashSpillScenario(out_buf: []u8) ![]const u8 {
         \\}
     );
 
-    var user_id: u32 = 1;
-    while (user_id <= 4200) : (user_id += 1) {
-        var user_query_buf: [128]u8 = undefined;
-        const user_query = std.fmt.bufPrint(
-            &user_query_buf,
-            "User |> insert(id = {d}) {{}}",
-            .{user_id},
-        ) catch unreachable;
-        _ = try executor.run(user_query);
-    }
-
-    var post_id: u32 = 1;
-    while (post_id <= 5000) : (post_id += 1) {
-        const owner_id: u32 = ((post_id - 1) % 4200) + 1;
-        var post_query_buf: [160]u8 = undefined;
-        const post_query = std.fmt.bufPrint(
-            &post_query_buf,
-            "Post |> insert(id = {d}, user_id = {d}) {{}}",
-            .{ post_id, owner_id },
-        ) catch unreachable;
-        _ = try executor.run(post_query);
-    }
+    try insertRows(executor, "User", spill_boundary_row_count);
+    try insertDistributedPosts(
+        executor,
+        spill_boundary_row_count,
+        spill_boundary_row_count,
+    );
 
     const query =
         "User |> sort(id desc) |> limit(3) |> inspect { id posts |> where(id > 0) |> sort(id asc) |> limit(1) { id } }";
@@ -195,25 +306,33 @@ test "select all on table with more than 4096 rows returns complete results" {
         \\}
     );
 
-    // Insert 4200 rows (exceeds scan_batch_size of 4096, forcing a 2-chunk scan).
-    try insertRows(executor, "BigTable", 4200);
+    // Insert 4097 rows (exceeds scan_batch_size of 4096, forcing a 2-chunk scan).
+    try insertRows(executor, "BigTable", spill_boundary_row_count);
 
-    // Query all rows with a large buffer (response is ~20 KB for 4200 ids).
+    // Query all rows with a large buffer.
     var large_buf: [64 * 1024]u8 = undefined;
     const result = try runWithBuffer(executor, "BigTable |> inspect { id }", &large_buf);
 
-    // Header reports all 4200 rows.
-    try std.testing.expect(std.mem.startsWith(u8, result, "OK returned_rows=4200 "));
+    // Header reports all rows.
+    var header_buf: [64]u8 = undefined;
+    const expected_header = try std.fmt.bufPrint(
+        &header_buf,
+        "OK returned_rows={d} ",
+        .{spill_boundary_row_count},
+    );
+    try std.testing.expect(std.mem.startsWith(u8, result, expected_header));
 
     // Count data rows between header and INSPECT block.
     const header_end = (std.mem.indexOf(u8, result, "\n") orelse unreachable) + 1;
     const inspect_start = std.mem.indexOf(u8, result, "INSPECT ") orelse result.len;
     const body = result[header_end..inspect_start];
-    try std.testing.expectEqual(@as(u32, 4200), countLines(body));
+    try std.testing.expectEqual(spill_boundary_row_count, countLines(body));
 
     // First and last ids present (rows come in insertion order across spill).
     try std.testing.expect(std.mem.startsWith(u8, body, "1\n"));
-    try std.testing.expect(std.mem.indexOf(u8, body, "4200\n") != null);
+    var tail_buf: [32]u8 = undefined;
+    const expected_tail = try std.fmt.bufPrint(&tail_buf, "{d}\n", .{spill_boundary_row_count});
+    try std.testing.expect(std.mem.indexOf(u8, body, expected_tail) != null);
 
     // Spill triggered (hot batch filled at 4096 rows, forcing a flush).
     try std.testing.expect(std.mem.indexOf(u8, result, "spill_triggered=true") != null);
@@ -242,19 +361,9 @@ test "query exceeding string arena completes via arena safety valve" {
 
     const padding = "A" ** 250;
 
-    // Insert 4200 rows (2 scan chunks) with 250-byte strings.
+    // Insert 4097 rows (2 scan chunks) with 250-byte strings.
     // Mark the first 4 rows with flag=true, rest with flag=false.
-    var i: i64 = 1;
-    while (i <= 4200) : (i += 1) {
-        var query_buf: [512]u8 = undefined;
-        const flag_str = if (i <= 4) "true" else "false";
-        const query = std.fmt.bufPrint(
-            &query_buf,
-            "ArenaTable |> insert(id = {d}, data = \"{s}\", flag = {s}) {{}}",
-            .{ i, padding, flag_str },
-        ) catch unreachable;
-        _ = try executor.run(query);
-    }
+    try insertArenaRows(executor, spill_boundary_row_count, padding);
 
     // Filter on non-PK column to force a full table scan that fills the arena,
     // while keeping the result set small (4 rows × ~260 bytes).
@@ -282,10 +391,10 @@ test "selective where on large table does not spill" {
         \\}
     );
 
-    // Insert 4200 rows — requires a multi-chunk scan.
-    try insertRows(executor, "FilterTable", 4200);
+    // Insert 4097 rows — requires a multi-chunk scan.
+    try insertRows(executor, "FilterTable", spill_boundary_row_count);
 
-    // Selective WHERE: only 50 of 4200 rows survive.
+    // Selective WHERE: only 50 of 4097 rows survive.
     const result = try executor.run(
         "FilterTable |> where(id < 51) |> inspect { id }",
     );
@@ -298,7 +407,7 @@ test "selective where on large table does not spill" {
 }
 
 test "spill replay from same initial state produces identical results" {
-    const row_count: u32 = 4200;
+    const row_count: u32 = spill_boundary_row_count;
     const schema =
         \\ReplayTable {
         \\  field(id, i64, notNull, primaryKey)
@@ -352,7 +461,7 @@ test "collector-backed spill path applies limit correctly" {
         \\}
     );
 
-    try insertRows(executor, "LimitSpillTable", 4200);
+    try insertRows(executor, "LimitSpillTable", spill_boundary_row_count);
 
     const result = try executor.run(
         "LimitSpillTable |> limit(10) |> inspect {}",
@@ -381,7 +490,7 @@ test "collector-backed external sort spill applies limit correctly" {
         \\}
     );
 
-    try insertRows(executor, "SortLimitSpillTable", 4200);
+    try insertRows(executor, "SortLimitSpillTable", spill_boundary_row_count);
 
     const result = try executor.run(
         "SortLimitSpillTable |> sort(id desc) |> limit(10) |> inspect {}",
@@ -395,7 +504,7 @@ test "collector-backed external sort spill applies limit correctly" {
             "spill_triggered=true",
         ) != null,
     );
-    try std.testing.expect(std.mem.indexOf(u8, result, "\n4200\n4199\n4198\n4197\n4196\n4195\n4194\n4193\n4192\n4191\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n4097\n4096\n4095\n4094\n4093\n4092\n4091\n4090\n4089\n4088\n") != null);
 }
 
 test "collector-backed spill path applies offset then limit correctly" {
@@ -410,7 +519,7 @@ test "collector-backed spill path applies offset then limit correctly" {
         \\}
     );
 
-    try insertRows(executor, "OffsetLimitSpillTable", 4200);
+    try insertRows(executor, "OffsetLimitSpillTable", spill_boundary_row_count);
 
     const result = try executor.run(
         "OffsetLimitSpillTable |> offset(100) |> limit(5) |> inspect {}",
@@ -433,16 +542,12 @@ test "collector-backed spill path applies flat column projection correctly" {
         \\}
     );
 
-    var i: u32 = 1;
-    while (i <= 4200) : (i += 1) {
-        var query_buf: [160]u8 = undefined;
-        const query = std.fmt.bufPrint(
-            &query_buf,
-            "ProjectionSpillTable |> insert(id = {d}, score = {d}) {{}}",
-            .{ i, i * 2 },
-        ) catch unreachable;
-        _ = try executor.run(query);
-    }
+    try insertRowsWithScore(
+        executor,
+        "ProjectionSpillTable",
+        spill_boundary_row_count,
+        2,
+    );
 
     const result = try executor.run(
         "ProjectionSpillTable |> limit(3) |> inspect { score }",
@@ -465,16 +570,12 @@ test "collector-backed spill path applies computed projection correctly" {
         \\}
     );
 
-    var i: u32 = 1;
-    while (i <= 4200) : (i += 1) {
-        var query_buf: [192]u8 = undefined;
-        const query = std.fmt.bufPrint(
-            &query_buf,
-            "ComputedProjectionSpillTable |> insert(id = {d}, score = {d}) {{}}",
-            .{ i, i * 10 },
-        ) catch unreachable;
-        _ = try executor.run(query);
-    }
+    try insertRowsWithScore(
+        executor,
+        "ComputedProjectionSpillTable",
+        spill_boundary_row_count,
+        10,
+    );
 
     const result = try executor.run(
         "ComputedProjectionSpillTable |> offset(2) |> limit(2) |> inspect { plus_one: score + 1 }",
@@ -496,7 +597,7 @@ test "collector-backed spill path applies having correctly" {
         \\}
     );
 
-    try insertRows(executor, "HavingSpillTable", 4200);
+    try insertRows(executor, "HavingSpillTable", spill_boundary_row_count);
 
     var large_buf: [64 * 1024]u8 = undefined;
     const result = try runWithBuffer(
@@ -505,7 +606,7 @@ test "collector-backed spill path applies having correctly" {
         &large_buf,
     );
 
-    try std.testing.expect(std.mem.startsWith(u8, result, "OK returned_rows=4100 "));
+    try std.testing.expect(std.mem.startsWith(u8, result, "OK returned_rows=3997 "));
     try std.testing.expect(
         std.mem.indexOf(
             u8,
@@ -513,7 +614,7 @@ test "collector-backed spill path applies having correctly" {
             "\n101\n102\n103\n",
         ) != null,
     );
-    try std.testing.expect(std.mem.indexOf(u8, result, "\n4200\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n4097\n") != null);
 }
 
 test "collector-backed spill path preserves having-limit order semantics" {
@@ -528,7 +629,7 @@ test "collector-backed spill path preserves having-limit order semantics" {
         \\}
     );
 
-    try insertRows(executor, "HavingLimitOrderTable", 4200);
+    try insertRows(executor, "HavingLimitOrderTable", spill_boundary_row_count);
 
     const result_a = try executor.run(
         "HavingLimitOrderTable |> having(id > 4000) |> limit(3) |> inspect { id }",
@@ -554,14 +655,14 @@ test "collector-backed external sort spill applies having correctly" {
         \\}
     );
 
-    try insertRows(executor, "SortHavingSpillTable", 4200);
+    try insertRows(executor, "SortHavingSpillTable", spill_boundary_row_count);
 
     const result = try executor.run(
-        "SortHavingSpillTable |> sort(id desc) |> having(id > 4197) |> inspect { id }",
+        "SortHavingSpillTable |> sort(id desc) |> having(id > 4094) |> inspect { id }",
     );
 
     try std.testing.expect(std.mem.startsWith(u8, result, "OK returned_rows=3 "));
-    try std.testing.expect(std.mem.indexOf(u8, result, "\n4200\n4199\n4198\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n4097\n4096\n4095\n") != null);
 }
 
 test "collector-backed spill path supports nested selection with empty children" {
@@ -582,16 +683,7 @@ test "collector-backed spill path supports nested selection with empty children"
         \\}
     );
 
-    var i: u32 = 1;
-    while (i <= 4200) : (i += 1) {
-        var query_buf: [256]u8 = undefined;
-        const query = std.fmt.bufPrint(
-            &query_buf,
-            "User |> insert(id = {d}) {{}}",
-            .{i},
-        ) catch unreachable;
-        _ = try executor.run(query);
-    }
+    try insertRows(executor, "User", spill_boundary_row_count);
     const seed_insert = try executor.run("Post |> insert(id = 1, user_id = 99999, title = \"seed\") {}");
     try std.testing.expect(!std.mem.startsWith(u8, seed_insert, "ERR query: "));
 
@@ -605,7 +697,7 @@ test "collector-backed spill path supports nested selection with empty children"
     try std.testing.expect(!std.mem.startsWith(u8, result, "ERR query: "));
     try std.testing.expect(std.mem.indexOf(u8, result, "{id:i64,posts:[{id:i64,title:str}]}") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "1,[]\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "4200,[]\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "4097,[]\n") != null);
 }
 
 test "nested selection fails explicitly when child scan exceeds in-memory batch" {
@@ -630,33 +722,24 @@ test "nested selection fails explicitly when child scan exceeds in-memory batch"
     );
 
     _ = try executor.run("User |> insert(id = 1, name = \"Alice\") {}");
-    var i: u32 = 1;
-    while (i <= 4200) : (i += 1) {
-        var query_buf: [256]u8 = undefined;
-        const query = std.fmt.bufPrint(
-            &query_buf,
-            "Post |> insert(id = {d}, user_id = 1, title = \"p{d}\") {{}}",
-            .{ i, i },
-        ) catch unreachable;
-        _ = try executor.run(query);
-    }
+    try insertPostsForSingleUser(executor, spill_boundary_row_count, true);
 
     const result = try executor.run(
         "User |> inspect { name posts |> sort(id desc) |> limit(1) { id } }",
     );
     try std.testing.expect(!std.mem.startsWith(u8, result, "ERR query: "));
     try std.testing.expect(std.mem.indexOf(u8, result, "{name:str,posts:[{id:i64}]}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "\"Alice\",[[4200]]\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\"Alice\",[[4097]]\n") != null);
 }
 
 test "mixed root spill and nested hash spill preserves per-parent results under tight temp budgets" {
     var result_buf: [512 * 1024]u8 = undefined;
     const result = try runMixedRootAndNestedHashSpillScenario(&result_buf);
 
-    try std.testing.expect(std.mem.startsWith(u8, result, "OK returned_rows=4200 "));
+    try std.testing.expect(std.mem.startsWith(u8, result, "OK returned_rows=4097 "));
     try std.testing.expect(std.mem.indexOf(u8, result, "{id:i64,posts:[{id:i64}]}") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "\n1,[[1]]\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "\n4200,[[4200]]\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n4097,[[4097]]\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "spill_triggered=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "join_strategy=hash_spill") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "nested_join_hash_spill=1") != null);
@@ -678,9 +761,9 @@ test "root sort spill and nested hash spill compose correctly under tight budget
 
     try std.testing.expect(std.mem.startsWith(u8, result, "OK returned_rows=3 "));
     try std.testing.expect(std.mem.indexOf(u8, result, "{id:i64,posts:[{id:i64}]}") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "\n4200,[[4200]]\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "\n4199,[[4199]]\n") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "\n4198,[[4198]]\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n4097,[[4097]]\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n4096,[[4096]]\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "\n4095,[[4095]]\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "spill_triggered=true") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "join_strategy=hash_spill") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "sort_strategy=external_merge") != null);
@@ -710,16 +793,7 @@ test "nested hash spill fails closed when temp page budget is exhausted" {
 
     _ = try executor.run("User |> insert(id = 1) {}");
 
-    var post_id: u32 = 1;
-    while (post_id <= 5000) : (post_id += 1) {
-        var post_query_buf: [160]u8 = undefined;
-        const post_query = std.fmt.bufPrint(
-            &post_query_buf,
-            "Post |> insert(id = {d}, user_id = 1) {{}}",
-            .{post_id},
-        ) catch unreachable;
-        _ = try executor.run(post_query);
-    }
+    try insertPostsForSingleUser(executor, spill_boundary_row_count, false);
 
     const result = try executor.run(
         "User |> where(id == 1) |> inspect { id posts |> limit(1) { id } }",
