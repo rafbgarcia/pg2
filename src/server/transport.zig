@@ -11,6 +11,7 @@ pub const AcceptError = error{
 };
 
 pub const ConnectionError = error{
+    WouldBlock,
     ReadFailed,
     WriteFailed,
     RequestTooLarge,
@@ -34,6 +35,7 @@ pub const Connection = struct {
             ptr: *anyopaque,
             data: []const u8,
         ) ConnectionError!void,
+        close: *const fn (ptr: *anyopaque) void,
     };
 
     pub fn readRequest(
@@ -48,6 +50,10 @@ pub const Connection = struct {
         data: []const u8,
     ) ConnectionError!void {
         return self.vtable.writeResponse(self.ptr, data);
+    }
+
+    pub fn close(self: Connection) void {
+        self.vtable.close(self.ptr);
     }
 };
 
@@ -74,6 +80,7 @@ test "connection interface roundtrip with test doubles" {
         response: [64]u8 = undefined,
         response_len: usize = 0,
         served: bool = false,
+        closed: bool = false,
 
         fn conn(self: *@This()) Connection {
             return .{
@@ -85,6 +92,7 @@ test "connection interface roundtrip with test doubles" {
         const vtable = Connection.VTable{
             .readRequest = &readRequest,
             .writeResponse = &writeResponse,
+            .close = &close,
         };
 
         fn readRequest(
@@ -108,6 +116,11 @@ test "connection interface roundtrip with test doubles" {
             @memcpy(self.response[0..data.len], data);
             self.response_len = data.len;
         }
+
+        fn close(ptr: *anyopaque) void {
+            const self: *@This() = @ptrCast(@alignCast(ptr));
+            self.closed = true;
+        }
     };
 
     var test_conn = TestConn{ .request = "ping" };
@@ -121,5 +134,7 @@ test "connection interface roundtrip with test doubles" {
         "pong",
         test_conn.response[0..test_conn.response_len],
     );
+    conn.close();
+    try std.testing.expect(test_conn.closed);
     try std.testing.expect((try conn.readRequest(request_buf[0..])) == null);
 }

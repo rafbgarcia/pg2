@@ -12,6 +12,8 @@ const Acceptor = transport_mod.Acceptor;
 const Connection = transport_mod.Connection;
 const AcceptError = transport_mod.AcceptError;
 const ConnectionError = transport_mod.ConnectionError;
+const max_request_bytes = 4096;
+const max_response_bytes = 4096;
 
 pub const TcpAcceptor = struct {
     server: std.net.Server,
@@ -71,6 +73,11 @@ pub const TcpAcceptor = struct {
 const TcpConnection = struct {
     stream: std.net.Stream,
     closed: bool = false,
+    request_buf: [max_request_bytes]u8 = undefined,
+    request_len: usize = 0,
+    pending_write_buf: [max_response_bytes]u8 = undefined,
+    pending_write_len: usize = 0,
+    pending_write_sent: usize = 0,
 
     fn connection(self: *TcpConnection) Connection {
         return .{
@@ -82,6 +89,7 @@ const TcpConnection = struct {
     const vtable = Connection.VTable{
         .readRequest = &readRequestImpl,
         .writeResponse = &writeResponseImpl,
+        .close = &closeImpl,
     };
 
     fn readRequestImpl(
@@ -91,26 +99,35 @@ const TcpConnection = struct {
         const self: *TcpConnection = @ptrCast(@alignCast(ptr));
         if (self.closed) return null;
 
-        var used: usize = 0;
         var byte_buf: [1]u8 = undefined;
 
         while (true) {
-            const n = self.stream.read(byte_buf[0..]) catch return error.ReadFailed;
+            const n = self.stream.read(byte_buf[0..]) catch |err| switch (err) {
+                error.WouldBlock => return error.WouldBlock,
+                else => return error.ReadFailed,
+            };
             if (n == 0) {
-                self.stream.close();
-                self.closed = true;
-                if (used == 0) return null;
-                return trimLineEnding(out[0..used]);
+                closeImpl(ptr);
+                if (self.request_len == 0) return null;
+                if (self.request_len > out.len) return error.RequestTooLarge;
+                @memcpy(out[0..self.request_len], self.request_buf[0..self.request_len]);
+                const line = trimLineEnding(out[0..self.request_len]);
+                self.request_len = 0;
+                return line;
             }
 
             const byte = byte_buf[0];
             if (byte == '\n') {
-                return trimLineEnding(out[0..used]);
+                if (self.request_len > out.len) return error.RequestTooLarge;
+                @memcpy(out[0..self.request_len], self.request_buf[0..self.request_len]);
+                const line = trimLineEnding(out[0..self.request_len]);
+                self.request_len = 0;
+                return line;
             }
 
-            if (used >= out.len) return error.RequestTooLarge;
-            out[used] = byte;
-            used += 1;
+            if (self.request_len >= self.request_buf.len) return error.RequestTooLarge;
+            self.request_buf[self.request_len] = byte;
+            self.request_len += 1;
         }
     }
 
@@ -120,7 +137,42 @@ const TcpConnection = struct {
     ) ConnectionError!void {
         const self: *TcpConnection = @ptrCast(@alignCast(ptr));
         if (self.closed) return error.WriteFailed;
-        self.stream.writeAll(data) catch return error.WriteFailed;
+
+        if (self.pending_write_len == 0) {
+            if (data.len > self.pending_write_buf.len) return error.ResponseTooLarge;
+            @memcpy(self.pending_write_buf[0..data.len], data);
+            self.pending_write_len = data.len;
+            self.pending_write_sent = 0;
+        } else {
+            const pending = self.pending_write_buf[0..self.pending_write_len];
+            if (!std.mem.eql(u8, pending, data)) return error.WriteFailed;
+        }
+
+        while (self.pending_write_sent < self.pending_write_len) {
+            const sent = std.posix.send(
+                self.stream.handle,
+                self.pending_write_buf[self.pending_write_sent..self.pending_write_len],
+                0,
+            ) catch |err| switch (err) {
+                error.WouldBlock => return error.WouldBlock,
+                else => return error.WriteFailed,
+            };
+            if (sent == 0) return error.WriteFailed;
+            self.pending_write_sent += sent;
+        }
+
+        self.pending_write_len = 0;
+        self.pending_write_sent = 0;
+    }
+
+    fn closeImpl(ptr: *anyopaque) void {
+        const self: *TcpConnection = @ptrCast(@alignCast(ptr));
+        if (self.closed) return;
+        self.stream.close();
+        self.closed = true;
+        self.request_len = 0;
+        self.pending_write_len = 0;
+        self.pending_write_sent = 0;
     }
 };
 
@@ -158,4 +210,5 @@ test "tcp transport accepts and reads newline-delimited request" {
     const request = (try conn.readRequest(request_buf[0..])).?;
     try std.testing.expectEqualStrings("User", request);
     try std.testing.expect((try conn.readRequest(request_buf[0..])) == null);
+    conn.close();
 }

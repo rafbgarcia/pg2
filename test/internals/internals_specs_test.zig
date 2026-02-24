@@ -11,6 +11,7 @@ comptime {
     _ = @import("maintenance/overflow_reclaim_drain_policy_test.zig");
     _ = @import("maintenance/overflow_reclaim_surface_test.zig");
     _ = @import("query_protocol/tree_response_test.zig");
+    _ = @import("server/transport_progress_test.zig");
     _ = @import("spill/temp_storage_surface_test.zig");
     _ = @import("spill/temp_spill_determinism_test.zig");
     _ = @import("spill/nested_parent_overflow_contract_test.zig");

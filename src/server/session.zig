@@ -142,6 +142,107 @@ pub const Session = struct {
         };
     }
 
+    /// Runs a single request through pool checkout/execute/checkin lifecycle
+    /// and serializes the final response into `response_buf`.
+    pub fn dispatchRequest(
+        self: *Session,
+        pool: *ConnectionPool,
+        request: []const u8,
+        response_buf: []u8,
+    ) SessionError!usize {
+        var pool_conn = pool.checkout() catch |err| {
+            const class = runtime_errors.classifySessionBoundary(err);
+            const boundary_msg = try serializeBoundaryError(
+                response_buf,
+                class,
+                err,
+            );
+            return boundary_msg.len;
+        };
+
+        const response = self.handleRequest(
+            pool,
+            &pool_conn,
+            request,
+            response_buf,
+        ) catch |err| {
+            const class = runtime_errors.classifySessionBoundary(err);
+            const boundary_msg = try serializeBoundaryError(
+                response_buf,
+                class,
+                err,
+            );
+            mutation_mod.rollbackOverflowReclaimEntriesForTx(
+                self.catalog,
+                pool_conn.tx_id,
+            );
+            pool.abortCheckin(&pool_conn) catch |abort_err| {
+                std.log.err(
+                    "pool abort checkin failed: slot={d} err={s}",
+                    .{ pool_conn.slot_index, @errorName(abort_err) },
+                );
+                @panic("pool abort checkin failed");
+            };
+            return boundary_msg.len;
+        };
+
+        if (response.is_query_error) {
+            mutation_mod.rollbackOverflowReclaimEntriesForTx(
+                self.catalog,
+                pool_conn.tx_id,
+            );
+            pool.abortCheckin(&pool_conn) catch |abort_err| {
+                std.log.err(
+                    "pool abort checkin failed: slot={d} err={s}",
+                    .{ pool_conn.slot_index, @errorName(abort_err) },
+                );
+                @panic("pool abort checkin failed");
+            };
+        } else {
+            const tx_id = pool_conn.tx_id;
+            if (response.had_mutation) {
+                mutation_mod.commitOverflowReclaimEntriesForTx(
+                    self.catalog,
+                    &self.runtime.pool,
+                    &self.runtime.wal,
+                    tx_id,
+                    1,
+                ) catch |reclaim_err| {
+                    mutation_mod.rollbackOverflowReclaimEntriesForTx(
+                        self.catalog,
+                        tx_id,
+                    );
+                    pool.abortCheckin(&pool_conn) catch |abort_err| {
+                        std.log.err(
+                            "pool abort checkin failed: slot={d} err={s}",
+                            .{ pool_conn.slot_index, @errorName(abort_err) },
+                        );
+                        @panic("pool abort checkin failed");
+                    };
+                    var stream = std.io.fixedBufferStream(response_buf);
+                    const writer = stream.writer();
+                    writer.print(
+                        "ERR class={s} code={s}\n",
+                        .{
+                            @tagName(runtime_errors.classifyMutation(reclaim_err)),
+                            @errorName(reclaim_err),
+                        },
+                    ) catch return error.ResponseTooLarge;
+                    return stream.pos;
+                };
+            }
+            pool.checkin(&pool_conn) catch |checkin_err| {
+                std.log.err(
+                    "pool checkin failed: slot={d} err={s}",
+                    .{ pool_conn.slot_index, @errorName(checkin_err) },
+                );
+                @panic("pool checkin failed");
+            };
+        }
+        std.debug.assert(response.bytes_written <= response_buf.len);
+        return response.bytes_written;
+    }
+
     /// Serve all requests from one accepted connection using bounded buffers.
     pub fn serveConnection(
         self: *Session,
@@ -153,106 +254,20 @@ pub const Session = struct {
         std.debug.assert(request_buf.len > 0);
         std.debug.assert(response_buf.len > 0);
         while (true) {
-            const request_opt = try connection.readRequest(request_buf);
+            const request_opt = connection.readRequest(request_buf) catch |err| switch (err) {
+                error.WouldBlock => continue,
+                else => return err,
+            };
             const request = request_opt orelse break;
             if (request.len > request_buf.len) return error.RequestTooLarge;
-
-            var pool_conn = pool.checkout() catch |err| {
-                const class = runtime_errors.classifySessionBoundary(err);
-                const boundary_msg = try serializeBoundaryError(
-                    response_buf,
-                    class,
-                    err,
-                );
-                try connection.writeResponse(boundary_msg);
-                continue;
-            };
-
-            const response = self.handleRequest(
+            const response_len = try self.dispatchRequest(
                 pool,
-                &pool_conn,
                 request,
                 response_buf,
-            ) catch |err| {
-                const class = runtime_errors.classifySessionBoundary(err);
-                const boundary_msg = try serializeBoundaryError(
-                    response_buf,
-                    class,
-                    err,
-                );
-                mutation_mod.rollbackOverflowReclaimEntriesForTx(
-                    self.catalog,
-                    pool_conn.tx_id,
-                );
-                pool.abortCheckin(&pool_conn) catch |abort_err| {
-                    std.log.err(
-                        "pool abort checkin failed: slot={d} err={s}",
-                        .{ pool_conn.slot_index, @errorName(abort_err) },
-                    );
-                    @panic("pool abort checkin failed");
-                };
-                try connection.writeResponse(boundary_msg);
-                continue;
-            };
-
-            if (response.is_query_error) {
-                mutation_mod.rollbackOverflowReclaimEntriesForTx(
-                    self.catalog,
-                    pool_conn.tx_id,
-                );
-                pool.abortCheckin(&pool_conn) catch |abort_err| {
-                    std.log.err(
-                        "pool abort checkin failed: slot={d} err={s}",
-                        .{ pool_conn.slot_index, @errorName(abort_err) },
-                    );
-                    @panic("pool abort checkin failed");
-                };
-            } else {
-                const tx_id = pool_conn.tx_id;
-                if (response.had_mutation) {
-                    mutation_mod.commitOverflowReclaimEntriesForTx(
-                        self.catalog,
-                        &self.runtime.pool,
-                        &self.runtime.wal,
-                        tx_id,
-                        1,
-                    ) catch |reclaim_err| {
-                        mutation_mod.rollbackOverflowReclaimEntriesForTx(
-                            self.catalog,
-                            tx_id,
-                        );
-                        pool.abortCheckin(&pool_conn) catch |abort_err| {
-                            std.log.err(
-                                "pool abort checkin failed: slot={d} err={s}",
-                                .{ pool_conn.slot_index, @errorName(abort_err) },
-                            );
-                            @panic("pool abort checkin failed");
-                        };
-                        var stream = std.io.fixedBufferStream(response_buf);
-                        const writer = stream.writer();
-                        writer.print(
-                            "ERR class={s} code={s}\n",
-                            .{
-                                @tagName(runtime_errors.classifyMutation(reclaim_err)),
-                                @errorName(reclaim_err),
-                            },
-                        ) catch return error.ResponseTooLarge;
-                        const boundary_msg = response_buf[0..stream.pos];
-                        try connection.writeResponse(boundary_msg);
-                        continue;
-                    };
-                }
-                pool.checkin(&pool_conn) catch |checkin_err| {
-                    std.log.err(
-                        "pool checkin failed: slot={d} err={s}",
-                        .{ pool_conn.slot_index, @errorName(checkin_err) },
-                    );
-                    @panic("pool checkin failed");
-                };
-            }
-            std.debug.assert(response.bytes_written <= response_buf.len);
-            try connection.writeResponse(
-                response_buf[0..response.bytes_written],
+            );
+            try writeResponseRetry(
+                connection,
+                response_buf[0..response_len],
             );
         }
 
@@ -286,6 +301,19 @@ pub const Session = struct {
         return served_connections;
     }
 };
+
+fn writeResponseRetry(
+    connection: Connection,
+    response: []const u8,
+) transport_mod.ConnectionError!void {
+    while (true) {
+        connection.writeResponse(response) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+        return;
+    }
+}
 
 fn fixedMessage(message: []const u8) []const u8 {
     const end = std.mem.indexOfScalar(u8, message, 0) orelse message.len;
@@ -670,6 +698,7 @@ test "session accept loop routes multiple connections through handleRequest" {
         const vtable = Connection.VTable{
             .readRequest = &readRequest,
             .writeResponse = &writeResponse,
+            .close = &close,
         };
 
         fn readRequest(
@@ -700,6 +729,8 @@ test "session accept loop routes multiple connections through handleRequest" {
             self.response_lens[self.write_index] = data.len;
             self.write_index += 1;
         }
+
+        fn close(_: *anyopaque) void {}
     };
 
     const TestAcceptor = struct {
@@ -809,6 +840,7 @@ test "session accept loop emits classified boundary error on pool exhaustion" {
         const vtable = Connection.VTable{
             .readRequest = &readRequest,
             .writeResponse = &writeResponse,
+            .close = &close,
         };
 
         fn readRequest(
@@ -838,6 +870,8 @@ test "session accept loop emits classified boundary error on pool exhaustion" {
             self.response_lens[self.write_index] = data.len;
             self.write_index += 1;
         }
+
+        fn close(_: *anyopaque) void {}
     };
 
     var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);

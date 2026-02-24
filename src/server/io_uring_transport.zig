@@ -24,6 +24,7 @@ pub const IoUringAcceptor = struct {
     ring: if (builtin.os.tag == .linux) std.os.linux.IoUring else void,
     accept_addr: std.posix.sockaddr,
     accept_addr_len: std.posix.socklen_t,
+    accept_pending: bool = false,
     active_connection: ?IoUringConnection = null,
 
     pub fn listen(
@@ -47,6 +48,7 @@ pub const IoUringAcceptor = struct {
             .ring = ring,
             .accept_addr = undefined,
             .accept_addr_len = @sizeOf(std.posix.sockaddr),
+            .accept_pending = false,
             .active_connection = null,
         };
     }
@@ -89,15 +91,23 @@ pub const IoUringAcceptor = struct {
         }
 
         self.accept_addr_len = @sizeOf(std.posix.sockaddr);
-        _ = self.ring.accept(
-            0xA11CEACCE5700001,
-            self.server.stream.handle,
-            &self.accept_addr,
-            &self.accept_addr_len,
-            std.posix.SOCK.CLOEXEC,
-        ) catch return error.AcceptFailed;
-        _ = self.ring.submit_and_wait(1) catch return error.AcceptFailed;
-        const cqe = self.ring.copy_cqe() catch return error.AcceptFailed;
+        if (!self.accept_pending) {
+            _ = self.ring.accept(
+                0xA11CEACCE5700001,
+                self.server.stream.handle,
+                &self.accept_addr,
+                &self.accept_addr_len,
+                std.posix.SOCK.CLOEXEC,
+            ) catch return error.AcceptFailed;
+            _ = self.ring.submit() catch return error.AcceptFailed;
+            self.accept_pending = true;
+        }
+
+        var cqes: [1]std.os.linux.io_uring_cqe = undefined;
+        const copied = self.ring.copy_cqes(&cqes, 0) catch return error.AcceptFailed;
+        if (copied == 0) return null;
+        const cqe = cqes[0];
+        self.accept_pending = false;
         if (cqe.user_data != 0xA11CEACCE5700001) return error.AcceptFailed;
         if (cqe.err() != .SUCCESS) return error.AcceptFailed;
         if (cqe.res <= 0) return error.AcceptFailed;
@@ -118,6 +128,9 @@ const IoUringConnection = struct {
     recv_buf: [1024]u8 = undefined,
     recv_start: usize = 0,
     recv_end: usize = 0,
+    recv_pending: bool = false,
+    send_pending: bool = false,
+    send_pending_len: usize = 0,
 
     fn connection(self: *IoUringConnection) Connection {
         return .{
@@ -129,6 +142,7 @@ const IoUringConnection = struct {
     const vtable = Connection.VTable{
         .readRequest = &readRequestImpl,
         .writeResponse = &writeResponseImpl,
+        .close = &closeImpl,
     };
 
     fn readRequestImpl(
@@ -176,15 +190,33 @@ const IoUringConnection = struct {
         }
     }
 
+    fn closeImpl(ptr: *anyopaque) void {
+        const self: *IoUringConnection = @ptrCast(@alignCast(ptr));
+        if (self.closed) return;
+        self.stream.close();
+        self.closed = true;
+        self.recv_pending = false;
+        self.send_pending = false;
+        self.send_pending_len = 0;
+    }
+
     fn recvIntoPending(self: *IoUringConnection) ConnectionError!usize {
-        _ = self.ring.recv(
-            0xA11CE5700002,
-            self.stream.handle,
-            .{ .buffer = self.recv_buf[0..] },
-            0,
-        ) catch return error.ReadFailed;
-        _ = self.ring.submit_and_wait(1) catch return error.ReadFailed;
-        const cqe = self.ring.copy_cqe() catch return error.ReadFailed;
+        if (!self.recv_pending) {
+            _ = self.ring.recv(
+                0xA11CE5700002,
+                self.stream.handle,
+                .{ .buffer = self.recv_buf[0..] },
+                0,
+            ) catch return error.ReadFailed;
+            _ = self.ring.submit() catch return error.ReadFailed;
+            self.recv_pending = true;
+        }
+
+        var cqes: [1]std.os.linux.io_uring_cqe = undefined;
+        const copied = self.ring.copy_cqes(&cqes, 0) catch return error.ReadFailed;
+        if (copied == 0) return error.WouldBlock;
+        const cqe = cqes[0];
+        self.recv_pending = false;
         if (cqe.user_data != 0xA11CE5700002) return error.ReadFailed;
         if (cqe.err() != .SUCCESS) return error.ReadFailed;
         if (cqe.res < 0) return error.ReadFailed;
@@ -196,14 +228,26 @@ const IoUringConnection = struct {
     }
 
     fn sendFrom(self: *IoUringConnection, data: []const u8) ConnectionError!usize {
-        _ = self.ring.send(
-            0xA11CE5700003,
-            self.stream.handle,
-            data,
-            0,
-        ) catch return error.WriteFailed;
-        _ = self.ring.submit_and_wait(1) catch return error.WriteFailed;
-        const cqe = self.ring.copy_cqe() catch return error.WriteFailed;
+        if (!self.send_pending) {
+            _ = self.ring.send(
+                0xA11CE5700003,
+                self.stream.handle,
+                data,
+                0,
+            ) catch return error.WriteFailed;
+            _ = self.ring.submit() catch return error.WriteFailed;
+            self.send_pending = true;
+            self.send_pending_len = data.len;
+        } else if (self.send_pending_len != data.len) {
+            return error.WriteFailed;
+        }
+
+        var cqes: [1]std.os.linux.io_uring_cqe = undefined;
+        const copied = self.ring.copy_cqes(&cqes, 0) catch return error.WriteFailed;
+        if (copied == 0) return error.WouldBlock;
+        const cqe = cqes[0];
+        self.send_pending = false;
+        self.send_pending_len = 0;
         if (cqe.user_data != 0xA11CE5700003) return error.WriteFailed;
         if (cqe.err() != .SUCCESS) return error.WriteFailed;
         if (cqe.res < 0) return error.WriteFailed;
@@ -255,10 +299,44 @@ test "io_uring transport accepts and reads newline-delimited request" {
     const thread = try std.Thread.spawn(.{}, ClientThread.run, .{address});
     defer thread.join();
 
-    const conn = (try listener.acceptor().accept()).?;
+    const conn = while (true) {
+        const c = try listener.acceptor().accept();
+        if (c) |ready| break ready;
+        std.Thread.yield() catch {};
+    };
     var request_buf: [64]u8 = undefined;
-    const request = (try conn.readRequest(request_buf[0..])).?;
+    const request = while (true) {
+        const maybe = conn.readRequest(request_buf[0..]) catch |err| switch (err) {
+            error.WouldBlock => {
+                std.Thread.yield() catch {};
+                continue;
+            },
+            else => return err,
+        };
+        if (maybe) |req| break req;
+        return error.UnexpectedEof;
+    };
     try std.testing.expectEqualStrings("User", request);
-    try conn.writeResponse("OK\n");
-    try std.testing.expect((try conn.readRequest(request_buf[0..])) == null);
+    while (true) {
+        conn.writeResponse("OK\n") catch |err| switch (err) {
+            error.WouldBlock => {
+                std.Thread.yield() catch {};
+                continue;
+            },
+            else => return err,
+        };
+        break;
+    }
+    while (true) {
+        const maybe = conn.readRequest(request_buf[0..]) catch |err| switch (err) {
+            error.WouldBlock => {
+                std.Thread.yield() catch {};
+                continue;
+            },
+            else => return err,
+        };
+        try std.testing.expect(maybe == null);
+        break;
+    }
+    conn.close();
 }
