@@ -1643,7 +1643,7 @@ fn rewriteCollectorForPostOps(
                             return false;
                         },
                         error.TypeMismatch => {
-                            setError(result, "predicate evaluation failed: expected boolean result");
+                            setError(result, "where/having predicate must evaluate to boolean (true or false)");
                             return false;
                         },
                         else => false,
@@ -4276,7 +4276,7 @@ fn applyWhereFilter(
                     return;
                 },
                 error.TypeMismatch => {
-                    setError(result, "predicate evaluation failed: expected boolean result");
+                    setError(result, "where/having predicate must evaluate to boolean (true or false)");
                     return;
                 },
                 else => false,
@@ -4301,7 +4301,7 @@ fn applyWhereFilter(
                     return;
                 },
                 error.TypeMismatch => {
-                    setError(result, "predicate evaluation failed: expected boolean result");
+                    setError(result, "where/having predicate must evaluate to boolean (true or false)");
                     return;
                 },
                 else => false,
@@ -4705,7 +4705,7 @@ fn materializeRowsMatchingPredicate(
                     return false;
                 },
                 error.TypeMismatch => {
-                    setError(out, "predicate evaluation failed: expected boolean result");
+                    setError(out, "where/having predicate must evaluate to boolean (true or false)");
                     return false;
                 },
                 else => false,
