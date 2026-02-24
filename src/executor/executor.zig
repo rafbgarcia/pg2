@@ -4547,6 +4547,24 @@ fn makeJoinRightRow(id: i64, active: bool) ResultRow {
     return row;
 }
 
+fn expectResultRowsEqual(a: *const QueryResult, b: *const QueryResult) !void {
+    try testing.expectEqual(a.row_count, b.row_count);
+    var row_idx: u16 = 0;
+    while (row_idx < a.row_count) : (row_idx += 1) {
+        const lhs = a.rows[row_idx];
+        const rhs = b.rows[row_idx];
+        try testing.expectEqual(lhs.column_count, rhs.column_count);
+        try testing.expectEqual(lhs.row_id, rhs.row_id);
+        var col_idx: u16 = 0;
+        while (col_idx < lhs.column_count) : (col_idx += 1) {
+            try testing.expectEqual(
+                std.math.Order.eq,
+                row_mod.compareValues(lhs.values[col_idx], rhs.values[col_idx]),
+            );
+        }
+    }
+}
+
 test "execute insert query" {
     var env: ExecTestEnv = undefined;
     try env.init();
@@ -5183,6 +5201,90 @@ test "execute nested relation without child operators uses hash spill strategy w
         result.stats.plan.materialization_mode,
     );
     try testing.expectEqual(@as(u8, 1), result.stats.plan.nested_relation_count);
+}
+
+test "execute nested hash spill with alternating left partitions is deterministic across repeated runs" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const post_model = try env.catalog.addModel("Post");
+    _ = try env.catalog.addColumn(post_model, "id", .i64, false);
+    _ = try env.catalog.addColumn(post_model, "user_id", .i64, false);
+    env.catalog.models[post_model].heap_first_page_id = 126;
+    env.catalog.models[post_model].total_pages = 1;
+    _ = try env.catalog.addAssociation(
+        env.model_id,
+        "posts",
+        AssociationKind.has_many,
+        "Post",
+    );
+    try env.catalog.resolveAssociations();
+
+    const post_page = try env.pool.pin(126);
+    heap_mod.HeapPage.init(post_page);
+    env.pool.unpin(126, true);
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    var user_id: u16 = 1;
+    while (user_id <= 10) : (user_id += 1) {
+        var user_buf: [160]u8 = undefined;
+        const user_src = try std.fmt.bufPrint(
+            user_buf[0..],
+            "User |> insert(id = {d}, name = \"U-{d}\", active = true)",
+            .{ user_id, user_id },
+        );
+        const user_tok = tokenizer_mod.tokenize(user_src);
+        const user_p = parser_mod.parse(&user_tok, user_src);
+        try testing.expect(!user_p.has_error);
+        var user_r = try execute(&env.makeCtx(tx, &snap, &user_p.ast, &user_tok, user_src));
+        defer user_r.deinit();
+        try testing.expect(!user_r.has_error);
+    }
+
+    var post_id: u32 = 1;
+    while (post_id <= 5000) : (post_id += 1) {
+        const owner_id: u32 = ((post_id - 1) % 10) + 1;
+        var post_buf: [128]u8 = undefined;
+        const post_src = try std.fmt.bufPrint(
+            post_buf[0..],
+            "Post |> insert(id = {d}, user_id = {d})",
+            .{ post_id, owner_id },
+        );
+        const post_tok = tokenizer_mod.tokenize(post_src);
+        const post_p = parser_mod.parse(&post_tok, post_src);
+        try testing.expect(!post_p.has_error);
+        var post_r = try execute(&env.makeCtx(tx, &snap, &post_p.ast, &post_tok, post_src));
+        defer post_r.deinit();
+        try testing.expect(!post_r.has_error);
+    }
+
+    const src = "User |> where(id <= 6) |> sort(id asc) { id posts { id } }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+
+    var result_a = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result_a.deinit();
+    try testing.expect(!result_a.has_error);
+    try testing.expectEqual(
+        JoinStrategy.hash_spill,
+        result_a.stats.plan.join_strategy,
+    );
+    try testing.expect(result_a.row_count > 0);
+
+    var result_b = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result_b.deinit();
+    try testing.expect(!result_b.has_error);
+    try testing.expectEqual(
+        JoinStrategy.hash_spill,
+        result_b.stats.plan.join_strategy,
+    );
+
+    try expectResultRowsEqual(&result_a, &result_b);
 }
 
 test "execute multiple nested relations through selection set" {
