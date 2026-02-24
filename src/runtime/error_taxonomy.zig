@@ -86,6 +86,9 @@ pub fn classifyMutation(err: mutation_mod.MutationError) ErrorClass {
         error.UndoLogFull => .resource_exhausted,
         error.ReferentialIntegrityViolation => .fatal,
         error.UnsupportedReferentialAction => .fatal,
+        error.PredicateMustBeBoolean => .fatal,
+        error.PredicateUndefinedParameter => .fatal,
+        error.PredicateClockUnavailable => .fatal,
     };
 }
 

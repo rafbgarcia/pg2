@@ -21,7 +21,7 @@ test "feature parameters fail closed for undefined where binding" {
         "ParamWhere |> where(id == $target_id) { id }",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: undefined parameter in where predicate\n",
+        "ERR query: undefined parameter in where expression\n",
         result,
     );
 }

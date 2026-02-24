@@ -148,6 +148,9 @@ pub const MutationError = error{
     UndoLogFull,
     ReferentialIntegrityViolation,
     UnsupportedReferentialAction,
+    PredicateMustBeBoolean,
+    PredicateUndefinedParameter,
+    PredicateClockUnavailable,
 };
 
 pub const MutationDiagnosticCode = enum {
@@ -1221,9 +1224,9 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                     null,
                     &local_eval_ctx,
                 ) catch |e| switch (e) {
-                    error.TypeMismatch => return e,
-                    error.UndefinedParameter => return e,
-                    error.ClockUnavailable => return e,
+                    error.TypeMismatch => return error.PredicateMustBeBoolean,
+                    error.UndefinedParameter => return error.PredicateUndefinedParameter,
+                    error.ClockUnavailable => return error.PredicateClockUnavailable,
                     else => continue,
                 };
                 if (!matches) continue;
@@ -1479,9 +1482,9 @@ pub fn executeDeleteWithReturningAndParameters(
                     null,
                     &local_eval_ctx,
                 ) catch |e| switch (e) {
-                    error.TypeMismatch => return e,
-                    error.UndefinedParameter => return e,
-                    error.ClockUnavailable => return e,
+                    error.TypeMismatch => return error.PredicateMustBeBoolean,
+                    error.UndefinedParameter => return error.PredicateUndefinedParameter,
+                    error.ClockUnavailable => return error.PredicateClockUnavailable,
                     else => continue,
                 };
                 if (!matches) continue;

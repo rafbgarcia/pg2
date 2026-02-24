@@ -1635,15 +1635,24 @@ fn rewriteCollectorForPostOps(
                         &exec_eval.eval_ctx,
                     ) catch |err| switch (err) {
                         error.UndefinedParameter => {
-                            setError(result, "undefined parameter in where predicate");
+                            setPredicateUndefinedParameterError(result, switch (stage.kind) {
+                                .having_filter => "having",
+                                else => "where",
+                            });
                             return false;
                         },
                         error.ClockUnavailable => {
-                            setError(result, "clock unavailable in where predicate");
+                            setPredicateClockUnavailableError(result, switch (stage.kind) {
+                                .having_filter => "having",
+                                else => "where",
+                            });
                             return false;
                         },
                         error.TypeMismatch => {
-                            setError(result, "where/having predicate must evaluate to boolean (true or false)");
+                            setPredicateMustBeBooleanError(result, switch (stage.kind) {
+                                .having_filter => "having",
+                                else => "where",
+                            });
                             return false;
                         },
                         else => false,
@@ -4248,6 +4257,10 @@ fn applyWhereFilter(
     string_arena: *scan_mod.StringArena,
 ) void {
     const node = ctx.ast.getNode(where_node);
+    const predicate_scope: []const u8 = switch (node.tag) {
+        .op_having => "having",
+        else => "where",
+    };
     const predicate = node.data.unary;
     if (predicate == null_node) return;
 
@@ -4268,15 +4281,15 @@ fn applyWhereFilter(
                 &exec_eval.eval_ctx,
             ) catch |err| switch (err) {
                 error.UndefinedParameter => {
-                    setError(result, "undefined parameter in where predicate");
+                    setPredicateUndefinedParameterError(result, predicate_scope);
                     return;
                 },
                 error.ClockUnavailable => {
-                    setError(result, "clock unavailable in where predicate");
+                    setPredicateClockUnavailableError(result, predicate_scope);
                     return;
                 },
                 error.TypeMismatch => {
-                    setError(result, "where/having predicate must evaluate to boolean (true or false)");
+                    setPredicateMustBeBooleanError(result, predicate_scope);
                     return;
                 },
                 else => false,
@@ -4293,15 +4306,15 @@ fn applyWhereFilter(
                 &exec_eval.eval_ctx,
             ) catch |err| switch (err) {
                 error.UndefinedParameter => {
-                    setError(result, "undefined parameter in where predicate");
+                    setPredicateUndefinedParameterError(result, predicate_scope);
                     return;
                 },
                 error.ClockUnavailable => {
-                    setError(result, "clock unavailable in where predicate");
+                    setPredicateClockUnavailableError(result, predicate_scope);
                     return;
                 },
                 error.TypeMismatch => {
-                    setError(result, "where/having predicate must evaluate to boolean (true or false)");
+                    setPredicateMustBeBooleanError(result, predicate_scope);
                     return;
                 },
                 else => false,
@@ -4320,6 +4333,45 @@ fn applyWhereFilter(
     }
     result.row_count = write_idx;
     std.debug.assert(result.row_count <= original_count);
+}
+
+fn setPredicateMustBeBooleanError(result: *QueryResult, scope: []const u8) void {
+    var msg_buf: [96]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        msg_buf[0..],
+        "{s} expression must evaluate to boolean",
+        .{scope},
+    ) catch {
+        setError(result, "predicate expression must evaluate to boolean");
+        return;
+    };
+    setError(result, msg);
+}
+
+fn setPredicateUndefinedParameterError(result: *QueryResult, scope: []const u8) void {
+    var msg_buf: [96]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        msg_buf[0..],
+        "undefined parameter in {s} expression",
+        .{scope},
+    ) catch {
+        setError(result, "undefined parameter in predicate expression");
+        return;
+    };
+    setError(result, msg);
+}
+
+fn setPredicateClockUnavailableError(result: *QueryResult, scope: []const u8) void {
+    var msg_buf: [96]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        msg_buf[0..],
+        "clock unavailable in {s} expression",
+        .{scope},
+    ) catch {
+        setError(result, "clock unavailable in predicate expression");
+        return;
+    };
+    setError(result, msg);
 }
 
 /// Bundles a ParameterResolver and EvalContext derived from an ExecContext.
@@ -4588,6 +4640,21 @@ fn executeMutation(
                 &diagnostic,
                 &exec_eval.eval_ctx,
             ) catch |err| {
+                switch (err) {
+                    error.PredicateMustBeBoolean => {
+                        setPredicateMustBeBooleanError(result, "where");
+                        return;
+                    },
+                    error.PredicateUndefinedParameter => {
+                        setPredicateUndefinedParameterError(result, "where");
+                        return;
+                    },
+                    error.PredicateClockUnavailable => {
+                        setPredicateClockUnavailableError(result, "where");
+                        return;
+                    },
+                    else => {},
+                }
                 setMutationBoundaryError(result, ctx, .update_op, err, &diagnostic);
                 return;
             };
@@ -4624,6 +4691,21 @@ fn executeMutation(
                 capture,
                 &exec_eval.eval_ctx,
             ) catch |err| {
+                switch (err) {
+                    error.PredicateMustBeBoolean => {
+                        setPredicateMustBeBooleanError(result, "where");
+                        return;
+                    },
+                    error.PredicateUndefinedParameter => {
+                        setPredicateUndefinedParameterError(result, "where");
+                        return;
+                    },
+                    error.PredicateClockUnavailable => {
+                        setPredicateClockUnavailableError(result, "where");
+                        return;
+                    },
+                    else => {},
+                }
                 setBoundaryError(
                     result,
                     "delete failed",
@@ -4697,15 +4779,15 @@ fn materializeRowsMatchingPredicate(
                 &exec_eval.eval_ctx,
             ) catch |err| switch (err) {
                 error.UndefinedParameter => {
-                    setError(out, "undefined parameter in predicate");
+                    setPredicateUndefinedParameterError(out, "where");
                     return false;
                 },
                 error.ClockUnavailable => {
-                    setError(out, "clock unavailable in predicate");
+                    setPredicateClockUnavailableError(out, "where");
                     return false;
                 },
                 error.TypeMismatch => {
-                    setError(out, "where/having predicate must evaluate to boolean (true or false)");
+                    setPredicateMustBeBooleanError(out, "where");
                     return false;
                 },
                 else => false,
@@ -5327,7 +5409,7 @@ test "execute where filter fails closed on undefined parameter" {
 
     try testing.expect(result.has_error);
     const msg = result.getError().?;
-    try testing.expect(std.mem.indexOf(u8, msg, "undefined parameter in where predicate") != null);
+    try testing.expect(std.mem.indexOf(u8, msg, "undefined parameter in where expression") != null);
 }
 
 test "execute limit" {

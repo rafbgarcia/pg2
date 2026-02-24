@@ -180,7 +180,7 @@ test "feature delete where predicate fails closed for non-boolean outputs" {
 
     var result = try executor.run("DeleteWhereTypeMismatch |> where(base + bonus) |> delete {}");
     try std.testing.expectEqualStrings(
-        "ERR query: delete failed; class=fatal; code=TypeMismatch\n",
+        "ERR query: where expression must evaluate to boolean\n",
         result,
     );
 

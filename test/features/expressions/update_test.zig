@@ -218,7 +218,7 @@ test "feature update where predicate fails closed for non-boolean outputs" {
         "UpdateWhereTypeMismatch |> where(base + bonus) |> update(flag = true) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: update failed; class=fatal; code=TypeMismatch\n",
+        "ERR query: where expression must evaluate to boolean\n",
         result,
     );
 

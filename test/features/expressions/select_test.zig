@@ -376,7 +376,7 @@ test "feature nested child where fails closed for non-boolean predicate outputs"
         "User |> sort(id asc) { name posts |> where(id + user_id) { id } }",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: where/having predicate must evaluate to boolean (true or false)\n",
+        "ERR query: where expression must evaluate to boolean\n",
         result,
     );
 }
@@ -407,7 +407,7 @@ test "feature nested child having fails closed for non-boolean predicate outputs
         "User |> sort(id asc) { name posts |> having(id + user_id) { id } }",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: where/having predicate must evaluate to boolean (true or false)\n",
+        "ERR query: having expression must evaluate to boolean\n",
         result,
     );
 }

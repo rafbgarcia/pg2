@@ -104,7 +104,7 @@ test "feature having fails closed for non-boolean predicate outputs" {
         "HavingTypeMismatch |> group(status) |> having(sum(points)) { status }",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: where/having predicate must evaluate to boolean (true or false)\n",
+        "ERR query: having expression must evaluate to boolean\n",
         result,
     );
 }
