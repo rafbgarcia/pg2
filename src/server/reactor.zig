@@ -418,11 +418,6 @@ pub fn ServerReactor(
 
                 worker.job_session_id = @intCast(i);
                 worker.job_request_len = slot.request_len;
-                worker.has_job = true;
-                worker.running = true;
-                worker.cond.signal();
-                worker.mutex.unlock();
-
                 self.workers_busy += 1;
                 self.requests_dispatched_total += 1;
                 const wait_ticks = self.clock.now() - slot.enqueue_tick;
@@ -433,6 +428,10 @@ pub fn ServerReactor(
                     self.max_pin_wait_ticks = wait_ticks;
                 }
                 worker.job_runtime_inspect_stats = self.stats();
+                worker.has_job = true;
+                worker.running = true;
+                worker.cond.signal();
+                worker.mutex.unlock();
                 return true;
             }
         }
