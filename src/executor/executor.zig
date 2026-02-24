@@ -2299,6 +2299,85 @@ fn setNestedHashPartitionError(
     });
 }
 
+const RightPartitionHashCacheState = struct {
+    partition: ?u8 = null,
+    valid: bool = false,
+    index: LeftHashIndex = undefined,
+};
+
+fn prepareRightPartitionHashCache(
+    result: *QueryResult,
+    temp_mgr: *TempStorageManager,
+    descriptor: *const hash_join_mod.PartitionSpillDescriptor,
+    join: JoinDescriptor,
+    caps: *const capacity_mod.OperatorCapacities,
+    partition: u8,
+    cache_rows: []ResultRow,
+    cache_arena: *scan_mod.StringArena,
+    state: *RightPartitionHashCacheState,
+) bool {
+    if (state.partition != null and state.partition.? == partition) {
+        return true;
+    }
+    state.partition = partition;
+    state.valid = false;
+
+    if (descriptor.partition_row_counts[partition] == 0) return true;
+    if (descriptor.partition_row_counts[partition] > cache_rows.len) return true;
+
+    var partition_iter = hash_join_mod.PartitionRowIterator.init(
+        temp_mgr,
+        descriptor,
+        partition,
+    ) catch |err| {
+        setNestedHashPartitionError(result, err);
+        return false;
+    };
+
+    cache_arena.reset();
+    var decode_arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
+    var decode_arena = scan_mod.StringArena.init(&decode_arena_buf);
+    var decoded = ResultRow.init();
+    var cached_count: u16 = 0;
+    while (true) {
+        decode_arena.reset();
+        const has_row = partition_iter.next(&decoded, &decode_arena) catch |err| {
+            setNestedHashPartitionError(result, err);
+            return false;
+        };
+        if (!has_row) break;
+        if (cached_count >= cache_rows.len) {
+            state.valid = false;
+            return true;
+        }
+        copyNestedMatchRowIntoArena(
+            &decoded,
+            &cache_rows[cached_count],
+            cache_arena,
+        ) catch {
+            state.valid = false;
+            return true;
+        };
+        cached_count += 1;
+    }
+
+    if (cached_count == 0) return true;
+    const cache_index = LeftHashIndex.init(
+        cache_rows[0..cached_count],
+        .{
+            .left_key_index = join.left_key_index,
+            .right_key_index = join.right_key_index,
+        },
+        caps,
+    ) catch {
+        state.valid = false;
+        return true;
+    };
+    state.index = cache_index;
+    state.valid = true;
+    return true;
+}
+
 fn tryApplyNestedSelectionHashJoinFlatNoOps(
     ctx: *const ExecContext,
     result: *QueryResult,
@@ -2401,6 +2480,8 @@ fn tryApplyNestedSelectionHashJoinFlatNoOps(
         var output_count: u16 = 0;
         var iter_arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
         var iter_arena = scan_mod.StringArena.init(&iter_arena_buf);
+        var cache_arena = scan_mod.StringArena.init(ctx.nested_match_arena_bytes);
+        var right_cache = RightPartitionHashCacheState{};
         var right_row = ResultRow.init();
         for (left_copy[0..left_count]) |left_row| {
             if (join.left_key_index >= left_row.column_count) {
@@ -2423,55 +2504,104 @@ fn tryApplyNestedSelectionHashJoinFlatNoOps(
 
             var matched = false;
             if (descriptor.partition_row_counts[partition] > 0) {
-                var partition_iter = hash_join_mod.PartitionRowIterator.init(
+                if (!prepareRightPartitionHashCache(
+                    result,
                     &temp_mgr,
                     &descriptor,
+                    join,
+                    caps,
                     partition,
-                ) catch |err| {
-                    setNestedHashPartitionError(result, err);
-                    return .failed;
-                };
-                while (true) {
-                    iter_arena.reset();
-                    const has_right = partition_iter.next(&right_row, &iter_arena) catch |err| {
+                    ctx.nested_rows,
+                    &cache_arena,
+                    &right_cache,
+                )) return .failed;
+                if (right_cache.valid) {
+                    var matches = right_cache.index.matchIterator(
+                        left_row.values[join.left_key_index],
+                    );
+                    while (matches.next()) |cached_right| {
+                        matched = true;
+                        if (@as(usize, output_count) >= caps.join_output_rows) {
+                            setError(result, "join output row capacity exceeded");
+                            return .failed;
+                        }
+                        const total_columns = @as(usize, left_row.column_count) +
+                            @as(usize, cached_right.column_count);
+                        if (total_columns > scan_mod.max_columns) {
+                            setError(result, "join column capacity exceeded");
+                            return .failed;
+                        }
+                        var out = ResultRow.init();
+                        out.column_count = @intCast(total_columns);
+                        out.row_id = left_row.row_id;
+                        @memcpy(
+                            out.values[0..left_row.column_count],
+                            left_row.values[0..left_row.column_count],
+                        );
+                        var nested_col: u16 = 0;
+                        while (nested_col < cached_right.column_count) : (nested_col += 1) {
+                            out.values[left_row.column_count + nested_col] = copyNestedValueIntoArena(
+                                cached_right.values[nested_col],
+                                string_arena,
+                            ) catch {
+                                setError(result, "nested relation output string arena exhausted");
+                                return .failed;
+                            };
+                        }
+                        result.rows[output_count] = out;
+                        output_count += 1;
+                    }
+                } else {
+                    var partition_iter = hash_join_mod.PartitionRowIterator.init(
+                        &temp_mgr,
+                        &descriptor,
+                        partition,
+                    ) catch |err| {
                         setNestedHashPartitionError(result, err);
                         return .failed;
                     };
-                    if (!has_right) break;
-                    if (row_mod.compareValues(
-                        left_row.values[join.left_key_index],
-                        right_row.values[join.right_key_index],
-                    ) != .eq) continue;
-                    matched = true;
-                    if (@as(usize, output_count) >= caps.join_output_rows) {
-                        setError(result, "join output row capacity exceeded");
-                        return .failed;
-                    }
-                    const total_columns = @as(usize, left_row.column_count) +
-                        @as(usize, right_row.column_count);
-                    if (total_columns > scan_mod.max_columns) {
-                        setError(result, "join column capacity exceeded");
-                        return .failed;
-                    }
-                    var out = ResultRow.init();
-                    out.column_count = @intCast(total_columns);
-                    out.row_id = left_row.row_id;
-                    @memcpy(
-                        out.values[0..left_row.column_count],
-                        left_row.values[0..left_row.column_count],
-                    );
-                    var nested_col: u16 = 0;
-                    while (nested_col < right_row.column_count) : (nested_col += 1) {
-                        out.values[left_row.column_count + nested_col] = copyNestedValueIntoArena(
-                            right_row.values[nested_col],
-                            string_arena,
-                        ) catch {
-                            setError(result, "nested relation output string arena exhausted");
+                    while (true) {
+                        iter_arena.reset();
+                        const has_right = partition_iter.next(&right_row, &iter_arena) catch |err| {
+                            setNestedHashPartitionError(result, err);
                             return .failed;
                         };
+                        if (!has_right) break;
+                        if (row_mod.compareValues(
+                            left_row.values[join.left_key_index],
+                            right_row.values[join.right_key_index],
+                        ) != .eq) continue;
+                        matched = true;
+                        if (@as(usize, output_count) >= caps.join_output_rows) {
+                            setError(result, "join output row capacity exceeded");
+                            return .failed;
+                        }
+                        const total_columns = @as(usize, left_row.column_count) +
+                            @as(usize, right_row.column_count);
+                        if (total_columns > scan_mod.max_columns) {
+                            setError(result, "join column capacity exceeded");
+                            return .failed;
+                        }
+                        var out = ResultRow.init();
+                        out.column_count = @intCast(total_columns);
+                        out.row_id = left_row.row_id;
+                        @memcpy(
+                            out.values[0..left_row.column_count],
+                            left_row.values[0..left_row.column_count],
+                        );
+                        var nested_col: u16 = 0;
+                        while (nested_col < right_row.column_count) : (nested_col += 1) {
+                            out.values[left_row.column_count + nested_col] = copyNestedValueIntoArena(
+                                right_row.values[nested_col],
+                                string_arena,
+                            ) catch {
+                                setError(result, "nested relation output string arena exhausted");
+                                return .failed;
+                            };
+                        }
+                        result.rows[output_count] = out;
+                        output_count += 1;
                     }
-                    result.rows[output_count] = out;
-                    output_count += 1;
                 }
             }
             if (!matched) {
@@ -2627,6 +2757,8 @@ fn tryApplyNestedSelectionHashJoinCollectorNoOps(
         var left_row = ResultRow.init();
         var iter_arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
         var iter_arena = scan_mod.StringArena.init(&iter_arena_buf);
+        var cache_arena = scan_mod.StringArena.init(ctx.nested_match_arena_bytes);
+        var right_cache = RightPartitionHashCacheState{};
         var right_row = ResultRow.init();
         var skip = result.collector_output_offset;
         var remaining = result.collector_output_count;
@@ -2658,37 +2790,68 @@ fn tryApplyNestedSelectionHashJoinCollectorNoOps(
 
             var matched = false;
             if (descriptor.partition_row_counts[partition] > 0) {
-                var partition_iter = hash_join_mod.PartitionRowIterator.init(
+                if (!prepareRightPartitionHashCache(
+                    result,
                     &temp_mgr,
                     &descriptor,
+                    join,
+                    caps,
                     partition,
-                ) catch |err| {
-                    setNestedHashPartitionError(result, err);
-                    return .failed;
-                };
-                while (true) {
-                    iter_arena.reset();
-                    const has_right = partition_iter.next(&right_row, &iter_arena) catch |err| {
+                    ctx.nested_rows,
+                    &cache_arena,
+                    &right_cache,
+                )) return .failed;
+                if (right_cache.valid) {
+                    var matches = right_cache.index.matchIterator(
+                        left_row.values[join.left_key_index],
+                    );
+                    while (matches.next()) |cached_right| {
+                        matched = true;
+                        if (!appendNestedCollectorOutputRow(
+                            result,
+                            collector,
+                            &writer,
+                            &output_page_ids,
+                            &output_page_count,
+                            &output_rows,
+                            &left_row,
+                            cached_right,
+                            target_schema.column_count,
+                        )) return .failed;
+                    }
+                } else {
+                    var partition_iter = hash_join_mod.PartitionRowIterator.init(
+                        &temp_mgr,
+                        &descriptor,
+                        partition,
+                    ) catch |err| {
                         setNestedHashPartitionError(result, err);
                         return .failed;
                     };
-                    if (!has_right) break;
-                    if (row_mod.compareValues(
-                        left_row.values[join.left_key_index],
-                        right_row.values[join.right_key_index],
-                    ) != .eq) continue;
-                    matched = true;
-                    if (!appendNestedCollectorOutputRow(
-                        result,
-                        collector,
-                        &writer,
-                        &output_page_ids,
-                        &output_page_count,
-                        &output_rows,
-                        &left_row,
-                        &right_row,
-                        target_schema.column_count,
-                    )) return .failed;
+                    while (true) {
+                        iter_arena.reset();
+                        const has_right = partition_iter.next(&right_row, &iter_arena) catch |err| {
+                            setNestedHashPartitionError(result, err);
+                            return .failed;
+                        };
+                        if (!has_right) break;
+                        if (row_mod.compareValues(
+                            left_row.values[join.left_key_index],
+                            right_row.values[join.right_key_index],
+                        ) != .eq) continue;
+                        matched = true;
+                        if (!appendNestedCollectorOutputRow(
+                            result,
+                            collector,
+                            &writer,
+                            &output_page_ids,
+                            &output_page_count,
+                            &output_rows,
+                            &left_row,
+                            &right_row,
+                            target_schema.column_count,
+                        )) return .failed;
+                    }
                 }
             }
             if (!matched) {
