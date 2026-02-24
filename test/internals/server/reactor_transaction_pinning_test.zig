@@ -6,6 +6,7 @@ const bootstrap_mod = pg2.runtime.bootstrap;
 const catalog_mod = pg2.catalog.meta;
 const io_mod = pg2.storage.io;
 const reactor_mod = pg2.server.reactor;
+const diagnostics_mod = pg2.server.diagnostics;
 const session_mod = pg2.server.session;
 const pool_mod = pg2.server.pool;
 const transport_mod = pg2.server.transport;
@@ -13,6 +14,7 @@ const transport_mod = pg2.server.transport;
 const Acceptor = transport_mod.Acceptor;
 const Connection = transport_mod.Connection;
 const DispatchResult = reactor_mod.Dispatcher.DispatchResult;
+const RuntimeInspectStats = diagnostics_mod.RuntimeInspectStats;
 const TxId = pg2.mvcc.transaction.TxId;
 
 const ManualClock = struct {
@@ -159,6 +161,7 @@ test "reactor disconnect cleanup rolls back pinned tx and releases slot" {
             ptr: *anyopaque,
             session_id: u16,
             request: []const u8,
+            runtime_inspect_stats: RuntimeInspectStats,
             out: []u8,
         ) session_mod.SessionError!DispatchResult {
             const self: *@This() = @ptrCast(@alignCast(ptr));
@@ -166,6 +169,7 @@ test "reactor disconnect cleanup rolls back pinned tx and releases slot" {
                 self.pool,
                 &self.pin_states[session_id],
                 request,
+                runtime_inspect_stats,
                 out,
             );
             return .{
@@ -281,6 +285,7 @@ test "reactor write failure after COMMIT response does not leak pinned slot" {
             ptr: *anyopaque,
             session_id: u16,
             request: []const u8,
+            runtime_inspect_stats: RuntimeInspectStats,
             out: []u8,
         ) session_mod.SessionError!DispatchResult {
             const self: *@This() = @ptrCast(@alignCast(ptr));
@@ -288,6 +293,7 @@ test "reactor write failure after COMMIT response does not leak pinned slot" {
                 self.pool,
                 &self.pin_states[session_id],
                 request,
+                runtime_inspect_stats,
                 out,
             );
             if (self.pin_states[session_id].active) {
@@ -397,6 +403,7 @@ test "reactor write failure after ROLLBACK response does not leak pinned slot" {
             ptr: *anyopaque,
             session_id: u16,
             request: []const u8,
+            runtime_inspect_stats: RuntimeInspectStats,
             out: []u8,
         ) session_mod.SessionError!DispatchResult {
             const self: *@This() = @ptrCast(@alignCast(ptr));
@@ -404,6 +411,7 @@ test "reactor write failure after ROLLBACK response does not leak pinned slot" {
                 self.pool,
                 &self.pin_states[session_id],
                 request,
+                runtime_inspect_stats,
                 out,
             );
             if (self.pin_states[session_id].active) {

@@ -11,6 +11,7 @@ const runtime_config = @import("pg2").runtime.config;
 const runtime_bootstrap = @import("pg2").runtime.bootstrap;
 const session_mod = @import("pg2").server.session;
 const pool_mod = @import("pg2").server.pool;
+const diagnostics_mod = @import("pg2").server.diagnostics;
 const reactor_mod = @import("pg2").server.reactor;
 const io_uring_transport_mod = @import("pg2").server.io_uring_transport;
 const catalog_mod = @import("pg2").catalog.meta;
@@ -159,6 +160,7 @@ pub fn main() !void {
                 ptr: *anyopaque,
                 session_id: u16,
                 request: []const u8,
+                runtime_inspect_stats: diagnostics_mod.RuntimeInspectStats,
                 out: []u8,
             ) session_mod.SessionError!reactor_mod.Dispatcher.DispatchResult {
                 const self: *@This() = @ptrCast(@alignCast(ptr));
@@ -166,6 +168,7 @@ pub fn main() !void {
                     self.pool,
                     &self.pin_states[session_id],
                     request,
+                    runtime_inspect_stats,
                     out,
                 );
                 return .{

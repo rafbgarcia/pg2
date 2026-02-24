@@ -1,12 +1,14 @@
 //! Bounded server reactor for multiplexed connection progress.
 const std = @import("std");
 const io_mod = @import("../storage/io.zig");
+const diagnostics_mod = @import("diagnostics.zig");
 const session_mod = @import("session.zig");
 const transport_mod = @import("transport.zig");
 
 const Acceptor = transport_mod.Acceptor;
 const Connection = transport_mod.Connection;
 const Clock = io_mod.Clock;
+const RuntimeInspectStats = diagnostics_mod.RuntimeInspectStats;
 
 pub const Dispatcher = struct {
     pub const DispatchResult = struct {
@@ -19,6 +21,7 @@ pub const Dispatcher = struct {
         ctx: *anyopaque,
         session_id: u16,
         request: []const u8,
+        runtime_inspect_stats: RuntimeInspectStats,
         out: []u8,
     ) session_mod.SessionError!DispatchResult,
     cleanupSession: *const fn (ctx: *anyopaque, session_id: u16) void,
@@ -88,6 +91,7 @@ pub fn ServerReactor(
             running: bool = false,
             job_session_id: u16 = 0,
             job_request_len: usize = 0,
+            job_runtime_inspect_stats: RuntimeInspectStats = .{},
             result_session_id: u16 = 0,
             result: WorkerResult = .none,
             request_buf: [request_buf_bytes]u8 = undefined,
@@ -182,19 +186,7 @@ pub fn ServerReactor(
             transport_mod.ConnectionError ||
             error{WorkerStartFailed};
 
-        pub const Stats = struct {
-            queue_depth: usize,
-            workers_busy: usize,
-            pool_pinned: usize,
-            requests_enqueued_total: u64,
-            requests_dispatched_total: u64,
-            requests_completed_total: u64,
-            queue_full_total: u64,
-            queue_timeout_total: u64,
-            max_queue_wait_ticks: u64,
-            max_pin_wait_ticks: u64,
-            max_pin_duration_ticks: u64,
-        };
+        pub const Stats = RuntimeInspectStats;
 
         dispatcher: Dispatcher,
         clock: Clock,
@@ -440,6 +432,7 @@ pub fn ServerReactor(
                 if (slot.pin_active and wait_ticks > self.max_pin_wait_ticks) {
                     self.max_pin_wait_ticks = wait_ticks;
                 }
+                worker.job_runtime_inspect_stats = self.stats();
                 return true;
             }
         }
@@ -562,6 +555,7 @@ pub fn ServerReactor(
                     self.dispatcher.ctx,
                     sid,
                     worker.request_buf[0..request_len],
+                    worker.job_runtime_inspect_stats,
                     worker.response_buf[0..],
                 ) catch |err| {
                     worker.mutex.lock();
@@ -662,6 +656,7 @@ test "reactor tracks two simultaneous sessions and dispatches both requests" {
             ctx_ptr: *anyopaque,
             _: u16,
             _: []const u8,
+            _: RuntimeInspectStats,
             out: []u8,
         ) session_mod.SessionError!Dispatcher.DispatchResult {
             const ctx: *@This() = @ptrCast(@alignCast(ctx_ptr));

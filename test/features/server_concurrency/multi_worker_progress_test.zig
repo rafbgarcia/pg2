@@ -4,6 +4,7 @@ const pg2 = @import("pg2");
 const feature = @import("../test_env_test.zig");
 
 const reactor_mod = pg2.server.reactor;
+const diagnostics_mod = pg2.server.diagnostics;
 const session_mod = pg2.server.session;
 const pool_mod = pg2.server.pool;
 const transport_mod = pg2.server.transport;
@@ -12,6 +13,7 @@ const io_mod = pg2.storage.io;
 const Acceptor = transport_mod.Acceptor;
 const Connection = transport_mod.Connection;
 const DispatchResult = reactor_mod.Dispatcher.DispatchResult;
+const RuntimeInspectStats = diagnostics_mod.RuntimeInspectStats;
 
 const request_a = "ConcUser |> where(id == 1) { id name }";
 const request_b = "ConcUser |> where(id == 2) { id name }";
@@ -128,6 +130,7 @@ const GatedSessionDispatch = struct {
         ctx_ptr: *anyopaque,
         session_id: u16,
         request: []const u8,
+        runtime_inspect_stats: RuntimeInspectStats,
         out: []u8,
     ) session_mod.SessionError!DispatchResult {
         const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
@@ -146,6 +149,7 @@ const GatedSessionDispatch = struct {
             self.pool,
             &self.pin_states[session_id],
             request,
+            runtime_inspect_stats,
             out,
         );
 

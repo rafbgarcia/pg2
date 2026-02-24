@@ -4,6 +4,7 @@ const pg2 = @import("pg2");
 const feature = @import("../test_env_test.zig");
 
 const reactor_mod = pg2.server.reactor;
+const diagnostics_mod = pg2.server.diagnostics;
 const session_mod = pg2.server.session;
 const pool_mod = pg2.server.pool;
 const transport_mod = pg2.server.transport;
@@ -12,6 +13,7 @@ const io_mod = pg2.storage.io;
 const Acceptor = transport_mod.Acceptor;
 const Connection = transport_mod.Connection;
 const DispatchResult = reactor_mod.Dispatcher.DispatchResult;
+const RuntimeInspectStats = diagnostics_mod.RuntimeInspectStats;
 
 const request_a_begin = "BEGIN";
 const request_a_insert = "TxUser |> insert(id = 3, name = \"Cara\") {}";
@@ -118,7 +120,7 @@ const TestAcceptor = struct {
 const GatedTxDispatch = struct {
     session: *session_mod.Session,
     pool: *pool_mod.ConnectionPool,
-    pin_states: [3]session_mod.SessionPinState = [_]session_mod.SessionPinState{.{}} ** 3,
+    pin_states: [5]session_mod.SessionPinState = [_]session_mod.SessionPinState{.{}} ** 5,
     gate_mutex: std.Thread.Mutex = .{},
     gate_cond: std.Thread.Condition = .{},
     unblock_b: bool = false,
@@ -127,6 +129,7 @@ const GatedTxDispatch = struct {
         ptr: *anyopaque,
         session_id: u16,
         request: []const u8,
+        runtime_inspect_stats: RuntimeInspectStats,
         out: []u8,
     ) session_mod.SessionError!DispatchResult {
         const self: *@This() = @ptrCast(@alignCast(ptr));
@@ -141,6 +144,7 @@ const GatedTxDispatch = struct {
             self.pool,
             &self.pin_states[session_id],
             request,
+            runtime_inspect_stats,
             out,
         );
         return .{

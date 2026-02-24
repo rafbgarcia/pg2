@@ -22,6 +22,7 @@ fn runWithBuffer(executor: *TestExecutor, request: []const u8, buf: []u8) ![]con
         &executor.pool,
         &pool_conn,
         request,
+        null,
         buf,
     );
 

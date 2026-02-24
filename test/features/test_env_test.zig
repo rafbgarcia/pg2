@@ -115,6 +115,7 @@ pub const TestExecutor = struct {
             &self.pool,
             &pool_conn,
             request,
+            null,
             self.response_buf[0..],
         );
 

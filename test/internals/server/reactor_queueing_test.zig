@@ -3,6 +3,7 @@ const std = @import("std");
 const pg2 = @import("pg2");
 
 const reactor_mod = pg2.server.reactor;
+const diagnostics_mod = pg2.server.diagnostics;
 const session_mod = pg2.server.session;
 const transport_mod = pg2.server.transport;
 const io_mod = pg2.storage.io;
@@ -10,6 +11,7 @@ const io_mod = pg2.storage.io;
 const Acceptor = transport_mod.Acceptor;
 const Connection = transport_mod.Connection;
 const DispatchResult = reactor_mod.Dispatcher.DispatchResult;
+const RuntimeInspectStats = diagnostics_mod.RuntimeInspectStats;
 
 const ManualClock = struct {
     tick: u64 = 0,
@@ -115,6 +117,7 @@ const TraceDispatch = struct {
         ctx_ptr: *anyopaque,
         _: u16,
         request: []const u8,
+        _: RuntimeInspectStats,
         out: []u8,
     ) session_mod.SessionError!DispatchResult {
         const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
@@ -144,6 +147,7 @@ const BlockingDispatch = struct {
         ctx_ptr: *anyopaque,
         _: u16,
         _: []const u8,
+        _: RuntimeInspectStats,
         out: []u8,
     ) session_mod.SessionError!DispatchResult {
         const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
@@ -183,6 +187,7 @@ const MultiGateDispatch = struct {
         ctx_ptr: *anyopaque,
         _: u16,
         request: []const u8,
+        _: RuntimeInspectStats,
         out: []u8,
     ) session_mod.SessionError!DispatchResult {
         const self: *@This() = @ptrCast(@alignCast(ctx_ptr));

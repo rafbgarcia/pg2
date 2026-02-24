@@ -1,5 +1,6 @@
 //! Query result serialization: flat row output, inspect stats, and plan explanation.
 const std = @import("std");
+const diagnostics_mod = @import("diagnostics.zig");
 const session = @import("session.zig");
 const tree_protocol = @import("tree_protocol.zig");
 const exec_mod = @import("../executor/executor.zig");
@@ -17,6 +18,7 @@ const Ast = ast_mod.Ast;
 const ResultRow = scan_mod.ResultRow;
 const StringArena = scan_mod.StringArena;
 const SpillingResultCollector = spill_collector_mod.SpillingResultCollector;
+const RuntimeInspectStats = diagnostics_mod.RuntimeInspectStats;
 const serializeValue = session.serializeValue;
 const buildTreeProjection = tree_protocol.buildTreeProjection;
 const countProtocolRootRows = tree_protocol.countProtocolRootRows;
@@ -27,6 +29,7 @@ pub fn serializeQueryResult(
     result: *const exec_mod.QueryResult,
     catalog: *const Catalog,
     pool_stats: ?PoolStats,
+    runtime_stats: ?RuntimeInspectStats,
     ast: *const Ast,
     tokens: *const tokenizer_mod.TokenizeResult,
     source: []const u8,
@@ -74,6 +77,7 @@ pub fn serializeQueryResult(
                 writer,
                 &result.stats,
                 stats,
+                runtime_stats,
                 catalog.snapshotOverflowReclaimStats(),
             );
         }
@@ -113,6 +117,7 @@ pub fn serializeQueryResult(
             writer,
             &result.stats,
             stats,
+            runtime_stats,
             catalog.snapshotOverflowReclaimStats(),
         );
     }
@@ -128,6 +133,7 @@ fn serializeInspectStats(
     writer: anytype,
     exec_stats: *const exec_mod.ExecStats,
     pool_stats: PoolStats,
+    runtime_stats: ?RuntimeInspectStats,
     overflow_stats: OverflowReclaimStatsSnapshot,
 ) error{ResponseTooLarge}!void {
     const pin_invariant_ok =
@@ -158,6 +164,29 @@ fn serializeInspectStats(
             pin_invariant_ok,
         },
     ) catch return error.ResponseTooLarge;
+    if (runtime_stats) |stats| {
+        const request_invariant_ok =
+            stats.requests_enqueued_total >= stats.requests_dispatched_total and
+            stats.requests_dispatched_total >= stats.requests_completed_total;
+        std.debug.assert(request_invariant_ok);
+        writer.print(
+            "INSPECT runtime queue_depth={d} workers_busy={d} pool_pinned={d} requests_enqueued_total={d} requests_dispatched_total={d} requests_completed_total={d} queue_full_total={d} queue_timeout_total={d} max_queue_wait_ticks={d} max_pin_wait_ticks={d} max_pin_duration_ticks={d} request_invariant_ok={}\n",
+            .{
+                stats.queue_depth,
+                stats.workers_busy,
+                stats.pool_pinned,
+                stats.requests_enqueued_total,
+                stats.requests_dispatched_total,
+                stats.requests_completed_total,
+                stats.queue_full_total,
+                stats.queue_timeout_total,
+                stats.max_queue_wait_ticks,
+                stats.max_pin_wait_ticks,
+                stats.max_pin_duration_ticks,
+                request_invariant_ok,
+            },
+        ) catch return error.ResponseTooLarge;
+    }
     writer.print(
         "INSPECT overflow reclaim_queue_depth={d} reclaim_enqueued_total={d} reclaim_dequeued_total={d} reclaim_chains_total={d} reclaim_pages_total={d} reclaim_failures_total={d}\n",
         .{

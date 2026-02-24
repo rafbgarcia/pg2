@@ -69,6 +69,7 @@ pub const runtime = struct {
 pub const server = struct {
     pub const session = @import("server/session.zig");
     pub const pool = @import("server/pool.zig");
+    pub const diagnostics = @import("server/diagnostics.zig");
     pub const reactor = @import("server/reactor.zig");
     pub const transport = @import("server/transport.zig");
     pub const tcp_transport = @import("server/tcp_transport.zig");
@@ -119,6 +120,7 @@ comptime {
     _ = runtime.static_allocator;
     _ = server.session;
     _ = server.pool;
+    _ = server.diagnostics;
     _ = server.reactor;
     _ = server.transport;
     _ = server.tcp_transport;

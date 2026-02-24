@@ -9,6 +9,7 @@ const std = @import("std");
 const bootstrap_mod = @import("../runtime/bootstrap.zig");
 const request_mod = @import("../runtime/request.zig");
 const pool_mod = @import("pool.zig");
+const diagnostics_mod = @import("diagnostics.zig");
 const parser_mod = @import("../parser/parser.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
 const ast_mod = @import("../parser/ast.zig");
@@ -32,6 +33,7 @@ const Value = row_mod.Value;
 const Acceptor = transport_mod.Acceptor;
 const Connection = transport_mod.Connection;
 const serializeQueryResult = serialization_mod.serializeQueryResult;
+const RuntimeInspectStats = diagnostics_mod.RuntimeInspectStats;
 
 pub const SessionError = request_mod.RequestError || error{ResponseTooLarge};
 pub const ServeError = SessionError ||
@@ -88,6 +90,7 @@ pub const Session = struct {
         pool: *const ConnectionPool,
         pool_conn: *const PoolConn,
         source: []const u8,
+        runtime_inspect_stats: ?RuntimeInspectStats,
         out: []u8,
     ) SessionError!SessionResponse {
         std.debug.assert(source.len > 0);
@@ -150,6 +153,7 @@ pub const Session = struct {
             &result,
             self.catalog,
             pool_stats,
+            runtime_inspect_stats,
             &parsed.ast,
             &tokens,
             source,
@@ -172,6 +176,7 @@ pub const Session = struct {
         pool: *ConnectionPool,
         pin_state: *SessionPinState,
         request: []const u8,
+        runtime_inspect_stats: ?RuntimeInspectStats,
         response_buf: []u8,
     ) SessionError!DispatchResult {
         const control = classifyTxControl(request);
@@ -187,6 +192,7 @@ pub const Session = struct {
                 pool,
                 pin_state,
                 request,
+                runtime_inspect_stats,
                 response_buf,
             );
         }
@@ -194,6 +200,7 @@ pub const Session = struct {
         return self.dispatchAutoCommitRequest(
             pool,
             request,
+            runtime_inspect_stats,
             response_buf,
         );
     }
@@ -210,6 +217,7 @@ pub const Session = struct {
             pool,
             &pin_state,
             request,
+            null,
             response_buf,
         );
         if (pin_state.active) {
@@ -243,6 +251,7 @@ pub const Session = struct {
         self: *Session,
         pool: *ConnectionPool,
         request: []const u8,
+        runtime_inspect_stats: ?RuntimeInspectStats,
         response_buf: []u8,
     ) SessionError!DispatchResult {
         var pool_conn = pool.checkout() catch |err| {
@@ -259,6 +268,7 @@ pub const Session = struct {
             pool,
             &pool_conn,
             request,
+            runtime_inspect_stats,
             response_buf,
         ) catch |err| {
             const class = runtime_errors.classifySessionBoundary(err);
@@ -343,6 +353,7 @@ pub const Session = struct {
         pool: *ConnectionPool,
         pin_state: *SessionPinState,
         request: []const u8,
+        runtime_inspect_stats: ?RuntimeInspectStats,
         response_buf: []u8,
     ) SessionError!DispatchResult {
         std.debug.assert(pin_state.active);
@@ -350,6 +361,7 @@ pub const Session = struct {
             pool,
             &pin_state.pool_conn,
             request,
+            runtime_inspect_stats,
             response_buf,
         ) catch |err| {
             const class = runtime_errors.classifySessionBoundary(err);
@@ -535,6 +547,7 @@ pub const Session = struct {
                 pool,
                 &pin_state,
                 request,
+                null,
                 response_buf,
             );
             try writeResponseRetry(
@@ -750,6 +763,7 @@ test "session request path releases leased query slot after serialization" {
         &pool,
         &first_conn,
         "User {}",
+        null,
         response_buf[0..],
     );
     try pool.checkin(&first_conn);
@@ -764,6 +778,7 @@ test "session request path releases leased query slot after serialization" {
         &pool,
         &second_conn,
         "User {}",
+        null,
         response_buf[0..],
     );
     try pool.checkin(&second_conn);
@@ -802,6 +817,7 @@ test "session request path serializes query results" {
         &pool,
         &insert_conn,
         "User |> insert(id = 1, name = \"Alice\", active = true) {}",
+        null,
         response_buf[0..],
     );
     try pool.checkin(&insert_conn);
@@ -811,6 +827,7 @@ test "session request path serializes query results" {
         &pool,
         &read_conn,
         "User { id name active }",
+        null,
         response_buf[0..],
     );
     try pool.checkin(&read_conn);
@@ -849,6 +866,7 @@ test "session marks mutation requests with had_mutation=true" {
         &pool,
         &conn,
         "User |> insert(id = 1, name = \"Alice\", active = true) {}",
+        null,
         response_buf[0..],
     );
     try pool.checkin(&conn);
@@ -893,6 +911,7 @@ test "session rejects CRUD pipeline without explicit returning block" {
         &pool,
         &conn,
         "User |> where(id == 1)",
+        null,
         response_buf[0..],
     );
     try std.testing.expect(result.is_query_error);
@@ -930,6 +949,7 @@ test "session inspect appends execution and pool stats" {
         &pool,
         &conn,
         "User |> inspect {}",
+        null,
         response_buf[0..],
     );
     try pool.checkin(&conn);
@@ -998,6 +1018,67 @@ test "session inspect appends execution and pool stats" {
             "INSPECT explain sort=not_applied group=not_applied nested_join_breakdown=nested_loop:0,hash_in_memory:0,hash_spill:0\n",
         ) != null,
     );
+}
+
+test "session inspect appends runtime diagnostics when provided" {
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    const backing_memory = try std.testing.allocator.alloc(
+        u8,
+        256 * 1024 * 1024,
+    );
+    defer std.testing.allocator.free(backing_memory);
+
+    var runtime = try BootstrappedRuntime.init(
+        backing_memory,
+        disk.storage(),
+        .{ .max_query_slots = 1 },
+    );
+
+    var catalog = Catalog{};
+    try initUserModel(&catalog, &runtime);
+
+    var session = Session.init(&runtime, &catalog);
+    var pool = ConnectionPool.init(&runtime);
+    var response_buf: [2048]u8 = undefined;
+
+    var conn = try pool.checkout();
+    const runtime_inspect_stats = RuntimeInspectStats{
+        .queue_depth = 2,
+        .workers_busy = 1,
+        .pool_pinned = 1,
+        .requests_enqueued_total = 5,
+        .requests_dispatched_total = 4,
+        .requests_completed_total = 3,
+        .queue_full_total = 1,
+        .queue_timeout_total = 1,
+        .max_queue_wait_ticks = 11,
+        .max_pin_wait_ticks = 7,
+        .max_pin_duration_ticks = 13,
+    };
+    const result = try session.handleRequest(
+        &pool,
+        &conn,
+        "User |> inspect {}",
+        runtime_inspect_stats,
+        response_buf[0..],
+    );
+    try pool.checkin(&conn);
+    try std.testing.expect(!result.is_query_error);
+
+    const output = response_buf[0..result.bytes_written];
+    const runtime_line = extractInspectLine(output, "INSPECT runtime ") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expect(
+        std.mem.indexOf(u8, runtime_line, "request_invariant_ok=true") != null,
+    );
+    const max_pin_wait_ticks = parseInspectU64(runtime_line, "max_pin_wait_ticks") orelse
+        return error.TestUnexpectedResult;
+    const max_pin_duration_ticks = parseInspectU64(runtime_line, "max_pin_duration_ticks") orelse
+        return error.TestUnexpectedResult;
+    try std.testing.expectEqual(@as(u64, 7), max_pin_wait_ticks);
+    try std.testing.expectEqual(@as(u64, 13), max_pin_duration_ticks);
 }
 
 test "session accept loop routes multiple connections through handleRequest" {
