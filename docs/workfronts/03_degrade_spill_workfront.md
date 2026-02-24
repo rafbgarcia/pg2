@@ -31,6 +31,7 @@ Queries must degrade under memory pressure (spill to temp storage) before failin
 - ✅ Nested hash join now applies to child-operator pipelines (`WHERE/GROUP/HAVING/SORT/OFFSET/LIMIT`) for both flat-left and collector-left parent paths.
 - ✅ Stress coverage now includes mixed root spill + nested hash spill under tight temp/storage budgets.
 - ✅ `INSPECT plan`/`INSPECT explain` now expose nested join strategy breakdown counters (`nested_loop`, `hash_in_memory`, `hash_spill`).
+- ✅ Nested selection join execution no longer depends on nested-loop fallback; hash paths are the only execution path for supported nested shapes.
 
 ### Commits Already Landed (latest relevant)
 
@@ -172,7 +173,7 @@ Remove per-parent in-memory subset limits by making nested child pipelines spill
 - ✅ Determinism coverage exists for nested spill + aggregate `HAVING` replay.
 - ✅ Full suite currently passing: `zig build test --summary all`.
 
-## Phase 6: Spill-Aware Hash Join (Cross-Tracked with WF13) 🚧 In Progress
+## Phase 6: Spill-Aware Hash Join (Cross-Tracked with WF13) ✅ Completed (WF03 scope)
 
 ### Status
 
@@ -185,7 +186,7 @@ Remove per-parent in-memory subset limits by making nested child pipelines spill
   - `hash_spill` for oversized right side using deterministic partition spill.
   - Works for both flat-left and collector-left parent paths.
 - Determinism, mixed-spill stress, and inspect strategy-breakdown coverage are landed.
-- Full Phase 6 still has one cleanup slice remaining (see below).
+- WF03 Phase 6 slices are complete; remaining algorithmic refinements continue in WF13.
 - Detailed design work is tracked in `docs/workfronts/13_nested_spill_hash_join_workfront.md`.
 
 ### Completed in Phase 6 so far
@@ -201,7 +202,7 @@ Remove per-parent in-memory subset limits by making nested child pipelines spill
 
 ### Remaining Phase 6 slices
 
-1. Eliminate/retire the remaining nested-loop fallback path in nested selection join execution (or make fallback reachability explicit and bounded), now that hash paths cover supported nested query shapes.
+- None for WF03 scope.
 
 ### WF03 Ownership
 
@@ -210,9 +211,7 @@ Remove per-parent in-memory subset limits by making nested child pipelines spill
 
 ## Immediate Next Step (for fresh Codex session)
 
-1. Implement the final Phase 6 cleanup slice: remove or explicitly hard-bound nested-loop fallback reachability in nested selection join execution.
-2. Keep WF03 guardrails explicit in tests: no cross-parent semantic bleed, no serialized rows outside final descriptor, fail-closed only on hard boundaries.
-3. Keep `INSPECT` strategy-breakdown counters consistent with actual path selection after fallback cleanup.
+1. Continue spill-aware hash-join algorithm refinements in WF13 while preserving WF03 non-negotiables and guardrails.
 
 ## Verification Command
 
