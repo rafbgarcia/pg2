@@ -30,6 +30,7 @@ Remove connection-serial request handling so multiple client connections can mak
     - round-robin fairness across 4 sessions
 - Remaining gaps:
   - `--concurrency` parsing/validation is landed in `src/main.zig` + `src/runtime/config.zig`, but execution remains locked to 1 worker.
+  - Single-worker async dispatch handoff is landed in `src/server/reactor.zig` (reactor no longer executes request bodies inline).
   - No transaction pinning semantics in reactor/session state yet (Phase 4 pending).
 
 ### Commits Landed (Latest First)
@@ -179,7 +180,7 @@ Remove connection-serial request handling so multiple client connections can mak
   - queue timeout at exact configured deadline;
   - fairness across multiple sessions.
 - Metrics emitted: queue depth, total enqueued, total timed out, max wait.
-- **Status:** ✅ completed in working tree (2026-02-24); commit pending.
+- **Status:** ✅ completed by commit `72fc7b6` (2026-02-24).
 
 ## Phase 3: Execution Dispatch
 
@@ -195,7 +196,7 @@ Remove connection-serial request handling so multiple client connections can mak
 - Client B request/response progresses while Client A remains connected and active.
 - In-flight execution cap is enforced and observable in stats.
 - Fail-closed behavior when worker queue is saturated.
-- **Status:** ⏳ partially started (reactor progression exists; `--concurrency` CLI validation landed; worker scaling pending).
+- **Status:** ⏳ partially started (reactor progression + single-worker async handoff + `--concurrency` CLI validation landed; worker scaling to `n > 1` pending).
 
 ## Phase 4: Transaction Pinning Semantics
 
@@ -223,11 +224,11 @@ Remove connection-serial request handling so multiple client connections can mak
 ## Next Commit Slice (Start Here)
 
 1. Begin Phase 3 execution dispatch hardening:
-   - keep worker count locked at 1
-   - prove dispatch queue/worker budget semantics under sustained mixed session load
-2. Introduce `--concurrency <n>` parser/validation wiring (without enabling `n > 1` execution yet).
-3. Add deterministic tests that prove accept/read/write progression continues while a dispatch slot is occupied.
-4. Emit/validate in-flight execution gauges from reactor stats path.
+   - keep worker count locked at 1 (landed)
+   - prove dispatch queue/worker budget semantics under sustained mixed session load (landed by internals tests)
+2. Introduce `--concurrency <n>` parser/validation wiring (landed; currently rejects `n > 1`).
+3. Scale worker budget to honor validated `--concurrency` values > 1 while preserving bounded static allocation.
+4. Extend deterministic tests to cover mixed fast/slow dispatch completion ordering at `n > 1`.
 
 ## Hard-Stop Conditions
 

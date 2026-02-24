@@ -105,18 +105,52 @@ const TestAcceptor = struct {
 };
 
 const TraceDispatch = struct {
-    calls: usize = 0,
+    calls: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    order_len: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    order_mutex: std.Thread.Mutex = .{},
     order: [8]u8 = [_]u8{0} ** 8,
 
     fn dispatch(ctx_ptr: *anyopaque, request: []const u8, out: []u8) session_mod.SessionError!usize {
         const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
         if (request.len < 2) return error.ResponseTooLarge;
-        self.order[self.calls] = request[1];
-        self.calls += 1;
+        self.order_mutex.lock();
+        defer self.order_mutex.unlock();
+        const idx = self.order_len.load(.seq_cst);
+        self.order[idx] = request[1];
+        self.order_len.store(idx + 1, .seq_cst);
+        _ = self.calls.fetchAdd(1, .seq_cst);
         const response = "OK\n";
         if (response.len > out.len) return error.ResponseTooLarge;
         @memcpy(out[0..response.len], response);
         return response.len;
+    }
+};
+
+const BlockingDispatch = struct {
+    calls: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    gate_mutex: std.Thread.Mutex = .{},
+    gate_cond: std.Thread.Condition = .{},
+    release: bool = false,
+
+    fn dispatch(ctx_ptr: *anyopaque, _: []const u8, out: []u8) session_mod.SessionError!usize {
+        const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
+        _ = self.calls.fetchAdd(1, .seq_cst);
+        self.gate_mutex.lock();
+        defer self.gate_mutex.unlock();
+        while (!self.release) {
+            self.gate_cond.wait(&self.gate_mutex);
+        }
+        const response = "OK\n";
+        if (response.len > out.len) return error.ResponseTooLarge;
+        @memcpy(out[0..response.len], response);
+        return response.len;
+    }
+
+    fn unblock(self: *@This()) void {
+        self.gate_mutex.lock();
+        self.release = true;
+        self.gate_cond.signal();
+        self.gate_mutex.unlock();
     }
 };
 
@@ -177,8 +211,14 @@ test "reactor emits QueueTimeout exactly at deadline before dispatch" {
     try reactor.step(acceptor.acceptor());
     clock.advance(1);
     try reactor.step(acceptor.acceptor());
+    var polls: usize = 0;
+    while (polls < 64) : (polls += 1) {
+        try reactor.step(acceptor.acceptor());
+        std.Thread.yield() catch {};
+        if (conn_a.writes == 1 and conn_b.writes == 1 and conn_c.writes == 1) break;
+    }
 
-    try std.testing.expectEqual(@as(usize, 1), dispatch_ctx.calls);
+    try std.testing.expectEqual(@as(usize, 1), dispatch_ctx.calls.load(.seq_cst));
     try std.testing.expectEqual(@as(usize, 1), conn_a.writes);
     try std.testing.expectEqualStrings("OK\n", conn_a.last_response[0..conn_a.last_response_len]);
 
@@ -225,15 +265,67 @@ test "reactor dispatches queued sessions in round-robin fair order" {
     var acceptor = TestAcceptor{ .connections = conns[0..] };
 
     var steps: usize = 0;
-    while (steps < 8) : (steps += 1) {
+    while (steps < 128) : (steps += 1) {
         try reactor.step(acceptor.acceptor());
+        std.Thread.yield() catch {};
         clock.advance(1);
-        if (dispatch_ctx.calls == 4) break;
+        if (dispatch_ctx.calls.load(.seq_cst) == 4) break;
     }
 
-    try std.testing.expectEqual(@as(usize, 4), dispatch_ctx.calls);
+    try std.testing.expectEqual(@as(usize, 4), dispatch_ctx.calls.load(.seq_cst));
     try std.testing.expectEqual(@as(u8, '0'), dispatch_ctx.order[0]);
     try std.testing.expectEqual(@as(u8, '1'), dispatch_ctx.order[1]);
     try std.testing.expectEqual(@as(u8, '2'), dispatch_ctx.order[2]);
     try std.testing.expectEqual(@as(u8, '3'), dispatch_ctx.order[3]);
+}
+
+test "reactor keeps progressing reads timeouts and writes while worker is busy" {
+    const Reactor = reactor_mod.ServerReactor(2, 64, 64);
+
+    var dispatch_ctx = BlockingDispatch{};
+    defer dispatch_ctx.unblock();
+    var clock = ManualClock{};
+    var reactor = Reactor.init(.{
+        .ctx = &dispatch_ctx,
+        .dispatch = &BlockingDispatch.dispatch,
+    }, .{
+        .clock = clock.clock(),
+        .queue_timeout_ticks = 2,
+        .max_queued_requests = 2,
+    });
+    defer reactor.deinit();
+
+    var conn_a = ScriptedConnection{ .request = "a0" };
+    var conn_b = ScriptedConnection{ .request = "b1" };
+    var conns = [_]Connection{ conn_a.connection(), conn_b.connection() };
+    var acceptor = TestAcceptor{ .connections = conns[0..] };
+
+    try reactor.step(acceptor.acceptor());
+    const after_first = reactor.stats();
+    try std.testing.expectEqual(@as(usize, 1), after_first.workers_busy);
+
+    clock.advance(1);
+    try reactor.step(acceptor.acceptor());
+    const before_timeout = reactor.stats();
+    try std.testing.expectEqual(@as(usize, 1), before_timeout.workers_busy);
+
+    clock.advance(1);
+    try reactor.step(acceptor.acceptor());
+    try std.testing.expectEqual(@as(usize, 1), conn_b.writes);
+    try std.testing.expectEqualStrings(
+        "ERR class=overload code=QueueTimeout\n",
+        conn_b.last_response[0..conn_b.last_response_len],
+    );
+
+    dispatch_ctx.unblock();
+    var polls: usize = 0;
+    while (polls < 64) : (polls += 1) {
+        try reactor.step(acceptor.acceptor());
+        std.Thread.yield() catch {};
+        if (conn_a.writes == 1) break;
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), dispatch_ctx.calls.load(.seq_cst));
+    try std.testing.expectEqual(@as(usize, 1), conn_a.writes);
+    try std.testing.expectEqualStrings("OK\n", conn_a.last_response[0..conn_a.last_response_len]);
 }

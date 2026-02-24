@@ -64,6 +64,12 @@ pub fn ServerReactor(
             sequence: u64,
         };
 
+        const WorkerResult = union(enum) {
+            none,
+            ok: usize,
+            err: session_mod.SessionError,
+        };
+
         const RingQueue = struct {
             buf: [max_queue_capacity]QueueEntry = undefined,
             head: usize = 0,
@@ -149,7 +155,8 @@ pub fn ServerReactor(
 
         pub const ReactorError = session_mod.SessionError ||
             transport_mod.AcceptError ||
-            transport_mod.ConnectionError;
+            transport_mod.ConnectionError ||
+            error{WorkerStartFailed};
 
         pub const Stats = struct {
             queue_depth: usize,
@@ -181,6 +188,18 @@ pub fn ServerReactor(
         queue_timeout_total: u64 = 0,
         max_queue_wait_ticks: u64 = 0,
 
+        worker_thread: ?std.Thread = null,
+        worker_mutex: std.Thread.Mutex = .{},
+        worker_cond: std.Thread.Condition = .{},
+        worker_stop: bool = false,
+        worker_has_job: bool = false,
+        worker_job_session_id: u16 = 0,
+        worker_job_request_len: usize = 0,
+        worker_result_session_id: u16 = 0,
+        worker_result: WorkerResult = .none,
+        worker_request_buf: [request_buf_bytes]u8 = undefined,
+        worker_response_buf: [response_buf_bytes]u8 = undefined,
+
         pub fn init(dispatcher: Dispatcher, config: Config) Self {
             std.debug.assert(max_sessions > 0);
             std.debug.assert(max_sessions <= std.math.maxInt(u16));
@@ -197,6 +216,7 @@ pub fn ServerReactor(
         }
 
         pub fn deinit(self: *Self) void {
+            self.stopWorker();
             var i: usize = 0;
             while (i < self.sessions.len) : (i += 1) {
                 if (self.sessions[i].in_use) self.closeSlot(i);
@@ -205,11 +225,13 @@ pub fn ServerReactor(
 
         pub fn step(self: *Self, acceptor: Acceptor) ReactorError!void {
             try self.acceptPending(acceptor);
+            try self.collectWorkerCompletion();
             try self.flushPendingWrites();
             try self.pollReads();
             self.expireTimedOutRequests(self.clock.now());
             self.promoteReadyToDispatch();
-            try self.dispatchOne();
+            try self.startDispatchOne();
+            try self.collectWorkerCompletion();
             try self.flushPendingWrites();
         }
 
@@ -321,7 +343,7 @@ pub fn ServerReactor(
                 const slot = &self.sessions[i];
                 if (!slot.in_use) continue;
                 if (!slot.has_request) continue;
-                if (slot.queue_state == .none) continue;
+                if (slot.queue_state != .ready) continue;
                 if (slot.queue_generation != entry.generation) continue;
 
                 self.queue_timeout_total += 1;
@@ -330,7 +352,7 @@ pub fn ServerReactor(
         }
 
         fn promoteReadyToDispatch(self: *Self) void {
-            while (self.dispatch_queue.len < max_inflight) {
+            while (self.dispatch_queue.len + self.workers_busy < max_inflight) {
                 const entry = self.ready_queue.pop() orelse return;
                 const i: usize = @intCast(entry.session_id);
                 const slot = &self.sessions[i];
@@ -343,7 +365,7 @@ pub fn ServerReactor(
             }
         }
 
-        fn dispatchOne(self: *Self) session_mod.SessionError!void {
+        fn startDispatchOne(self: *Self) ReactorError!void {
             if (self.workers_busy >= max_inflight) return;
             while (true) {
                 const entry = self.dispatch_queue.pop() orelse return;
@@ -353,27 +375,124 @@ pub fn ServerReactor(
                 if (!slot.has_request or slot.has_response) continue;
                 if (slot.queue_state != .dispatch) continue;
 
-                self.workers_busy += 1;
-                defer self.workers_busy -= 1;
+                try self.ensureWorkerStarted();
 
-                const response_len = try self.dispatcher.dispatch(
-                    self.dispatcher.ctx,
+                std.debug.assert(slot.request_len <= self.worker_request_buf.len);
+                @memcpy(
+                    self.worker_request_buf[0..slot.request_len],
                     slot.request_buf[0..slot.request_len],
-                    slot.response_buf[0..],
                 );
-                slot.has_request = false;
-                slot.request_len = 0;
-                slot.has_response = true;
-                slot.response_len = response_len;
-                slot.queue_state = .none;
-                self.requests_dispatched_total += 1;
-                self.requests_completed_total += 1;
 
+                self.worker_mutex.lock();
+                defer self.worker_mutex.unlock();
+                std.debug.assert(!self.worker_has_job);
+                std.debug.assert(self.worker_result == .none);
+                self.worker_job_session_id = @intCast(i);
+                self.worker_job_request_len = slot.request_len;
+                self.worker_has_job = true;
+                self.worker_cond.signal();
+
+                self.workers_busy = 1;
+                self.requests_dispatched_total += 1;
                 const wait_ticks = self.clock.now() - slot.enqueue_tick;
                 if (wait_ticks > self.max_queue_wait_ticks) {
                     self.max_queue_wait_ticks = wait_ticks;
                 }
                 return;
+            }
+        }
+
+        fn collectWorkerCompletion(self: *Self) ReactorError!void {
+            if (self.workers_busy == 0) return;
+
+            self.worker_mutex.lock();
+            defer self.worker_mutex.unlock();
+            const result = self.worker_result;
+            const sid = self.worker_result_session_id;
+            if (result == .none) return;
+            self.worker_result = .none;
+
+            self.workers_busy = 0;
+            const i: usize = @intCast(sid);
+            const slot = &self.sessions[i];
+            if (!slot.in_use or !slot.has_request or slot.queue_state != .dispatch) {
+                return;
+            }
+
+            switch (result) {
+                .ok => |response_len| {
+                    std.debug.assert(response_len <= slot.response_buf.len);
+                    @memcpy(
+                        slot.response_buf[0..response_len],
+                        self.worker_response_buf[0..response_len],
+                    );
+                    slot.has_request = false;
+                    slot.request_len = 0;
+                    slot.has_response = true;
+                    slot.response_len = response_len;
+                    slot.queue_state = .none;
+                    self.requests_completed_total += 1;
+                },
+                .err => |err| {
+                    self.closeSlot(i);
+                    return err;
+                },
+                .none => unreachable,
+            }
+        }
+
+        fn ensureWorkerStarted(self: *Self) error{WorkerStartFailed}!void {
+            if (self.worker_thread != null) return;
+            self.worker_thread = std.Thread.spawn(
+                .{},
+                workerMain,
+                .{self},
+            ) catch return error.WorkerStartFailed;
+        }
+
+        fn stopWorker(self: *Self) void {
+            if (self.worker_thread) |thread| {
+                self.worker_mutex.lock();
+                self.worker_stop = true;
+                self.worker_cond.signal();
+                self.worker_mutex.unlock();
+                thread.join();
+                self.worker_thread = null;
+            }
+        }
+
+        fn workerMain(self: *Self) void {
+            while (true) {
+                self.worker_mutex.lock();
+                while (!self.worker_has_job and !self.worker_stop) {
+                    self.worker_cond.wait(&self.worker_mutex);
+                }
+                if (self.worker_stop and !self.worker_has_job) {
+                    self.worker_mutex.unlock();
+                    return;
+                }
+
+                const sid = self.worker_job_session_id;
+                const request_len = self.worker_job_request_len;
+                self.worker_has_job = false;
+                self.worker_mutex.unlock();
+
+                const result = self.dispatcher.dispatch(
+                    self.dispatcher.ctx,
+                    self.worker_request_buf[0..request_len],
+                    self.worker_response_buf[0..],
+                ) catch |err| {
+                    self.worker_mutex.lock();
+                    self.worker_result_session_id = sid;
+                    self.worker_result = .{ .err = err };
+                    self.worker_mutex.unlock();
+                    continue;
+                };
+
+                self.worker_mutex.lock();
+                self.worker_result_session_id = sid;
+                self.worker_result = .{ .ok = result };
+                self.worker_mutex.unlock();
             }
         }
 
@@ -428,12 +547,12 @@ test "reactor tracks two simultaneous sessions and dispatches both requests" {
     const Reactor = ServerReactor(4, 256, 256);
     const response = "OK\n";
     const DispatchCtx = struct {
-        calls: usize = 0,
+        calls: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
         fn dispatch(ctx_ptr: *anyopaque, _: []const u8, out: []u8) session_mod.SessionError!usize {
             const ctx: *@This() = @ptrCast(@alignCast(ctx_ptr));
             if (response.len > out.len) return error.ResponseTooLarge;
             @memcpy(out[0..response.len], response);
-            ctx.calls += 1;
+            _ = ctx.calls.fetchAdd(1, .seq_cst);
             return response.len;
         }
     };
@@ -579,14 +698,15 @@ test "reactor tracks two simultaneous sessions and dispatches both requests" {
     };
 
     var steps: usize = 0;
-    while (steps < 32) : (steps += 1) {
+    while (steps < 64) : (steps += 1) {
         try reactor.step(acceptor.acceptor());
+        std.Thread.yield() catch {};
         clock.advance(1);
         if (conn_a.writes == 1 and conn_b.writes == 1) break;
     }
 
     try std.testing.expectEqual(@as(usize, 2), reactor.activeSessions());
-    try std.testing.expectEqual(@as(usize, 2), ctx.calls);
+    try std.testing.expectEqual(@as(usize, 2), ctx.calls.load(.seq_cst));
     try std.testing.expectEqual(@as(usize, 1), conn_a.writes);
     try std.testing.expectEqual(@as(usize, 1), conn_b.writes);
     try std.testing.expectEqualStrings("OK\n", conn_a.last_response[0..conn_a.last_response_len]);
