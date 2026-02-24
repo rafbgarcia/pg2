@@ -25,12 +25,12 @@ pub fn ServerReactor(
     return struct {
         const Self = @This();
         const max_queue_capacity = max_sessions;
-        const max_inflight = 1;
 
         pub const Config = struct {
             clock: Clock,
             queue_timeout_ticks: u64 = 30_000_000_000,
             max_queued_requests: usize = max_sessions,
+            max_inflight: usize = 1,
         };
 
         const QueueState = enum(u8) {
@@ -68,6 +68,21 @@ pub fn ServerReactor(
             none,
             ok: usize,
             err: session_mod.SessionError,
+        };
+
+        const WorkerSlot = struct {
+            thread: ?std.Thread = null,
+            mutex: std.Thread.Mutex = .{},
+            cond: std.Thread.Condition = .{},
+            stop: bool = false,
+            has_job: bool = false,
+            running: bool = false,
+            job_session_id: u16 = 0,
+            job_request_len: usize = 0,
+            result_session_id: u16 = 0,
+            result: WorkerResult = .none,
+            request_buf: [request_buf_bytes]u8 = undefined,
+            response_buf: [response_buf_bytes]u8 = undefined,
         };
 
         const RingQueue = struct {
@@ -173,7 +188,9 @@ pub fn ServerReactor(
         clock: Clock,
         queue_timeout_ticks: u64,
         max_queued_requests: usize,
+        max_inflight: usize,
         sessions: [max_sessions]SessionSlot = [_]SessionSlot{.{}} ** max_sessions,
+        workers: [max_sessions]WorkerSlot = [_]WorkerSlot{.{}} ** max_sessions,
         ready_queue: RingQueue = .{},
         dispatch_queue: RingQueue = .{},
         timeout_heap: TimeoutHeap = .{},
@@ -188,18 +205,6 @@ pub fn ServerReactor(
         queue_timeout_total: u64 = 0,
         max_queue_wait_ticks: u64 = 0,
 
-        worker_thread: ?std.Thread = null,
-        worker_mutex: std.Thread.Mutex = .{},
-        worker_cond: std.Thread.Condition = .{},
-        worker_stop: bool = false,
-        worker_has_job: bool = false,
-        worker_job_session_id: u16 = 0,
-        worker_job_request_len: usize = 0,
-        worker_result_session_id: u16 = 0,
-        worker_result: WorkerResult = .none,
-        worker_request_buf: [request_buf_bytes]u8 = undefined,
-        worker_response_buf: [response_buf_bytes]u8 = undefined,
-
         pub fn init(dispatcher: Dispatcher, config: Config) Self {
             std.debug.assert(max_sessions > 0);
             std.debug.assert(max_sessions <= std.math.maxInt(u16));
@@ -207,16 +212,19 @@ pub fn ServerReactor(
             std.debug.assert(response_buf_bytes > 0);
             std.debug.assert(config.max_queued_requests > 0);
             std.debug.assert(config.max_queued_requests <= max_sessions);
+            std.debug.assert(config.max_inflight > 0);
+            std.debug.assert(config.max_inflight <= max_sessions);
             return .{
                 .dispatcher = dispatcher,
                 .clock = config.clock,
                 .queue_timeout_ticks = config.queue_timeout_ticks,
                 .max_queued_requests = config.max_queued_requests,
+                .max_inflight = config.max_inflight,
             };
         }
 
         pub fn deinit(self: *Self) void {
-            self.stopWorker();
+            self.stopWorkers();
             var i: usize = 0;
             while (i < self.sessions.len) : (i += 1) {
                 if (self.sessions[i].in_use) self.closeSlot(i);
@@ -230,7 +238,7 @@ pub fn ServerReactor(
             try self.pollReads();
             self.expireTimedOutRequests(self.clock.now());
             self.promoteReadyToDispatch();
-            try self.startDispatchOne();
+            try self.startDispatchAvailable();
             try self.collectWorkerCompletion();
             try self.flushPendingWrites();
         }
@@ -352,7 +360,7 @@ pub fn ServerReactor(
         }
 
         fn promoteReadyToDispatch(self: *Self) void {
-            while (self.dispatch_queue.len + self.workers_busy < max_inflight) {
+            while (self.dispatch_queue.len + self.workers_busy < self.max_inflight) {
                 const entry = self.ready_queue.pop() orelse return;
                 const i: usize = @intCast(entry.session_id);
                 const slot = &self.sessions[i];
@@ -365,135 +373,177 @@ pub fn ServerReactor(
             }
         }
 
-        fn startDispatchOne(self: *Self) ReactorError!void {
-            if (self.workers_busy >= max_inflight) return;
+        fn startDispatchAvailable(self: *Self) ReactorError!void {
+            while (self.workers_busy < self.max_inflight) {
+                const worker_index = self.findIdleWorker() orelse return;
+                const started = try self.startDispatchOne(worker_index);
+                if (!started) return;
+            }
+        }
+
+        fn startDispatchOne(self: *Self, worker_index: usize) ReactorError!bool {
+            if (self.workers_busy >= self.max_inflight) return false;
             while (true) {
-                const entry = self.dispatch_queue.pop() orelse return;
+                const entry = self.dispatch_queue.pop() orelse return false;
                 const i: usize = @intCast(entry.session_id);
                 const slot = &self.sessions[i];
                 if (!slot.in_use) continue;
                 if (!slot.has_request or slot.has_response) continue;
                 if (slot.queue_state != .dispatch) continue;
 
-                try self.ensureWorkerStarted();
+                try self.ensureWorkerStarted(worker_index);
 
-                std.debug.assert(slot.request_len <= self.worker_request_buf.len);
+                const worker = &self.workers[worker_index];
+                worker.mutex.lock();
+                if (worker.running or worker.has_job or worker.result != .none) {
+                    worker.mutex.unlock();
+                    continue;
+                }
+
+                std.debug.assert(slot.request_len <= worker.request_buf.len);
                 @memcpy(
-                    self.worker_request_buf[0..slot.request_len],
+                    worker.request_buf[0..slot.request_len],
                     slot.request_buf[0..slot.request_len],
                 );
 
-                self.worker_mutex.lock();
-                defer self.worker_mutex.unlock();
-                std.debug.assert(!self.worker_has_job);
-                std.debug.assert(self.worker_result == .none);
-                self.worker_job_session_id = @intCast(i);
-                self.worker_job_request_len = slot.request_len;
-                self.worker_has_job = true;
-                self.worker_cond.signal();
+                worker.job_session_id = @intCast(i);
+                worker.job_request_len = slot.request_len;
+                worker.has_job = true;
+                worker.running = true;
+                worker.cond.signal();
+                worker.mutex.unlock();
 
-                self.workers_busy = 1;
+                self.workers_busy += 1;
                 self.requests_dispatched_total += 1;
                 const wait_ticks = self.clock.now() - slot.enqueue_tick;
                 if (wait_ticks > self.max_queue_wait_ticks) {
                     self.max_queue_wait_ticks = wait_ticks;
                 }
-                return;
+                return true;
             }
         }
 
         fn collectWorkerCompletion(self: *Self) ReactorError!void {
             if (self.workers_busy == 0) return;
 
-            self.worker_mutex.lock();
-            defer self.worker_mutex.unlock();
-            const result = self.worker_result;
-            const sid = self.worker_result_session_id;
-            if (result == .none) return;
-            self.worker_result = .none;
+            var worker_index: usize = 0;
+            while (worker_index < self.max_inflight) : (worker_index += 1) {
+                const worker = &self.workers[worker_index];
+                worker.mutex.lock();
+                const result = worker.result;
+                const sid = worker.result_session_id;
+                if (result == .none) {
+                    worker.mutex.unlock();
+                    continue;
+                }
+                worker.result = .none;
+                worker.mutex.unlock();
 
-            self.workers_busy = 0;
-            const i: usize = @intCast(sid);
-            const slot = &self.sessions[i];
-            if (!slot.in_use or !slot.has_request or slot.queue_state != .dispatch) {
-                return;
-            }
+                std.debug.assert(self.workers_busy > 0);
+                self.workers_busy -= 1;
 
-            switch (result) {
-                .ok => |response_len| {
-                    std.debug.assert(response_len <= slot.response_buf.len);
-                    @memcpy(
-                        slot.response_buf[0..response_len],
-                        self.worker_response_buf[0..response_len],
-                    );
-                    slot.has_request = false;
-                    slot.request_len = 0;
-                    slot.has_response = true;
-                    slot.response_len = response_len;
-                    slot.queue_state = .none;
-                    self.requests_completed_total += 1;
-                },
-                .err => |err| {
-                    self.closeSlot(i);
-                    return err;
-                },
-                .none => unreachable,
+                const i: usize = @intCast(sid);
+                const slot = &self.sessions[i];
+                if (!slot.in_use or !slot.has_request or slot.queue_state != .dispatch) {
+                    continue;
+                }
+
+                switch (result) {
+                    .ok => |response_len| {
+                        std.debug.assert(response_len <= slot.response_buf.len);
+                        @memcpy(
+                            slot.response_buf[0..response_len],
+                            worker.response_buf[0..response_len],
+                        );
+                        slot.has_request = false;
+                        slot.request_len = 0;
+                        slot.has_response = true;
+                        slot.response_len = response_len;
+                        slot.queue_state = .none;
+                        self.requests_completed_total += 1;
+                    },
+                    .err => |err| {
+                        self.closeSlot(i);
+                        return err;
+                    },
+                    .none => unreachable,
+                }
             }
         }
 
-        fn ensureWorkerStarted(self: *Self) error{WorkerStartFailed}!void {
-            if (self.worker_thread != null) return;
-            self.worker_thread = std.Thread.spawn(
+        fn ensureWorkerStarted(self: *Self, worker_index: usize) error{WorkerStartFailed}!void {
+            const worker = &self.workers[worker_index];
+            if (worker.thread != null) return;
+            worker.thread = std.Thread.spawn(
                 .{},
                 workerMain,
-                .{self},
+                .{ self, worker_index },
             ) catch return error.WorkerStartFailed;
         }
 
-        fn stopWorker(self: *Self) void {
-            if (self.worker_thread) |thread| {
-                self.worker_mutex.lock();
-                self.worker_stop = true;
-                self.worker_cond.signal();
-                self.worker_mutex.unlock();
-                thread.join();
-                self.worker_thread = null;
+        fn stopWorkers(self: *Self) void {
+            var i: usize = 0;
+            while (i < self.max_inflight) : (i += 1) {
+                const worker = &self.workers[i];
+                if (worker.thread) |thread| {
+                    worker.mutex.lock();
+                    worker.stop = true;
+                    worker.cond.signal();
+                    worker.mutex.unlock();
+                    thread.join();
+                    worker.thread = null;
+                }
             }
         }
 
-        fn workerMain(self: *Self) void {
+        fn workerMain(self: *Self, worker_index: usize) void {
+            const worker = &self.workers[worker_index];
             while (true) {
-                self.worker_mutex.lock();
-                while (!self.worker_has_job and !self.worker_stop) {
-                    self.worker_cond.wait(&self.worker_mutex);
+                worker.mutex.lock();
+                while (!worker.has_job and !worker.stop) {
+                    worker.cond.wait(&worker.mutex);
                 }
-                if (self.worker_stop and !self.worker_has_job) {
-                    self.worker_mutex.unlock();
+                if (worker.stop and !worker.has_job) {
+                    worker.mutex.unlock();
                     return;
                 }
 
-                const sid = self.worker_job_session_id;
-                const request_len = self.worker_job_request_len;
-                self.worker_has_job = false;
-                self.worker_mutex.unlock();
+                const sid = worker.job_session_id;
+                const request_len = worker.job_request_len;
+                worker.has_job = false;
+                worker.mutex.unlock();
 
                 const result = self.dispatcher.dispatch(
                     self.dispatcher.ctx,
-                    self.worker_request_buf[0..request_len],
-                    self.worker_response_buf[0..],
+                    worker.request_buf[0..request_len],
+                    worker.response_buf[0..],
                 ) catch |err| {
-                    self.worker_mutex.lock();
-                    self.worker_result_session_id = sid;
-                    self.worker_result = .{ .err = err };
-                    self.worker_mutex.unlock();
+                    worker.mutex.lock();
+                    worker.result_session_id = sid;
+                    worker.result = .{ .err = err };
+                    worker.running = false;
+                    worker.mutex.unlock();
                     continue;
                 };
 
-                self.worker_mutex.lock();
-                self.worker_result_session_id = sid;
-                self.worker_result = .{ .ok = result };
-                self.worker_mutex.unlock();
+                worker.mutex.lock();
+                worker.result_session_id = sid;
+                worker.result = .{ .ok = result };
+                worker.running = false;
+                worker.mutex.unlock();
             }
+        }
+
+        fn findIdleWorker(self: *Self) ?usize {
+            var worker_index: usize = 0;
+            while (worker_index < self.max_inflight) : (worker_index += 1) {
+                const worker = &self.workers[worker_index];
+                worker.mutex.lock();
+                const idle = !worker.running and !worker.has_job and worker.result == .none;
+                worker.mutex.unlock();
+                if (idle) return worker_index;
+            }
+            return null;
         }
 
         fn flushPendingWrites(self: *Self) transport_mod.ConnectionError!void {

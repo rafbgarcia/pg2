@@ -29,8 +29,8 @@ Remove connection-serial request handling so multiple client connections can mak
     - exact deadline timeout boundary (`QueueTimeout`)
     - round-robin fairness across 4 sessions
 - Remaining gaps:
-  - `--concurrency` parsing/validation is landed in `src/main.zig` + `src/runtime/config.zig`, but execution remains locked to 1 worker.
-  - Single-worker async dispatch handoff is landed in `src/server/reactor.zig` (reactor no longer executes request bodies inline).
+  - `--concurrency` parser/validation + reactor worker scaling are landed in `src/main.zig` + `src/runtime/config.zig` + `src/server/reactor.zig`.
+  - Deterministic mixed completion ordering coverage for `max_inflight = 2` is landed in `test/internals/server/reactor_queueing_test.zig`.
   - No transaction pinning semantics in reactor/session state yet (Phase 4 pending).
 
 ### Commits Landed (Latest First)
@@ -196,7 +196,7 @@ Remove connection-serial request handling so multiple client connections can mak
 - Client B request/response progresses while Client A remains connected and active.
 - In-flight execution cap is enforced and observable in stats.
 - Fail-closed behavior when worker queue is saturated.
-- **Status:** ⏳ partially started (reactor progression + single-worker async handoff + `--concurrency` CLI validation landed; worker scaling to `n > 1` pending).
+- **Status:** ✅ complete (reactor progression + bounded multi-worker dispatch + `--concurrency` wiring + deterministic multi-worker completion ordering coverage).
 
 ## Phase 4: Transaction Pinning Semantics
 
@@ -223,12 +223,9 @@ Remove connection-serial request handling so multiple client connections can mak
 
 ## Next Commit Slice (Start Here)
 
-1. Begin Phase 3 execution dispatch hardening:
-   - keep worker count locked at 1 (landed)
-   - prove dispatch queue/worker budget semantics under sustained mixed session load (landed by internals tests)
-2. Introduce `--concurrency <n>` parser/validation wiring (landed; currently rejects `n > 1`).
-3. Scale worker budget to honor validated `--concurrency` values > 1 while preserving bounded static allocation.
-4. Extend deterministic tests to cover mixed fast/slow dispatch completion ordering at `n > 1`.
+1. Start Phase 4 transaction pinning semantics in reactor/session boundary.
+2. Add deterministic interleaved transaction tests (BEGIN/COMMIT/ROLLBACK) with queueing and disconnect cleanup.
+3. Surface pin lifecycle observability (`pool_pinned`, pin duration/wait signals).
 
 ## Hard-Stop Conditions
 

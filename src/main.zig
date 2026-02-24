@@ -58,7 +58,7 @@ pub fn main() !void {
                 \\Usage: pg2 [--memory <bytes|MiB|GiB>] [--listen <host:port>] [--concurrency <n>]
                 \\  --memory       Startup memory budget (default: 512MiB)
                 \\  --listen       Start server accept loop (Linux-only target)
-                \\  --concurrency  Requested worker concurrency (currently only 1 is supported)
+                \\  --concurrency  Requested worker concurrency
                 \\
             );
             return;
@@ -111,13 +111,6 @@ pub fn main() !void {
     try stdout.writeAll(msg);
 
     if (listen_addr) |raw_listen_addr| {
-        if (concurrency != 1) {
-            try stdout.writeAll(
-                "startup failed: --concurrency > 1 is not enabled yet; use --concurrency 1\n",
-            );
-            return;
-        }
-
         if (builtin.os.tag != .linux) {
             try stdout.writeAll(
                 "server mode is Linux-only; use Docker to run dev/test on macOS\n",
@@ -183,6 +176,7 @@ pub fn main() !void {
             .dispatch = &DispatchCtx.dispatch,
         }, .{
             .clock = clock.clock(),
+            .max_inflight = concurrency,
         });
         defer reactor.deinit();
 

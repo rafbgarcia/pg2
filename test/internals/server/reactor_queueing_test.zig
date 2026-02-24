@@ -154,6 +154,66 @@ const BlockingDispatch = struct {
     }
 };
 
+const MultiGateDispatch = struct {
+    calls: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+    dispatch_order_len: usize = 0,
+    completion_order_len: usize = 0,
+    dispatch_order: [8]u8 = [_]u8{0} ** 8,
+    completion_order: [8]u8 = [_]u8{0} ** 8,
+    gate_mask: u8 = 0,
+    gate_mutex: std.Thread.Mutex = .{},
+    gate_cond: std.Thread.Condition = .{},
+
+    fn dispatch(ctx_ptr: *anyopaque, request: []const u8, out: []u8) session_mod.SessionError!usize {
+        const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
+        if (request.len < 2) return error.ResponseTooLarge;
+        const tag = request[1];
+        const idx = tagToIndex(tag) catch return error.ResponseTooLarge;
+        const bit = @as(u8, 1) << idx;
+
+        self.gate_mutex.lock();
+        self.dispatch_order[self.dispatch_order_len] = tag;
+        self.dispatch_order_len += 1;
+        _ = self.calls.fetchAdd(1, .seq_cst);
+        while ((self.gate_mask & bit) == 0) {
+            self.gate_cond.wait(&self.gate_mutex);
+        }
+        self.completion_order[self.completion_order_len] = tag;
+        self.completion_order_len += 1;
+        self.gate_mutex.unlock();
+
+        const response = "OK\n";
+        if (response.len > out.len) return error.ResponseTooLarge;
+        @memcpy(out[0..response.len], response);
+        return response.len;
+    }
+
+    fn release(self: *@This(), tag: u8) !void {
+        const idx = try tagToIndex(tag);
+        self.gate_mutex.lock();
+        self.gate_mask |= @as(u8, 1) << idx;
+        self.gate_cond.broadcast();
+        self.gate_mutex.unlock();
+    }
+
+    fn releaseAll(self: *@This()) void {
+        self.gate_mutex.lock();
+        self.gate_mask = std.math.maxInt(u8);
+        self.gate_cond.broadcast();
+        self.gate_mutex.unlock();
+    }
+
+    fn tagToIndex(tag: u8) error{InvalidTag}!u3 {
+        return switch (tag) {
+            '0' => 0,
+            '1' => 1,
+            '2' => 2,
+            '3' => 3,
+            else => error.InvalidTag,
+        };
+    }
+};
+
 test "reactor emits QueueFull when queue admission capacity is saturated" {
     const Reactor = reactor_mod.ServerReactor(3, 64, 64);
 
@@ -212,7 +272,7 @@ test "reactor emits QueueTimeout exactly at deadline before dispatch" {
     clock.advance(1);
     try reactor.step(acceptor.acceptor());
     var polls: usize = 0;
-    while (polls < 64) : (polls += 1) {
+    while (polls < 4096) : (polls += 1) {
         try reactor.step(acceptor.acceptor());
         std.Thread.yield() catch {};
         if (conn_a.writes == 1 and conn_b.writes == 1 and conn_c.writes == 1) break;
@@ -328,4 +388,86 @@ test "reactor keeps progressing reads timeouts and writes while worker is busy" 
     try std.testing.expectEqual(@as(usize, 1), dispatch_ctx.calls.load(.seq_cst));
     try std.testing.expectEqual(@as(usize, 1), conn_a.writes);
     try std.testing.expectEqualStrings("OK\n", conn_a.last_response[0..conn_a.last_response_len]);
+}
+
+test "reactor preserves deterministic mixed completion ordering with max_inflight=2" {
+    const Reactor = reactor_mod.ServerReactor(3, 64, 64);
+
+    var dispatch_ctx = MultiGateDispatch{};
+    defer dispatch_ctx.releaseAll();
+    var clock = ManualClock{};
+    var reactor = Reactor.init(.{
+        .ctx = &dispatch_ctx,
+        .dispatch = &MultiGateDispatch.dispatch,
+    }, .{
+        .clock = clock.clock(),
+        .queue_timeout_ticks = 100,
+        .max_queued_requests = 3,
+        .max_inflight = 2,
+    });
+    defer reactor.deinit();
+
+    var conn_a = ScriptedConnection{ .request = "a0" };
+    var conn_b = ScriptedConnection{ .request = "b1" };
+    var conn_c = ScriptedConnection{ .request = "c2" };
+    var conns = [_]Connection{
+        conn_a.connection(),
+        conn_b.connection(),
+        conn_c.connection(),
+    };
+    var acceptor = TestAcceptor{ .connections = conns[0..] };
+
+    var spins: usize = 0;
+    while (spins < 128) : (spins += 1) {
+        try reactor.step(acceptor.acceptor());
+        std.Thread.yield() catch {};
+        if (dispatch_ctx.calls.load(.seq_cst) == 2) break;
+    }
+
+    const started_stats = reactor.stats();
+    try std.testing.expectEqual(@as(usize, 2), started_stats.workers_busy);
+    try std.testing.expectEqual(@as(usize, 0), conn_a.writes);
+    try std.testing.expectEqual(@as(usize, 0), conn_b.writes);
+    try std.testing.expectEqual(@as(usize, 0), conn_c.writes);
+
+    try dispatch_ctx.release('1');
+
+    spins = 0;
+    while (spins < 128) : (spins += 1) {
+        try reactor.step(acceptor.acceptor());
+        std.Thread.yield() catch {};
+        if (conn_b.writes == 1) break;
+    }
+    try std.testing.expectEqual(@as(usize, 1), conn_b.writes);
+    try std.testing.expectEqual(@as(usize, 0), conn_a.writes);
+    try std.testing.expectEqual(@as(usize, 0), conn_c.writes);
+
+    try dispatch_ctx.release('0');
+    spins = 0;
+    while (spins < 128) : (spins += 1) {
+        try reactor.step(acceptor.acceptor());
+        std.Thread.yield() catch {};
+        if (conn_a.writes == 1 and dispatch_ctx.calls.load(.seq_cst) == 3) break;
+    }
+    try std.testing.expectEqual(@as(usize, 1), conn_a.writes);
+    try std.testing.expectEqual(@as(usize, 0), conn_c.writes);
+
+    try dispatch_ctx.release('2');
+    spins = 0;
+    while (spins < 128) : (spins += 1) {
+        try reactor.step(acceptor.acceptor());
+        std.Thread.yield() catch {};
+        if (conn_c.writes == 1) break;
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), dispatch_ctx.calls.load(.seq_cst));
+    try std.testing.expectEqual(@as(usize, 3), dispatch_ctx.dispatch_order_len);
+    try std.testing.expectEqual(@as(u8, '0'), dispatch_ctx.dispatch_order[0]);
+    try std.testing.expectEqual(@as(u8, '1'), dispatch_ctx.dispatch_order[1]);
+    try std.testing.expectEqual(@as(u8, '2'), dispatch_ctx.dispatch_order[2]);
+
+    try std.testing.expectEqual(@as(usize, 3), dispatch_ctx.completion_order_len);
+    try std.testing.expectEqual(@as(u8, '1'), dispatch_ctx.completion_order[0]);
+    try std.testing.expectEqual(@as(u8, '0'), dispatch_ctx.completion_order[1]);
+    try std.testing.expectEqual(@as(u8, '2'), dispatch_ctx.completion_order[2]);
 }
