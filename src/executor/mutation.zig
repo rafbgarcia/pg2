@@ -1220,7 +1220,12 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                     schema,
                     null,
                     &local_eval_ctx,
-                ) catch continue;
+                ) catch |e| switch (e) {
+                    error.TypeMismatch => return e,
+                    error.UndefinedParameter => return e,
+                    error.ClockUnavailable => return e,
+                    else => continue,
+                };
                 if (!matches) continue;
             }
 
@@ -1473,7 +1478,12 @@ pub fn executeDeleteWithReturningAndParameters(
                     schema,
                     null,
                     &local_eval_ctx,
-                ) catch continue;
+                ) catch |e| switch (e) {
+                    error.TypeMismatch => return e,
+                    error.UndefinedParameter => return e,
+                    error.ClockUnavailable => return e,
+                    else => continue,
+                };
                 if (!matches) continue;
             }
 

@@ -112,7 +112,7 @@ test "feature where fails closed for non-boolean predicate outputs" {
         "WhereFailClosed |> where(base + bonus) |> sort(id asc) { id }",
     );
     try std.testing.expectEqualStrings(
-        "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
+        "ERR query: predicate evaluation failed: expected boolean result\n",
         result,
     );
 }

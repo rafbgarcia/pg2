@@ -1642,6 +1642,10 @@ fn rewriteCollectorForPostOps(
                             setError(result, "clock unavailable in where predicate");
                             return false;
                         },
+                        error.TypeMismatch => {
+                            setError(result, "predicate evaluation failed: expected boolean result");
+                            return false;
+                        },
                         else => false,
                     };
                     if (!matches) keep = false;
@@ -4271,6 +4275,10 @@ fn applyWhereFilter(
                     setError(result, "clock unavailable in where predicate");
                     return;
                 },
+                error.TypeMismatch => {
+                    setError(result, "predicate evaluation failed: expected boolean result");
+                    return;
+                },
                 else => false,
             }
         else
@@ -4290,6 +4298,10 @@ fn applyWhereFilter(
                 },
                 error.ClockUnavailable => {
                     setError(result, "clock unavailable in where predicate");
+                    return;
+                },
+                error.TypeMismatch => {
+                    setError(result, "predicate evaluation failed: expected boolean result");
                     return;
                 },
                 else => false,
@@ -4690,6 +4702,10 @@ fn materializeRowsMatchingPredicate(
                 },
                 error.ClockUnavailable => {
                     setError(out, "clock unavailable in predicate");
+                    return false;
+                },
+                error.TypeMismatch => {
+                    setError(out, "predicate evaluation failed: expected boolean result");
                     return false;
                 },
                 else => false,
