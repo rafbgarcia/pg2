@@ -117,6 +117,6 @@ Turn `--memory` into a planner input that derives runtime capacities automatical
   - valid memory+concurrency starts
   - invalid concurrency for budget fails with clear message.
 
-# Open questions
+# Open questions (non-blocking for Phases 1-3)
 
 - Do we derive the concurrency (number of query executors) based on flag? Or could internal statistics also support this decision? Does the database know better than the user how much concurrency it should have?

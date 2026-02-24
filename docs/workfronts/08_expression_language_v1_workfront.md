@@ -4,8 +4,8 @@
 Deliver production-ready expression semantics for pg2 across parsing, execution, diagnostics, and feature tests.
 
 ## Why
-- Current feature coverage includes only addition in `test/features/expressions/addition_test.zig`.
-- Parser AST supports expression forms that are not fully executed yet.
+- Most expression semantics are now implemented and feature-covered; this workfront remains as a closeout checklist for remaining parity/diagnostic gaps.
+- The remaining risk is incomplete matrix coverage and product-surface decisions (not core parser/evaluator availability).
 - Fresh sessions need a deterministic, itemized backlog they can pick from without rediscovery.
 
 ## Confirmed User-Facing Language Rule (2026-02-21)
@@ -24,12 +24,10 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - Legacy spellings (for example `a and b`, `status not in [...]`) must fail closed as invalid expression shape.
 
 ## Current Gaps Snapshot
-- Expression equality currently uses `=` in parser/evaluator/tests and must be migrated to `==`.
-- Evaluator does not explicitly handle membership function semantics and `expr_parameter`/`expr_list` node semantics in row predicate evaluation paths.
+- Dedicated feature files are still missing for comparison and boolean semantics (`T06`-`T16`) plus null/diagnostic consolidation (`T21`-`T23`).
 - ref `P08-02` `expr_parameter` evaluation now exists in core executor/mutation paths, but there is no end-user request/session transport for passing parameter bindings yet.
   - Current feature tests can assert deterministic undefined-parameter failures, but cannot drive successful bound-parameter flows through the user-facing session API without additional binding-input design.
-- `lower`, `upper`, `trim` are placeholders.
-- No dedicated feature files for most expression capabilities.
+- Product decision `P08-02` is still open and blocks end-to-end successful parameter-binding session coverage (`P08-03`).
 
 ## Scope Boundaries
 - In scope:
@@ -150,7 +148,7 @@ Deliver production-ready expression semantics for pg2 across parsing, execution,
 - [ ] `T10` `test/features/expressions/equality_test.zig` (side note: equality `==` semantics including null comparison behavior)
 - [ ] `T11` `test/features/expressions/inequality_test.zig` (side note: inequality `!=` semantics including null comparison behavior)
 - [ ] `T12` `test/features/expressions/boolean_logic_test.zig` (side note: boolean operator semantics for `!`, `&&`, `||` including short-circuit and null interactions)
-- [ ] `T13` `test/features/expressions/in_test.zig` (includes `!in(value, list)` cases)
+- [x] `T13` `test/features/expressions/in_test.zig` (includes `!in(value, list)` cases)
 - [ ] `T14` `test/features/expressions/logical_not_test.zig` (side note: unary logical negation `!` semantics and parse shape)
 - [ ] `T15` `test/features/expressions/logical_and_test.zig` (side note: conjunction `&&` semantics and parse shape)
 - [ ] `T16` `test/features/expressions/logical_or_test.zig` (side note: disjunction `||` semantics and parse shape)

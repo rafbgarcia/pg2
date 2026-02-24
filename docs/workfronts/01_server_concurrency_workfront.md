@@ -3,51 +3,200 @@
 ## Objective
 Remove connection-serial request handling so multiple client connections can make progress concurrently.
 
+## Session Handoff Snapshot (2026-02-24)
+
+### Current Status
+
+- `src/main.zig` is still connection-serial: after `accept`, it calls `session.serveConnection(...)` and blocks that loop until client disconnect.
+- `Session.serveConnection` is request-serial within a connection and performs checkout/execute/write synchronously.
+- `ConnectionPool` has overload policy primitives (`reject` / spin-`queue`) but no server-level multi-session scheduler.
+- `--concurrency` does not exist at CLI/runtime boundary yet.
+
+### Decision Lock (No Ambiguity)
+
+1. **Execution model for WF01:** single transport reactor thread + bounded execution worker set.
+2. **No per-connection threads:** connection state is multiplexed by reactor through a static session table.
+3. **Queue timeout semantics:** scheduler timeout is deadline-based, measured from enqueue to dispatch, using an injected `io.Clock` (real clock in prod, simulated clock in tests).
+4. **Fairness contract:** round-robin at session granularity; each ready session can advance by at most one request frame per scheduler cycle.
+5. **Fail-closed overload behavior:** default policy is queue with 30s timeout, deterministic error on timeout.
+
+### Locked Decision Details (Production Contracts)
+
+#### A. Scheduler Data Structures and Capacity
+
+1. Use fixed-capacity structures only (allocated at startup):
+   - `ready_queue`: ring buffer of session ids with complete request frame.
+   - `dispatch_queue`: ring buffer of request descriptors admitted for worker dispatch.
+   - `timeout_heap`: min-heap by deadline tick for queued requests.
+2. Keep fd-facing session capacity distinct from execution capacity:
+   - `max_sessions` bounds connected client sessions.
+   - `max_inflight` (from `--concurrency`) bounds concurrently executing requests.
+3. Default queue capacity is `max_sessions`, with explicit configurable override.
+4. Enforce at most one queued request per session to prevent one client from monopolizing queue memory.
+5. Overload responses are deterministic:
+   - full queue: `ERR class=overload code=QueueFull`
+   - deadline exceeded before dispatch: `ERR class=overload code=QueueTimeout`
+
+#### B. Reactor and `io_uring` Progress Semantics
+
+1. Reactor tick order is fixed:
+   - drain completions (accept/read/write)
+   - expire timeout heap entries
+   - promote ready sessions to dispatch queue (respect fairness and worker budget)
+   - submit new SQEs (accept/read/write)
+2. Keep these invariants:
+   - one in-flight read per session socket
+   - one in-flight write per session socket
+   - at least one accept SQE posted while below `max_sessions`
+3. Request framing remains bounded newline-delimited accumulation.
+4. Response writes are resumable/partial-write safe (`bytes_sent` tracking until full flush).
+5. Fatal socket error closes session and runs one idempotent cleanup path.
+
+#### C. Transaction Pinning Failure and Cleanup
+
+1. `BEGIN` pins pool context to session; `COMMIT`/`ROLLBACK` unpins and returns slot.
+2. On client disconnect with pinned context:
+   - force rollback
+   - release pool slot
+   - clear pin/session binding
+3. On response write failure after execution:
+   - close session
+   - run disconnect cleanup (rollback if still active)
+4. Queue timeout before dispatch does not alter pin state.
+5. Session cleanup must be idempotent and safe to call multiple times.
+
+#### D. Observability Contract
+
+1. Required gauges:
+   - `sessions_active`
+   - `sessions_pending_request`
+   - `workers_busy`
+   - `queue_depth`
+   - `pool_checked_out`
+   - `pool_pinned`
+2. Required counters:
+   - `requests_enqueued_total`
+   - `requests_dispatched_total`
+   - `requests_completed_total`
+   - `queue_full_total`
+   - `queue_timeout_total`
+   - `session_disconnect_total`
+   - `pool_exhausted_total`
+3. Required latency/age signals (histogram or fixed buckets):
+   - `queue_wait_ticks`
+   - `request_exec_ticks`
+   - `pin_duration_ticks`
+4. Enforce debug/test invariants:
+   - `requests_enqueued_total >= requests_dispatched_total >= requests_completed_total`
+   - `pool_pinned <= pool_checked_out <= pool_size`
+   - `queue_depth <= max_queued_requests`
+   - no session can be both `closed` and `inflight`
+
 ## Why
-- Current main loop serves one accepted connection until disconnect, which blocks other clients.
-- `--concurrency` and pool sizing are not meaningful until multiple in-flight requests are possible.
+
+- Current server path blocks other clients while one connected client is being served.
+- Runtime concurrency knobs are not meaningful until requests are scheduled independently from accept/read/write progress.
+- Later workfronts assume stable runtime concurrency boundaries and observability.
 
 ## Inputs
 - `ideas/CONNECTION_POOL.md` two-layer model (client sockets vs pool execution contexts).
 - `docs/workfronts/14_runtime_storage_backend_workfront.md` for production storage backend wiring; WF01 keeps transport/scheduling concerns isolated from storage implementation details.
 
-## Phase 1: Non-blocking Accept + Session Registry
+## Non-Negotiables
+
+1. Keep core execution paths on `Storage`/`Network` abstractions.
+2. Preserve deterministic behavior in tests via fake transport + simulated clock.
+3. No unbounded dynamic allocation in hot server loop; session/scheduler storage must be bounded.
+4. Any overload/timeout path must return explicit deterministic boundary errors.
+
+## Phase 1: Reactor Foundation (Non-blocking Accept + Session Registry)
+
 ### Scope
-- Accept connections continuously.
-- Maintain connection session table (socket + parser state + pending request metadata).
-- Do not execute query inline in accept loop.
+
+- Add a `ServerReactor` boundary that:
+  - continuously accepts new sockets;
+  - tracks active sessions in a bounded static session table;
+  - reads request frames without entering execute path inline.
+- Refactor main server loop to call reactor step functions rather than `serveConnection(...)` directly.
+- Add basic per-session lifecycle states (`open`, `has_request`, `closed`).
+
+### Implementation Slices
+
+1. Introduce session registry type in `src/server/` with fixed max sessions.
+2. Wire non-blocking/poll-style accept/read loop and request capture.
+3. Keep response path temporarily synchronous to de-risk bring-up.
+4. Add focused tests for two simultaneously connected clients with no execution dispatch yet.
 
 ### Gate
-- Two clients can stay connected simultaneously.
-- No regression in single-client behavior tests.
+
+- Two clients can remain connected simultaneously without forced serialization by accept loop.
+- Single-client behavior remains green.
+- No request execution occurs inline inside acceptor iteration.
 
 ## Phase 2: Request Scheduler + Queue
+
 ### Scope
-- Add central scheduler:
-  - ready requests queue
-  - waiting-for-pool queue
-  - bounded queue timeout
-- Default overload behavior: queue with 30s timeout.
+
+- Add central scheduler with:
+  - ready queue (sessions with complete request frames),
+  - dispatch queue (bounded by execution worker capacity),
+  - timeout queue (deadline ordering for queued requests).
+- Enforce queue timeout using injected clock.
+- Add explicit boundary error for queue timeout response path.
 
 ### Gate
-- Deterministic tests for queue success and queue timeout.
-- Queue metrics emitted (wait time, timeouts, depth).
+
+- Deterministic tests cover:
+  - enqueue/dequeue success under temporary saturation;
+  - queue timeout at exact configured deadline;
+  - fairness across multiple sessions.
+- Metrics emitted: queue depth, total enqueued, total timed out, max wait.
 
 ## Phase 3: Execution Dispatch
+
 ### Scope
-- Dispatch request execution without blocking accept/read/write progress.
-- Initial implementation can be single execution worker if needed, but scheduler must keep transport responsive.
-- Add explicit `--concurrency` runtime cap for in-flight request execution.
+
+- Dispatch request execution without blocking accept/read/write progression.
+- Introduce bounded execution workers (start with 1 worker, then scale to `--concurrency`).
+- Add `--concurrency <n>` CLI flag and runtime validation.
+- Ensure one connection with slow/heavy queries does not block reactor progress for others.
 
 ### Gate
-- Client B requests make progress while Client A stays connected.
-- In-flight request cap is enforced and observable.
+
+- Client B request/response progresses while Client A remains connected and active.
+- In-flight execution cap is enforced and observable in stats.
+- Fail-closed behavior when worker queue is saturated.
 
 ## Phase 4: Transaction Pinning Semantics
+
 ### Scope
-- Implement pinned pool contexts for multi-statement transactions per client session.
-- Ensure BEGIN/COMMIT/ROLLBACK correctly pin/unpin execution context.
+
+- Implement session-scoped pool pinning for multi-statement transactions.
+- BEGIN pins a pool context to session; COMMIT/ROLLBACK unpins and returns slot.
+- Ensure queued requests for pinned sessions preserve ordering and do not steal other session pins.
+- Expose pin-related stats (active pins, pin wait, pin duration).
 
 ### Gate
-- Deterministic transaction pinning tests across interleaved client sessions.
-- Pinned count and pin duration exposed in stats.
+
+- Deterministic tests validate interleaved session transactions with correct pin/unpin lifecycle.
+- No pool slot leaks across disconnect/timeout/error paths.
+- Pin stats are surfaced in inspect/runtime diagnostics.
+
+## Verification Matrix
+
+- `zig build test --summary all`
+- Add targeted deterministic tests under:
+  - `test/features/server_concurrency/` for user-facing multi-client behavior.
+  - `test/internals/server/` for scheduler/timeout/fairness contracts.
+
+## First Commit Slice (Start Here)
+
+1. Add `src/server/reactor.zig` with bounded session table and lifecycle state machine.
+2. Refactor `src/main.zig` server loop to instantiate reactor and remove direct per-connection blocking serve loop.
+3. Add initial tests that prove two simultaneous connected clients are tracked without disconnecting either client.
+
+## Hard-Stop Conditions
+
+- Stop immediately if any slice introduces unbounded allocation in reactor/scheduler hot path.
+- Stop immediately if timeout behavior depends on wall-clock access that is not injected/controllable in tests.
+- Stop immediately if response ordering for a single session can become non-deterministic.

@@ -22,6 +22,10 @@ The current executor orchestrates operators by calling functions on flat `[]Resu
 - UNION / INTERSECT / EXCEPT
 - Streaming LIMIT optimization (stop pulling after N rows)
 
+## Entry Gate (Sequential Lane)
+
+Start this workfront only when at least one trigger feature above is committed as an active product goal. If no trigger feature is active, treat this workfront as deferred and do not preempt higher-priority foundational workfronts.
+
 ## Design Direction
 
 ### Pull-Based Operator Interface

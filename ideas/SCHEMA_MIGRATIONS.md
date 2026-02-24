@@ -248,8 +248,7 @@ Instant (catalog-only). This is query metadata only — it tells the planner how
 ### Add Reference (withReferentialIntegrity)
 
 ```pg2
-reference(author, user_id, User.id,
-  withReferentialIntegrity(onDeleteRestrict, onUpdateCascade))
+reference(author, user_id, User.id, withReferentialIntegrity(onDeleteRestrict, onUpdateCascade))
 ```
 
 **What pg2 does:**
@@ -310,26 +309,26 @@ Instant (catalog-only).
 
 ## Summary Table
 
-| Operation | Apply speed | Background work | Data rewritten |
-|---|---|---|---|
-| Add field (nullable) | Instant | None | No |
-| Add field (notNull + default) | Instant | None | No |
-| Add field (notNull, no default) | Rejected | — | — |
-| Drop field | Instant | None | No (lazy reclaim) |
-| Rename field | Instant | None | No |
-| Change field type | Instant (old type) | Row-by-row conversion | Yes (shadow column) |
-| nullable → notNull | Instant (unenforced) | Validation scan | No |
-| notNull → nullable | Instant | None | No |
-| Change default | Instant | None | No |
-| Add index | Instant (not yet used) | Index build | Yes (new index pages) |
-| Drop index | Instant | None | No (lazy reclaim) |
-| Add reference (no RI) | Instant | None | No |
-| Add reference (with RI) | Instant (unenforced) | Validation scan | No |
-| Change RI policy | Instant or scan | Validation if adding RI | No |
-| Add model | Instant | None | No |
-| Drop model | Instant | None | No (lazy reclaim) |
-| Rename model | Instant | None | No |
-| Add/drop/change scope | Instant | None | No |
+| Operation                       | Apply speed            | Background work         | Data rewritten        |
+| ------------------------------- | ---------------------- | ----------------------- | --------------------- |
+| Add field (nullable)            | Instant                | None                    | No                    |
+| Add field (notNull + default)   | Instant                | None                    | No                    |
+| Add field (notNull, no default) | Rejected               | —                       | —                     |
+| Drop field                      | Instant                | None                    | No (lazy reclaim)     |
+| Rename field                    | Instant                | None                    | No                    |
+| Change field type               | Instant (old type)     | Row-by-row conversion   | Yes (shadow column)   |
+| nullable → notNull              | Instant (unenforced)   | Validation scan         | No                    |
+| notNull → nullable              | Instant                | None                    | No                    |
+| Change default                  | Instant                | None                    | No                    |
+| Add index                       | Instant (not yet used) | Index build             | Yes (new index pages) |
+| Drop index                      | Instant                | None                    | No (lazy reclaim)     |
+| Add reference (no RI)           | Instant                | None                    | No                    |
+| Add reference (with RI)         | Instant (unenforced)   | Validation scan         | No                    |
+| Change RI policy                | Instant or scan        | Validation if adding RI | No                    |
+| Add model                       | Instant                | None                    | No                    |
+| Drop model                      | Instant                | None                    | No (lazy reclaim)     |
+| Rename model                    | Instant                | None                    | No                    |
+| Add/drop/change scope           | Instant                | None                    | No                    |
 
 ---
 
@@ -337,12 +336,12 @@ Instant (catalog-only).
 
 When `pg2 generate` cannot determine intent from the schema diff alone, it asks. Common ambiguities:
 
-| Diff observed | Possible intents | pg2 asks |
-|---|---|---|
-| Field disappears, similar field appears | Rename vs. drop-and-add | "Was `name` renamed to `first_name`, or is this a new field?" |
-| Field disappears, no replacement | Drop vs. accidental deletion | "Confirm dropping `bio` and its data?" |
-| Field type changes | Intentional type change vs. typo | "Convert `age` from `string` to `int`? Provide conversion expression or default." |
-| Model disappears | Drop vs. accidental deletion | "Confirm dropping model `TempData` and all its data?" |
+| Diff observed                           | Possible intents                 | pg2 asks                                                                          |
+| --------------------------------------- | -------------------------------- | --------------------------------------------------------------------------------- |
+| Field disappears, similar field appears | Rename vs. drop-and-add          | "Was `name` renamed to `first_name`, or is this a new field?"                     |
+| Field disappears, no replacement        | Drop vs. accidental deletion     | "Confirm dropping `bio` and its data?"                                            |
+| Field type changes                      | Intentional type change vs. typo | "Convert `age` from `string` to `int`? Provide conversion expression or default." |
+| Model disappears                        | Drop vs. accidental deletion     | "Confirm dropping model `TempData` and all its data?"                             |
 
 Answers are recorded in the migration plan file. `pg2 apply` never asks questions — it executes the plan as written.
 

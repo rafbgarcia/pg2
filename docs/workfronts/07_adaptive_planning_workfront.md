@@ -11,7 +11,7 @@ Define and implement a dedicated planning module for pg2 physical execution poli
 ## Dependencies
 - Depends on `docs/workfronts/02_self_tune_memory_workfront.md` for memory/admission-derived capacity inputs.
 - Depends on `docs/workfronts/03_degrade_spill_workfront.md` for spill/degrade execution primitives.
-- Must provide contracts consumed by `docs/workfronts/06_variables_and_multi_statement_workfront.md`.
+- Must converge planner contracts used by `docs/workfronts/06_variables_and_multi_statement_workfront.md`; WF06 may ship first, and WF07 then formalizes/owns those contracts without semantic drift.
 
 ## Non-Goals
 - No classic static cost model with cardinality selectivity estimation as primary decision source.
