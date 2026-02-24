@@ -7,10 +7,25 @@ Remove connection-serial request handling so multiple client connections can mak
 
 ### Current Status
 
-- `src/main.zig` is still connection-serial: after `accept`, it calls `session.serveConnection(...)` and blocks that loop until client disconnect.
-- `Session.serveConnection` is request-serial within a connection and performs checkout/execute/write synchronously.
-- `ConnectionPool` has overload policy primitives (`reject` / spin-`queue`) but no server-level multi-session scheduler.
-- `--concurrency` does not exist at CLI/runtime boundary yet.
+- Phase 1 baseline is now landed:
+  - `src/main.zig` runs a bounded `ServerReactor` loop rather than per-connection blocking `serveConnection`.
+  - `src/server/reactor.zig` exists with static session table, round-robin read/dispatch/write progression, and deterministic tests.
+  - `Session.dispatchRequest(...)` exists as a reusable single-request execution boundary for reactor integration.
+- Transport contract foundation is landed:
+  - `ConnectionError.WouldBlock` and `Connection.close()` are part of `src/server/transport.zig`.
+  - TCP transport now preserves partial request/write state across retries.
+  - io_uring transport moved from blocking waits to non-blocking poll progression (`copy_cqes(..., 0)` with pending op state).
+- Deterministic internals coverage is landed for progress contracts:
+  - `test/internals/server/transport_progress_test.zig` covers `WouldBlock` retry semantics and idempotent close.
+- Remaining gaps:
+  - No queue/timeout scheduler layer yet (Phase 2 pending).
+  - No `--concurrency` runtime cap yet (Phase 3 pending).
+  - No transaction pinning semantics in reactor/session state yet (Phase 4 pending).
+
+### Commits Landed (Latest First)
+
+- `8059d72` `server: introduce bounded reactor and wire main loop`
+- `0d9e4eb` `server: add non-blocking transport progress contracts`
 
 ### Decision Lock (No Ambiguity)
 
@@ -132,6 +147,7 @@ Remove connection-serial request handling so multiple client connections can mak
 - Two clients can remain connected simultaneously without forced serialization by accept loop.
 - Single-client behavior remains green.
 - No request execution occurs inline inside acceptor iteration.
+- **Status:** ✅ completed by commits `0d9e4eb` and `8059d72`.
 
 ## Phase 2: Request Scheduler + Queue
 
@@ -143,6 +159,8 @@ Remove connection-serial request handling so multiple client connections can mak
   - timeout queue (deadline ordering for queued requests).
 - Enforce queue timeout using injected clock.
 - Add explicit boundary error for queue timeout response path.
+- Add one-queued-request-per-session admission guard.
+- Use fixed-capacity queue + timeout heap allocated at reactor init.
 
 ### Gate
 
@@ -151,6 +169,7 @@ Remove connection-serial request handling so multiple client connections can mak
   - queue timeout at exact configured deadline;
   - fairness across multiple sessions.
 - Metrics emitted: queue depth, total enqueued, total timed out, max wait.
+- **Status:** ⏳ not started.
 
 ## Phase 3: Execution Dispatch
 
@@ -166,6 +185,7 @@ Remove connection-serial request handling so multiple client connections can mak
 - Client B request/response progresses while Client A remains connected and active.
 - In-flight execution cap is enforced and observable in stats.
 - Fail-closed behavior when worker queue is saturated.
+- **Status:** ⏳ partially started (reactor progression exists), concurrency cap and worker budget wiring pending.
 
 ## Phase 4: Transaction Pinning Semantics
 
@@ -181,6 +201,7 @@ Remove connection-serial request handling so multiple client connections can mak
 - Deterministic tests validate interleaved session transactions with correct pin/unpin lifecycle.
 - No pool slot leaks across disconnect/timeout/error paths.
 - Pin stats are surfaced in inspect/runtime diagnostics.
+- **Status:** ⏳ not started.
 
 ## Verification Matrix
 
@@ -189,11 +210,20 @@ Remove connection-serial request handling so multiple client connections can mak
   - `test/features/server_concurrency/` for user-facing multi-client behavior.
   - `test/internals/server/` for scheduler/timeout/fairness contracts.
 
-## First Commit Slice (Start Here)
+## Next Commit Slice (Start Here)
 
-1. Add `src/server/reactor.zig` with bounded session table and lifecycle state machine.
-2. Refactor `src/main.zig` server loop to instantiate reactor and remove direct per-connection blocking serve loop.
-3. Add initial tests that prove two simultaneous connected clients are tracked without disconnecting either client.
+1. Implement Phase 2 queueing primitives inside reactor:
+   - `ready_queue`
+   - `dispatch_queue`
+   - `timeout_heap` keyed by enqueue deadline
+2. Enforce admission/backpressure contract:
+   - max one queued request per session
+   - deterministic `QueueFull` and `QueueTimeout` boundary responses
+3. Add deterministic internals tests for:
+   - queue fill + `QueueFull`
+   - timeout expiry at exact tick boundary
+   - round-robin fairness across 3+ sessions
+4. Keep execution worker count at 1 for this slice; do not introduce `--concurrency` yet.
 
 ## Hard-Stop Conditions
 
