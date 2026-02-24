@@ -91,9 +91,11 @@ pub fn classifyMutation(err: mutation_mod.MutationError) ErrorClass {
 
 pub fn classifyTxManager(err: tx_mod.TxManagerError) ErrorClass {
     return switch (err) {
+        error.OutOfMemory => .resource_exhausted,
         error.TooManyActiveTransactions => .resource_exhausted,
         error.TxStateWindowFull => .resource_exhausted,
         error.TransactionNotActive => .fatal,
+        error.SnapshotBufferTooSmall => .fatal,
     };
 }
 
@@ -122,6 +124,7 @@ pub fn classifySessionBoundary(err: SessionBoundaryError) ErrorClass {
         error.InvalidQuerySlot => .fatal,
         error.OutOfMemory => .resource_exhausted,
         error.ResponseTooLarge => .resource_exhausted,
+        error.SnapshotBufferTooSmall => .fatal,
         error.TooManyActiveTransactions => .resource_exhausted,
         error.TxStateWindowFull => .resource_exhausted,
         error.TransactionNotActive => .fatal,

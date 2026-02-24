@@ -15,11 +15,14 @@ const static_alloc_mod = @import("static_allocator.zig");
 const disk_mod = @import("../simulator/disk.zig");
 const scan_mod = @import("../executor/scan.zig");
 const spill_collector_mod = @import("../executor/spill_collector.zig");
+const tokenizer_mod = @import("../parser/tokenizer.zig");
+const ast_mod = @import("../parser/ast.zig");
 
 const Storage = io_mod.Storage;
 const BufferPool = buffer_pool_mod.BufferPool;
 const Wal = wal_mod.Wal;
 const TxManager = tx_mod.TxManager;
+const TxId = tx_mod.TxId;
 const UndoLog = undo_mod.UndoLog;
 const StaticAllocator = static_alloc_mod.StaticAllocator;
 const ResultRow = scan_mod.ResultRow;
@@ -38,6 +41,27 @@ pub const QueryBufferError = error{
     InvalidQuerySlot,
 };
 
+pub fn requiredBytesForConfig(
+    allocator: std.mem.Allocator,
+    storage: Storage,
+    config: BootstrapConfig,
+) BootstrapError!usize {
+    var probe_size: usize = 4 * 1024 * 1024;
+    while (true) {
+        const probe = allocator.alloc(u8, probe_size) catch return error.OutOfMemory;
+        defer allocator.free(probe);
+        const required = requiredBytesWithin(probe, storage, config) catch |err| switch (err) {
+            error.InsufficientMemoryBudget => {
+                if (probe_size > std.math.maxInt(usize) / 2) return error.OutOfMemory;
+                probe_size *= 2;
+                continue;
+            },
+            else => return err,
+        };
+        return required;
+    }
+}
+
 pub const BootstrapConfig = struct {
     buffer_pool_frames: u16 = 16,
     undo_max_entries: u32 = 1024,
@@ -45,12 +69,18 @@ pub const BootstrapConfig = struct {
     wal_buffer_capacity_bytes: usize = 128 * 1024,
     wal_flush_threshold_bytes: usize = 64 * 1024,
     max_query_slots: u16 = 8,
+    max_active_transactions: u16 = tx_mod.default_max_active_transactions,
+    max_tx_states: u32 = tx_mod.default_max_tx_states,
     query_string_arena_bytes_per_slot: usize = 4 * 1024 * 1024,
     temp_pages_per_query_slot: u64 = 1024,
     /// Per-slot byte budget for in-memory result accumulation before spilling
     /// to temp pages. When a query's accumulated result bytes exceed this
     /// threshold, the SpillingResultCollector flushes its hot batch to disk.
     work_memory_bytes_per_slot: u64 = 4 * 1024 * 1024,
+    max_tokens_effective: u16 = tokenizer_mod.max_tokens,
+    max_ast_nodes_effective: u16 = ast_mod.max_ast_nodes,
+    hard_max_tokens: u16 = tokenizer_mod.max_tokens,
+    hard_max_ast_nodes: u16 = ast_mod.max_ast_nodes,
 };
 
 pub const QueryBuffers = struct {
@@ -62,6 +92,7 @@ pub const QueryBuffers = struct {
     string_arena_bytes: []u8,
     nested_decode_arena_bytes: []u8,
     nested_match_arena_bytes: []u8,
+    snapshot_active_ids: []TxId,
     collector: *SpillingResultCollector,
     temp_pages_per_query_slot: u64,
     work_memory_bytes_per_slot: u64,
@@ -70,7 +101,7 @@ pub const QueryBuffers = struct {
 /// Core runtime composition built in allocator init phase and sealed before
 /// runtime operations.
 pub const BootstrappedRuntime = struct {
-    static_allocator: StaticAllocator,
+    static_allocator: *StaticAllocator,
     storage: Storage,
     pool: BufferPool,
     wal: Wal,
@@ -84,10 +115,15 @@ pub const BootstrappedRuntime = struct {
     query_string_arenas: []u8,
     query_nested_decode_arenas: []u8,
     query_nested_match_arenas: []u8,
+    query_snapshot_active_ids: []TxId,
     query_collectors: []SpillingResultCollector,
     max_query_slots: u16,
     temp_pages_per_query_slot: u64,
     work_memory_bytes_per_slot: u64,
+    max_tokens_effective: u16,
+    max_ast_nodes_effective: u16,
+    hard_max_tokens: u16,
+    hard_max_ast_nodes: u16,
 
     pub fn init(
         memory_region: []u8,
@@ -96,16 +132,29 @@ pub const BootstrappedRuntime = struct {
     ) BootstrapError!BootstrappedRuntime {
         std.debug.assert(memory_region.len > 0);
         if (config.max_query_slots == 0) return error.InvalidConfig;
+        if (config.max_active_transactions == 0) return error.InvalidConfig;
+        if (config.max_tx_states == 0) return error.InvalidConfig;
         if (config.wal_buffer_capacity_bytes == 0) return error.InvalidConfig;
         if (config.buffer_pool_frames == 0) return error.InvalidConfig;
         if (config.undo_max_entries == 0) return error.InvalidConfig;
         if (config.undo_max_data_bytes == 0) return error.InvalidConfig;
         if (config.query_string_arena_bytes_per_slot == 0) return error.InvalidConfig;
         if (config.temp_pages_per_query_slot == 0) return error.InvalidConfig;
+        if (config.max_tokens_effective == 0) return error.InvalidConfig;
+        if (config.max_ast_nodes_effective == 0) return error.InvalidConfig;
+        if (config.hard_max_tokens == 0) return error.InvalidConfig;
+        if (config.hard_max_ast_nodes == 0) return error.InvalidConfig;
+        if (config.max_tokens_effective > config.hard_max_tokens) return error.InvalidConfig;
+        if (config.max_ast_nodes_effective > config.hard_max_ast_nodes) return error.InvalidConfig;
+        if (config.hard_max_tokens > tokenizer_mod.max_tokens) return error.InvalidConfig;
+        if (config.hard_max_ast_nodes > ast_mod.max_ast_nodes) return error.InvalidConfig;
         try validateMemoryBudget(memory_region, storage, config);
 
         var runtime: BootstrappedRuntime = undefined;
-        runtime.static_allocator = StaticAllocator.init(memory_region);
+        runtime.static_allocator = std.heap.page_allocator.create(StaticAllocator) catch
+            return error.OutOfMemory;
+        errdefer std.heap.page_allocator.destroy(runtime.static_allocator);
+        runtime.static_allocator.* = StaticAllocator.init(memory_region);
         runtime.storage = storage;
         const allocator = runtime.static_allocator.allocator();
 
@@ -202,11 +251,29 @@ pub const BootstrappedRuntime = struct {
             config.max_query_slots,
         ) catch return error.OutOfMemory;
         errdefer allocator.free(runtime.query_collectors);
+        const total_snapshot_active_ids = std.math.mul(
+            usize,
+            @as(usize, config.max_query_slots),
+            @as(usize, config.max_active_transactions),
+        ) catch return error.InvalidConfig;
+        runtime.query_snapshot_active_ids = allocator.alloc(
+            TxId,
+            total_snapshot_active_ids,
+        ) catch return error.OutOfMemory;
+        errdefer allocator.free(runtime.query_snapshot_active_ids);
+        @memset(runtime.query_snapshot_active_ids, 0);
 
         runtime.temp_pages_per_query_slot = config.temp_pages_per_query_slot;
         runtime.work_memory_bytes_per_slot = config.work_memory_bytes_per_slot;
+        runtime.max_tokens_effective = config.max_tokens_effective;
+        runtime.max_ast_nodes_effective = config.max_ast_nodes_effective;
+        runtime.hard_max_tokens = config.hard_max_tokens;
+        runtime.hard_max_ast_nodes = config.hard_max_ast_nodes;
 
-        runtime.tx_manager = TxManager.init(allocator);
+        runtime.tx_manager = TxManager.init(allocator, .{
+            .max_active_transactions = config.max_active_transactions,
+            .max_tx_states = config.max_tx_states,
+        }) catch return error.OutOfMemory;
 
         runtime.static_allocator.seal();
         return runtime;
@@ -241,6 +308,7 @@ pub const BootstrappedRuntime = struct {
                     .string_arena_bytes = self.stringArenaForSlot(slot_index),
                     .nested_decode_arena_bytes = self.nestedDecodeArenaForSlot(slot_index),
                     .nested_match_arena_bytes = self.nestedMatchArenaForSlot(slot_index),
+                    .snapshot_active_ids = self.snapshotActiveIdsForSlot(slot_index),
                     .collector = &self.query_collectors[slot_index],
                     .temp_pages_per_query_slot = self.temp_pages_per_query_slot,
                     .work_memory_bytes_per_slot = self.work_memory_bytes_per_slot,
@@ -265,8 +333,10 @@ pub const BootstrappedRuntime = struct {
     }
 
     pub fn deinit(self: *BootstrappedRuntime) void {
-        const allocator = self.static_allocator.allocator();
+        const static_allocator = self.static_allocator;
+        const allocator = static_allocator.allocator();
         allocator.free(self.query_collectors);
+        allocator.free(self.query_snapshot_active_ids);
         allocator.free(self.query_nested_match_arenas);
         allocator.free(self.query_nested_decode_arenas);
         allocator.free(self.query_nested_rows);
@@ -279,6 +349,7 @@ pub const BootstrappedRuntime = struct {
         self.tx_manager.deinit();
         self.wal.deinit();
         self.pool.deinit();
+        std.heap.page_allocator.destroy(static_allocator);
         self.* = undefined;
     }
 
@@ -327,6 +398,18 @@ pub const BootstrappedRuntime = struct {
         std.debug.assert(end <= self.query_nested_match_arenas.len);
         return self.query_nested_match_arenas[start..end];
     }
+
+    fn snapshotActiveIdsForSlot(
+        self: *BootstrappedRuntime,
+        slot_index: u16,
+    ) []TxId {
+        std.debug.assert(slot_index < self.max_query_slots);
+        const per_slot = @as(usize, self.tx_manager.max_active_transactions);
+        const start = @as(usize, slot_index) * per_slot;
+        const end = start + per_slot;
+        std.debug.assert(end <= self.query_snapshot_active_ids.len);
+        return self.query_snapshot_active_ids[start..end];
+    }
 };
 
 fn validateMemoryBudget(
@@ -334,14 +417,32 @@ fn validateMemoryBudget(
     storage: Storage,
     config: BootstrapConfig,
 ) BootstrapError!void {
+    _ = try requiredBytesWithin(memory_region, storage, config);
+}
+
+fn requiredBytesWithin(
+    memory_region: []u8,
+    storage: Storage,
+    config: BootstrapConfig,
+) BootstrapError!usize {
     std.debug.assert(memory_region.len > 0);
     if (config.max_query_slots == 0) return error.InvalidConfig;
+    if (config.max_active_transactions == 0) return error.InvalidConfig;
+    if (config.max_tx_states == 0) return error.InvalidConfig;
     if (config.wal_buffer_capacity_bytes == 0) return error.InvalidConfig;
     if (config.buffer_pool_frames == 0) return error.InvalidConfig;
     if (config.undo_max_entries == 0) return error.InvalidConfig;
     if (config.undo_max_data_bytes == 0) return error.InvalidConfig;
     if (config.query_string_arena_bytes_per_slot == 0) return error.InvalidConfig;
     if (config.temp_pages_per_query_slot == 0) return error.InvalidConfig;
+    if (config.max_tokens_effective == 0) return error.InvalidConfig;
+    if (config.max_ast_nodes_effective == 0) return error.InvalidConfig;
+    if (config.hard_max_tokens == 0) return error.InvalidConfig;
+    if (config.hard_max_ast_nodes == 0) return error.InvalidConfig;
+    if (config.max_tokens_effective > config.hard_max_tokens) return error.InvalidConfig;
+    if (config.max_ast_nodes_effective > config.hard_max_ast_nodes) return error.InvalidConfig;
+    if (config.hard_max_tokens > tokenizer_mod.max_tokens) return error.InvalidConfig;
+    if (config.hard_max_ast_nodes > ast_mod.max_ast_nodes) return error.InvalidConfig;
 
     var preflight = StaticAllocator.init(memory_region);
     const allocator = preflight.allocator();
@@ -400,6 +501,21 @@ fn validateMemoryBudget(
         return error.InsufficientMemoryBudget;
     _ = allocator.alloc(SpillingResultCollector, config.max_query_slots) catch
         return error.InsufficientMemoryBudget;
+    const total_snapshot_active_ids = std.math.mul(
+        usize,
+        @as(usize, config.max_query_slots),
+        @as(usize, config.max_active_transactions),
+    ) catch return error.InvalidConfig;
+    _ = allocator.alloc(TxId, total_snapshot_active_ids) catch
+        return error.InsufficientMemoryBudget;
+
+    var tx_manager = TxManager.init(allocator, .{
+        .max_active_transactions = config.max_active_transactions,
+        .max_tx_states = config.max_tx_states,
+    }) catch return error.InsufficientMemoryBudget;
+    tx_manager.deinit();
+
+    return preflight.bytesUsed();
 }
 
 test "bootstrap seals allocator before runtime operations" {

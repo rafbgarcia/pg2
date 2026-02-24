@@ -61,6 +61,7 @@ pub const simulator = struct {
 pub const runtime = struct {
     pub const bootstrap = @import("runtime/bootstrap.zig");
     pub const config = @import("runtime/config.zig");
+    pub const planner = @import("runtime/planner.zig");
     pub const request = @import("runtime/request.zig");
     pub const error_taxonomy = @import("runtime/error_taxonomy.zig");
     pub const static_allocator = @import("runtime/static_allocator.zig");
@@ -115,6 +116,7 @@ comptime {
     _ = simulator.fk_fault_matrix;
     _ = runtime.bootstrap;
     _ = runtime.config;
+    _ = runtime.planner;
     _ = runtime.request;
     _ = runtime.error_taxonomy;
     _ = runtime.static_allocator;

@@ -102,6 +102,17 @@ pub const Session = struct {
 
         const tokens = tokenizer_mod.tokenize(source);
         if (tokens.has_error) {
+            if (isTokenizerHardCapError(&tokens)) {
+                writer.print(
+                    "ERR tokenize: tokenizer hard-cap exhausted (hard_max_tokens={d})\n",
+                    .{self.runtime.hard_max_tokens},
+                ) catch return error.ResponseTooLarge;
+                return .{
+                    .bytes_written = stream.pos,
+                    .is_query_error = true,
+                    .had_mutation = false,
+                };
+            }
             const message = fixedMessage(tokens.error_message[0..]);
             writer.print("ERR tokenize: {s}\n", .{message}) catch
                 return error.ResponseTooLarge;
@@ -111,12 +122,45 @@ pub const Session = struct {
                 .had_mutation = false,
             };
         }
+        if (tokens.count > self.runtime.max_tokens_effective) {
+            writer.print(
+                "ERR tokenize: token budget exhausted (max_tokens_effective={d})\n",
+                .{self.runtime.max_tokens_effective},
+            ) catch return error.ResponseTooLarge;
+            return .{
+                .bytes_written = stream.pos,
+                .is_query_error = true,
+                .had_mutation = false,
+            };
+        }
 
         const parsed = parser_mod.parse(&tokens, source);
         if (parsed.has_error) {
+            if (isAstHardCapError(&parsed)) {
+                writer.print(
+                    "ERR parse: AST hard-cap exhausted (hard_max_ast_nodes={d})\n",
+                    .{self.runtime.hard_max_ast_nodes},
+                ) catch return error.ResponseTooLarge;
+                return .{
+                    .bytes_written = stream.pos,
+                    .is_query_error = true,
+                    .had_mutation = false,
+                };
+            }
             const message = fixedMessage(parsed.error_message[0..]);
             writer.print("ERR parse: {s}\n", .{message}) catch
                 return error.ResponseTooLarge;
+            return .{
+                .bytes_written = stream.pos,
+                .is_query_error = true,
+                .had_mutation = false,
+            };
+        }
+        if (parsed.ast.node_count > self.runtime.max_ast_nodes_effective) {
+            writer.print(
+                "ERR parse: AST budget exhausted (max_ast_nodes_effective={d})\n",
+                .{self.runtime.max_ast_nodes_effective},
+            ) catch return error.ResponseTooLarge;
             return .{
                 .bytes_written = stream.pos,
                 .is_query_error = true,
@@ -638,6 +682,16 @@ fn serializeTxControlError(
 fn fixedMessage(message: []const u8) []const u8 {
     const end = std.mem.indexOfScalar(u8, message, 0) orelse message.len;
     return message[0..end];
+}
+
+fn isTokenizerHardCapError(tokens: *const tokenizer_mod.TokenizeResult) bool {
+    const message = fixedMessage(tokens.error_message[0..]);
+    return std.mem.eql(u8, message, "too many tokens");
+}
+
+fn isAstHardCapError(parsed: *const parser_mod.ParseResult) bool {
+    const message = fixedMessage(parsed.error_message[0..]);
+    return std.mem.eql(u8, message, "AST capacity exceeded");
 }
 
 fn serializeBoundaryError(
@@ -1318,6 +1372,90 @@ test "session accept loop emits classified boundary error on pool exhaustion" {
     try std.testing.expectEqualStrings(
         "ERR class=resource_exhausted code=PoolExhausted\n",
         conn.response_log[0][0..conn.response_lens[0]],
+    );
+}
+
+test "session enforces tokenizer effective budget before hard cap" {
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    const backing_memory = try std.testing.allocator.alloc(
+        u8,
+        256 * 1024 * 1024,
+    );
+    defer std.testing.allocator.free(backing_memory);
+
+    var runtime = try BootstrappedRuntime.init(
+        backing_memory,
+        disk.storage(),
+        .{
+            .max_query_slots = 1,
+            .max_tokens_effective = 12,
+            .hard_max_tokens = tokenizer_mod.max_tokens,
+        },
+    );
+    defer runtime.deinit();
+
+    var catalog = Catalog{};
+    var session = Session.init(&runtime, &catalog);
+    var pool = ConnectionPool.init(&runtime);
+    var pool_conn = try pool.checkout();
+    defer pool.checkin(&pool_conn) catch {};
+
+    var out: [512]u8 = undefined;
+    const result = try session.handleRequest(
+        &pool,
+        &pool_conn,
+        "User |> where(id == 1 && id == 2 && id == 3) { id }",
+        null,
+        out[0..],
+    );
+    try std.testing.expect(result.is_query_error);
+    try std.testing.expectEqualStrings(
+        "ERR tokenize: token budget exhausted (max_tokens_effective=12)\n",
+        out[0..result.bytes_written],
+    );
+}
+
+test "session enforces AST effective budget before hard cap" {
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    const backing_memory = try std.testing.allocator.alloc(
+        u8,
+        256 * 1024 * 1024,
+    );
+    defer std.testing.allocator.free(backing_memory);
+
+    var runtime = try BootstrappedRuntime.init(
+        backing_memory,
+        disk.storage(),
+        .{
+            .max_query_slots = 1,
+            .max_ast_nodes_effective = 8,
+            .hard_max_ast_nodes = ast_mod.max_ast_nodes,
+        },
+    );
+    defer runtime.deinit();
+
+    var catalog = Catalog{};
+    var session = Session.init(&runtime, &catalog);
+    var pool = ConnectionPool.init(&runtime);
+    var pool_conn = try pool.checkout();
+    defer pool.checkin(&pool_conn) catch {};
+
+    var out: [512]u8 = undefined;
+    const result = try session.handleRequest(
+        &pool,
+        &pool_conn,
+        "User |> where(id == 1) |> sort(id) { id name active }",
+        null,
+        out[0..],
+    );
+    try std.testing.expect(result.is_query_error);
+    try std.testing.expectEqualStrings(
+        "ERR parse: AST budget exhausted (max_ast_nodes_effective=8)\n",
+        out[0..result.bytes_written],
     );
 }
 

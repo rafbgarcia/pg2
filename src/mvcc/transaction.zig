@@ -15,24 +15,34 @@ pub const TxState = enum {
     aborted,
 };
 
-pub const max_active_transactions: u16 = 256;
-pub const max_tx_states: u32 = 65536;
+pub const default_max_active_transactions: u16 = 256;
+pub const default_max_tx_states: u32 = 65536;
+
+pub const TxManagerConfig = struct {
+    max_active_transactions: u16 = default_max_active_transactions,
+    max_tx_states: u32 = default_max_tx_states,
+};
 
 /// A snapshot captures the active transaction set at the time
 /// a transaction begins. Used for visibility checks.
 pub const Snapshot = struct {
     tx_id: TxId,
-    active_ids: [max_active_transactions]TxId,
+    active_ids: []TxId,
     active_count: u16,
     min_active: TxId,
     next_tx: TxId,
+    owns_active_ids: bool = false,
+    allocator: ?std.mem.Allocator = null,
 
     pub fn deinit(self: *Snapshot) void {
-        _ = self;
+        if (self.owns_active_ids) {
+            self.allocator.?.free(self.active_ids);
+        }
+        self.* = undefined;
     }
 
     pub fn isVisible(self: *const Snapshot, writer_tx: TxId, state: TxState) bool {
-        std.debug.assert(self.active_count <= max_active_transactions);
+        std.debug.assert(self.active_count <= self.active_ids.len);
 
         if (writer_tx == self.tx_id) return true;
         if (writer_tx >= self.next_tx) return false;
@@ -47,49 +57,74 @@ pub const Snapshot = struct {
 };
 
 pub const TxManagerError = error{
+    OutOfMemory,
     TooManyActiveTransactions,
     TxStateWindowFull,
     TransactionNotActive,
+    SnapshotBufferTooSmall,
 };
 
 /// Transaction manager with fixed-capacity active and state tracking.
 pub const TxManager = struct {
+    allocator: std.mem.Allocator,
+    max_active_transactions: u16,
+    max_tx_states: u32,
     next_tx_id: TxId = 1,
     base_tx_id: TxId = 1,
-    states: [max_tx_states]TxState,
-    active_list: [max_active_transactions]TxId,
+    states: []TxState,
+    active_list: []TxId,
     active_count: u16 = 0,
     oldest_active: TxId = 1,
 
-    pub fn init(allocator: std.mem.Allocator) TxManager {
-        _ = allocator;
+    pub fn init(
+        allocator: std.mem.Allocator,
+        config: TxManagerConfig,
+    ) TxManagerError!TxManager {
+        if (config.max_active_transactions == 0) return error.TooManyActiveTransactions;
+        if (config.max_tx_states == 0) return error.TxStateWindowFull;
+
+        const states = allocator.alloc(TxState, config.max_tx_states) catch
+            return error.OutOfMemory;
+        errdefer allocator.free(states);
+        @memset(states, .committed);
+
+        const active_list = allocator.alloc(TxId, config.max_active_transactions) catch
+            return error.OutOfMemory;
+        errdefer allocator.free(active_list);
+        @memset(active_list, 0);
+
         return .{
-            .states = [_]TxState{.committed} ** max_tx_states,
-            .active_list = [_]TxId{0} ** max_active_transactions,
+            .allocator = allocator,
+            .max_active_transactions = config.max_active_transactions,
+            .max_tx_states = config.max_tx_states,
+            .states = states,
+            .active_list = active_list,
         };
     }
 
     pub fn deinit(self: *TxManager) void {
-        _ = self;
+        self.allocator.free(self.active_list);
+        self.allocator.free(self.states);
+        self.* = undefined;
     }
 
     pub fn begin(self: *TxManager) TxManagerError!TxId {
-        std.debug.assert(self.active_count <= max_active_transactions);
+        std.debug.assert(self.active_count <= self.max_active_transactions);
         std.debug.assert(self.base_tx_id <= self.next_tx_id);
 
-        if (self.active_count >= max_active_transactions) {
+        if (self.active_count >= self.max_active_transactions) {
             return error.TooManyActiveTransactions;
         }
 
         const tx_id = self.next_tx_id;
-        if (tx_id >= self.base_tx_id + max_tx_states) {
+        if (tx_id >= self.base_tx_id + self.max_tx_states) {
             return error.TxStateWindowFull;
         }
 
         self.next_tx_id += 1;
         self.active_list[self.active_count] = tx_id;
         self.active_count += 1;
-        std.debug.assert(self.active_count <= max_active_transactions);
+        std.debug.assert(self.active_count <= self.max_active_transactions);
 
         const idx = self.stateSlot(tx_id);
         self.states[idx] = .active;
@@ -98,8 +133,28 @@ pub const TxManager = struct {
         return tx_id;
     }
 
-    pub fn snapshot(self: *TxManager, tx_id: TxId) TxManagerError!Snapshot {
-        std.debug.assert(self.active_count <= max_active_transactions);
+    pub fn snapshot(
+        self: *TxManager,
+        tx_id: TxId,
+    ) TxManagerError!Snapshot {
+        const active_ids = self.allocator.alloc(TxId, self.max_active_transactions) catch
+            return error.OutOfMemory;
+        errdefer self.allocator.free(active_ids);
+        var snap = try self.snapshotInto(tx_id, active_ids);
+        snap.owns_active_ids = true;
+        snap.allocator = self.allocator;
+        return snap;
+    }
+
+    pub fn snapshotInto(
+        self: *TxManager,
+        tx_id: TxId,
+        active_ids_buffer: []TxId,
+    ) TxManagerError!Snapshot {
+        std.debug.assert(self.active_count <= self.max_active_transactions);
+        if (active_ids_buffer.len < self.max_active_transactions) {
+            return error.SnapshotBufferTooSmall;
+        }
 
         const owner_idx = self.findActiveIndex(tx_id) orelse {
             @panic("snapshot owner must be active");
@@ -108,11 +163,12 @@ pub const TxManager = struct {
 
         var snap = Snapshot{
             .tx_id = tx_id,
-            .active_ids = [_]TxId{0} ** max_active_transactions,
+            .active_ids = active_ids_buffer,
             .active_count = 0,
             .min_active = tx_id,
             .next_tx = self.next_tx_id,
         };
+        @memset(snap.active_ids, 0);
 
         var min_active: TxId = std.math.maxInt(TxId);
         var i: u16 = 0;
@@ -120,7 +176,7 @@ pub const TxManager = struct {
             const active_tx = self.active_list[i];
             if (active_tx == tx_id) continue;
 
-            std.debug.assert(snap.active_count < max_active_transactions);
+            std.debug.assert(snap.active_count < self.max_active_transactions);
             snap.active_ids[snap.active_count] = active_tx;
             snap.active_count += 1;
             if (active_tx < min_active) min_active = active_tx;
@@ -139,7 +195,7 @@ pub const TxManager = struct {
     /// using `getOldestActive()`.
     pub fn commit(self: *TxManager, tx_id: TxId) TxManagerError!void {
         std.debug.assert(tx_id > 0);
-        std.debug.assert(self.active_count <= max_active_transactions);
+        std.debug.assert(self.active_count <= self.max_active_transactions);
         const state = self.getState(tx_id) orelse return error.TransactionNotActive;
         if (state != .active) {
             @panic("commit requires active transaction");
@@ -161,7 +217,7 @@ pub const TxManager = struct {
     /// using `getOldestActive()`.
     pub fn abort(self: *TxManager, tx_id: TxId) TxManagerError!void {
         std.debug.assert(tx_id > 0);
-        std.debug.assert(self.active_count <= max_active_transactions);
+        std.debug.assert(self.active_count <= self.max_active_transactions);
         const state = self.getState(tx_id) orelse return error.TransactionNotActive;
         if (state != .active) {
             @panic("abort requires active transaction");
@@ -180,7 +236,7 @@ pub const TxManager = struct {
     pub fn getState(self: *const TxManager, tx_id: TxId) ?TxState {
         if (tx_id >= self.next_tx_id) return null;
         if (tx_id < self.base_tx_id) return .committed;
-        if (tx_id >= self.base_tx_id + max_tx_states) return null;
+        if (tx_id >= self.base_tx_id + self.max_tx_states) return null;
         return self.states[self.stateSlot(tx_id)];
     }
 
@@ -198,7 +254,7 @@ pub const TxManager = struct {
 
     fn stateSlot(self: *const TxManager, tx_id: TxId) usize {
         std.debug.assert(tx_id >= self.base_tx_id);
-        return @intCast(tx_id % max_tx_states);
+        return @intCast(tx_id % self.max_tx_states);
     }
 
     fn findActiveIndex(self: *const TxManager, tx_id: TxId) ?u16 {
@@ -220,7 +276,7 @@ pub const TxManager = struct {
     }
 
     fn updateOldestActive(self: *TxManager) void {
-        std.debug.assert(self.active_count <= max_active_transactions);
+        std.debug.assert(self.active_count <= self.max_active_transactions);
         std.debug.assert(self.base_tx_id <= self.next_tx_id);
         if (self.active_count == 0) {
             self.oldest_active = self.next_tx_id;
@@ -240,7 +296,7 @@ pub const TxManager = struct {
 // --- Tests ---
 
 test "begin assigns sequential IDs" {
-    var tm = TxManager.init(std.testing.allocator);
+    var tm = try TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
 
     const t1 = try tm.begin();
@@ -253,7 +309,7 @@ test "begin assigns sequential IDs" {
 }
 
 test "commit changes state" {
-    var tm = TxManager.init(std.testing.allocator);
+    var tm = try TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
 
     const t1 = try tm.begin();
@@ -264,7 +320,7 @@ test "commit changes state" {
 }
 
 test "abort changes state" {
-    var tm = TxManager.init(std.testing.allocator);
+    var tm = try TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
 
     const t1 = try tm.begin();
@@ -273,7 +329,7 @@ test "abort changes state" {
 }
 
 test "snapshot sees committed, not active" {
-    var tm = TxManager.init(std.testing.allocator);
+    var tm = try TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
 
     const t1 = try tm.begin();
@@ -282,7 +338,9 @@ test "snapshot sees committed, not active" {
     const t2 = try tm.begin();
     const t3 = try tm.begin();
 
-    var snap = try tm.snapshot(t2);
+    const active_ids = try std.testing.allocator.alloc(TxId, tm.max_active_transactions);
+    defer std.testing.allocator.free(active_ids);
+    var snap = try tm.snapshotInto(t2, active_ids);
     defer snap.deinit();
 
     try std.testing.expect(snap.isVisible(t1, .committed));
@@ -291,11 +349,13 @@ test "snapshot sees committed, not active" {
 }
 
 test "snapshot does not see future transactions" {
-    var tm = TxManager.init(std.testing.allocator);
+    var tm = try TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
 
     const t1 = try tm.begin();
-    var snap = try tm.snapshot(t1);
+    const active_ids = try std.testing.allocator.alloc(TxId, tm.max_active_transactions);
+    defer std.testing.allocator.free(active_ids);
+    var snap = try tm.snapshotInto(t1, active_ids);
     defer snap.deinit();
 
     const t2 = try tm.begin();
@@ -305,21 +365,23 @@ test "snapshot does not see future transactions" {
 }
 
 test "aborted transaction not visible" {
-    var tm = TxManager.init(std.testing.allocator);
+    var tm = try TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
 
     const t1 = try tm.begin();
     try tm.abort(t1);
 
     const t2 = try tm.begin();
-    var snap = try tm.snapshot(t2);
+    const active_ids = try std.testing.allocator.alloc(TxId, tm.max_active_transactions);
+    defer std.testing.allocator.free(active_ids);
+    var snap = try tm.snapshotInto(t2, active_ids);
     defer snap.deinit();
 
     try std.testing.expect(!snap.isVisible(t1, .aborted));
 }
 
 test "oldest active tracks correctly" {
-    var tm = TxManager.init(std.testing.allocator);
+    var tm = try TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
 
     const t1 = try tm.begin();
@@ -336,11 +398,11 @@ test "oldest active tracks correctly" {
 }
 
 test "begin fails when active limit reached" {
-    var tm = TxManager.init(std.testing.allocator);
+    var tm = try TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
 
     var i: u16 = 0;
-    while (i < max_active_transactions) : (i += 1) {
+    while (i < tm.max_active_transactions) : (i += 1) {
         _ = try tm.begin();
     }
 
@@ -348,7 +410,7 @@ test "begin fails when active limit reached" {
 }
 
 test "cleanupBefore treats old tx states as committed" {
-    var tm = TxManager.init(std.testing.allocator);
+    var tm = try TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
 
     const t1 = try tm.begin();
@@ -356,4 +418,19 @@ test "cleanupBefore treats old tx states as committed" {
 
     tm.cleanupBefore(tm.getOldestActive());
     try std.testing.expectEqual(TxState.committed, tm.getState(t1).?);
+}
+
+test "snapshot rejects undersized active buffer" {
+    var tm = try TxManager.init(std.testing.allocator, .{
+        .max_active_transactions = 8,
+        .max_tx_states = 128,
+    });
+    defer tm.deinit();
+
+    const tx = try tm.begin();
+    var small: [4]TxId = [_]TxId{0} ** 4;
+    try std.testing.expectError(
+        error.SnapshotBufferTooSmall,
+        tm.snapshotInto(tx, small[0..]),
+    );
 }

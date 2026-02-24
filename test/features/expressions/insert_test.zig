@@ -560,7 +560,7 @@ test "feature multi-row insert reports tokenizer cap for oversized statements" {
     const oversized_insert = try buildBulkUserInsertRequest(insert_buf[0..], 1, 350);
     const result = try executor.run(oversized_insert);
     try std.testing.expectEqualStrings(
-        "ERR tokenize: too many tokens\n",
+        "ERR tokenize: tokenizer hard-cap exhausted (hard_max_tokens=4096)\n",
         result,
     );
 }

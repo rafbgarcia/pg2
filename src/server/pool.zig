@@ -183,7 +183,10 @@ pub const ConnectionPool = struct {
         errdefer self.runtime.tx_manager.abort(tx_id) catch {};
         _ = try self.runtime.wal.beginTx(tx_id);
 
-        const snapshot = try self.runtime.tx_manager.snapshot(tx_id);
+        const snapshot = try self.runtime.tx_manager.snapshotInto(
+            tx_id,
+            query_buffers.snapshot_active_ids,
+        );
         std.debug.assert(self.checked_out_count < self.runtime.max_query_slots);
         self.checked_out_count += 1;
 
