@@ -165,10 +165,21 @@ pub const FeatureEnv = struct {
         self: *FeatureEnv,
         config: bootstrap_mod.BootstrapConfig,
     ) !void {
+        return self.initWithConfigAndMemory(
+            config,
+            64 * 1024 * 1024,
+        );
+    }
+
+    pub fn initWithConfigAndMemory(
+        self: *FeatureEnv,
+        config: bootstrap_mod.BootstrapConfig,
+        memory_bytes: usize,
+    ) !void {
         self.disk = disk_mod.SimulatedDisk.init(testing_allocator);
         errdefer self.disk.deinit();
 
-        self.backing_memory = try testing_allocator.alloc(u8, 64 * 1024 * 1024);
+        self.backing_memory = try testing_allocator.alloc(u8, memory_bytes);
         errdefer testing_allocator.free(self.backing_memory);
 
         self.runtime = try BootstrappedRuntime.init(

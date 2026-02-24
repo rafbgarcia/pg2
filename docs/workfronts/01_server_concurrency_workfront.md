@@ -31,6 +31,7 @@ Remove connection-serial request handling so multiple client connections can mak
 - Remaining gaps:
   - `--concurrency` parser/validation + reactor worker scaling are landed in `src/main.zig` + `src/runtime/config.zig` + `src/server/reactor.zig`.
   - Deterministic mixed completion ordering coverage for `max_inflight = 2` is landed in `test/internals/server/reactor_queueing_test.zig`.
+  - User-facing feature coverage for concurrent reactor/session progress at `max_inflight = 2` is landed in `test/features/server_concurrency/multi_worker_progress_test.zig`.
   - No transaction pinning semantics in reactor/session state yet (Phase 4 pending).
 
 ### Commits Landed (Latest First)
