@@ -651,17 +651,20 @@ test "reactor tracks two simultaneous sessions and dispatches both requests" {
     const response = "OK\n";
     const DispatchCtx = struct {
         calls: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
+        stats_by_call: [4]RuntimeInspectStats = [_]RuntimeInspectStats{.{}} ** 4,
         fn dispatch(
             ctx_ptr: *anyopaque,
             _: u16,
             _: []const u8,
-            _: RuntimeInspectStats,
+            runtime_inspect_stats: RuntimeInspectStats,
             out: []u8,
         ) session_mod.SessionError!Dispatcher.DispatchResult {
             const ctx: *@This() = @ptrCast(@alignCast(ctx_ptr));
+            const call_index = ctx.calls.fetchAdd(1, .seq_cst);
+            std.debug.assert(call_index < ctx.stats_by_call.len);
+            ctx.stats_by_call[call_index] = runtime_inspect_stats;
             if (response.len > out.len) return error.ResponseTooLarge;
             @memcpy(out[0..response.len], response);
-            _ = ctx.calls.fetchAdd(1, .seq_cst);
             return .{ .response_len = response.len };
         }
 
@@ -823,6 +826,10 @@ test "reactor tracks two simultaneous sessions and dispatches both requests" {
     try std.testing.expectEqual(@as(usize, 1), conn_b.writes);
     try std.testing.expectEqualStrings("OK\n", conn_a.last_response[0..conn_a.last_response_len]);
     try std.testing.expectEqualStrings("OK\n", conn_b.last_response[0..conn_b.last_response_len]);
+    try std.testing.expect(ctx.stats_by_call[0].requests_dispatched_total >= 1);
+    try std.testing.expect(ctx.stats_by_call[1].requests_dispatched_total >= 1);
+    try std.testing.expect(ctx.stats_by_call[0].workers_busy >= 1);
+    try std.testing.expect(ctx.stats_by_call[1].workers_busy >= 1);
     try std.testing.expect(!conn_a.closed);
     try std.testing.expect(!conn_b.closed);
 }
