@@ -9,12 +9,19 @@ const Connection = transport_mod.Connection;
 const Clock = io_mod.Clock;
 
 pub const Dispatcher = struct {
+    pub const DispatchResult = struct {
+        response_len: usize,
+        pin_transition: session_mod.PinTransition = .none,
+    };
+
     ctx: *anyopaque,
     dispatch: *const fn (
         ctx: *anyopaque,
+        session_id: u16,
         request: []const u8,
         out: []u8,
-    ) session_mod.SessionError!usize,
+    ) session_mod.SessionError!DispatchResult,
+    cleanupSession: *const fn (ctx: *anyopaque, session_id: u16) void,
 };
 
 pub fn ServerReactor(
@@ -51,6 +58,8 @@ pub fn ServerReactor(
             queue_state: QueueState = .none,
             queue_generation: u32 = 0,
             enqueue_tick: u64 = 0,
+            pin_active: bool = false,
+            pin_started_tick: u64 = 0,
         };
 
         const QueueEntry = struct {
@@ -66,7 +75,7 @@ pub fn ServerReactor(
 
         const WorkerResult = union(enum) {
             none,
-            ok: usize,
+            ok: Dispatcher.DispatchResult,
             err: session_mod.SessionError,
         };
 
@@ -176,12 +185,15 @@ pub fn ServerReactor(
         pub const Stats = struct {
             queue_depth: usize,
             workers_busy: usize,
+            pool_pinned: usize,
             requests_enqueued_total: u64,
             requests_dispatched_total: u64,
             requests_completed_total: u64,
             queue_full_total: u64,
             queue_timeout_total: u64,
             max_queue_wait_ticks: u64,
+            max_pin_wait_ticks: u64,
+            max_pin_duration_ticks: u64,
         };
 
         dispatcher: Dispatcher,
@@ -204,6 +216,9 @@ pub fn ServerReactor(
         queue_full_total: u64 = 0,
         queue_timeout_total: u64 = 0,
         max_queue_wait_ticks: u64 = 0,
+        pool_pinned: usize = 0,
+        max_pin_wait_ticks: u64 = 0,
+        max_pin_duration_ticks: u64 = 0,
 
         pub fn init(dispatcher: Dispatcher, config: Config) Self {
             std.debug.assert(max_sessions > 0);
@@ -256,12 +271,15 @@ pub fn ServerReactor(
             return .{
                 .queue_depth = self.ready_queue.len + self.dispatch_queue.len,
                 .workers_busy = self.workers_busy,
+                .pool_pinned = self.pool_pinned,
                 .requests_enqueued_total = self.requests_enqueued_total,
                 .requests_dispatched_total = self.requests_dispatched_total,
                 .requests_completed_total = self.requests_completed_total,
                 .queue_full_total = self.queue_full_total,
                 .queue_timeout_total = self.queue_timeout_total,
                 .max_queue_wait_ticks = self.max_queue_wait_ticks,
+                .max_pin_wait_ticks = self.max_pin_wait_ticks,
+                .max_pin_duration_ticks = self.max_pin_duration_ticks,
             };
         }
 
@@ -419,6 +437,9 @@ pub fn ServerReactor(
                 if (wait_ticks > self.max_queue_wait_ticks) {
                     self.max_queue_wait_ticks = wait_ticks;
                 }
+                if (slot.pin_active and wait_ticks > self.max_pin_wait_ticks) {
+                    self.max_pin_wait_ticks = wait_ticks;
+                }
                 return true;
             }
         }
@@ -449,12 +470,36 @@ pub fn ServerReactor(
                 }
 
                 switch (result) {
-                    .ok => |response_len| {
+                    .ok => |dispatch_result| {
+                        const response_len = dispatch_result.response_len;
                         std.debug.assert(response_len <= slot.response_buf.len);
                         @memcpy(
                             slot.response_buf[0..response_len],
                             worker.response_buf[0..response_len],
                         );
+                        const now = self.clock.now();
+                        switch (dispatch_result.pin_transition) {
+                            .none => {},
+                            .began => {
+                                if (!slot.pin_active) {
+                                    slot.pin_active = true;
+                                    slot.pin_started_tick = now;
+                                    self.pool_pinned += 1;
+                                }
+                            },
+                            .ended => {
+                                if (slot.pin_active) {
+                                    const duration = now - slot.pin_started_tick;
+                                    if (duration > self.max_pin_duration_ticks) {
+                                        self.max_pin_duration_ticks = duration;
+                                    }
+                                    slot.pin_active = false;
+                                    slot.pin_started_tick = 0;
+                                    std.debug.assert(self.pool_pinned > 0);
+                                    self.pool_pinned -= 1;
+                                }
+                            },
+                        }
                         slot.has_request = false;
                         slot.request_len = 0;
                         slot.has_response = true;
@@ -515,6 +560,7 @@ pub fn ServerReactor(
 
                 const result = self.dispatcher.dispatch(
                     self.dispatcher.ctx,
+                    sid,
                     worker.request_buf[0..request_len],
                     worker.response_buf[0..],
                 ) catch |err| {
@@ -587,6 +633,20 @@ pub fn ServerReactor(
         fn closeSlot(self: *Self, i: usize) void {
             const slot = &self.sessions[i];
             if (!slot.in_use) return;
+            if (slot.pin_active) {
+                self.dispatcher.cleanupSession(
+                    self.dispatcher.ctx,
+                    @intCast(i),
+                );
+                const duration = self.clock.now() - slot.pin_started_tick;
+                if (duration > self.max_pin_duration_ticks) {
+                    self.max_pin_duration_ticks = duration;
+                }
+                slot.pin_active = false;
+                slot.pin_started_tick = 0;
+                std.debug.assert(self.pool_pinned > 0);
+                self.pool_pinned -= 1;
+            }
             slot.connection.close();
             slot.* = .{};
         }
@@ -598,13 +658,20 @@ test "reactor tracks two simultaneous sessions and dispatches both requests" {
     const response = "OK\n";
     const DispatchCtx = struct {
         calls: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
-        fn dispatch(ctx_ptr: *anyopaque, _: []const u8, out: []u8) session_mod.SessionError!usize {
+        fn dispatch(
+            ctx_ptr: *anyopaque,
+            _: u16,
+            _: []const u8,
+            out: []u8,
+        ) session_mod.SessionError!Dispatcher.DispatchResult {
             const ctx: *@This() = @ptrCast(@alignCast(ctx_ptr));
             if (response.len > out.len) return error.ResponseTooLarge;
             @memcpy(out[0..response.len], response);
             _ = ctx.calls.fetchAdd(1, .seq_cst);
-            return response.len;
+            return .{ .response_len = response.len };
         }
+
+        fn cleanupSession(_: *anyopaque, _: u16) void {}
     };
 
     const TestClock = struct {
@@ -724,6 +791,7 @@ test "reactor tracks two simultaneous sessions and dispatches both requests" {
     var reactor = Reactor.init(.{
         .ctx = &ctx,
         .dispatch = &DispatchCtx.dispatch,
+        .cleanupSession = &DispatchCtx.cleanupSession,
     }, .{
         .clock = clock.clock(),
         .queue_timeout_ticks = 128,

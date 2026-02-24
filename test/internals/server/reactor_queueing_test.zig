@@ -9,6 +9,7 @@ const io_mod = pg2.storage.io;
 
 const Acceptor = transport_mod.Acceptor;
 const Connection = transport_mod.Connection;
+const DispatchResult = reactor_mod.Dispatcher.DispatchResult;
 
 const ManualClock = struct {
     tick: u64 = 0,
@@ -110,7 +111,12 @@ const TraceDispatch = struct {
     order_mutex: std.Thread.Mutex = .{},
     order: [8]u8 = [_]u8{0} ** 8,
 
-    fn dispatch(ctx_ptr: *anyopaque, request: []const u8, out: []u8) session_mod.SessionError!usize {
+    fn dispatch(
+        ctx_ptr: *anyopaque,
+        _: u16,
+        request: []const u8,
+        out: []u8,
+    ) session_mod.SessionError!DispatchResult {
         const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
         if (request.len < 2) return error.ResponseTooLarge;
         self.order_mutex.lock();
@@ -122,8 +128,10 @@ const TraceDispatch = struct {
         const response = "OK\n";
         if (response.len > out.len) return error.ResponseTooLarge;
         @memcpy(out[0..response.len], response);
-        return response.len;
+        return .{ .response_len = response.len };
     }
+
+    fn cleanupSession(_: *anyopaque, _: u16) void {}
 };
 
 const BlockingDispatch = struct {
@@ -132,7 +140,12 @@ const BlockingDispatch = struct {
     gate_cond: std.Thread.Condition = .{},
     release: bool = false,
 
-    fn dispatch(ctx_ptr: *anyopaque, _: []const u8, out: []u8) session_mod.SessionError!usize {
+    fn dispatch(
+        ctx_ptr: *anyopaque,
+        _: u16,
+        _: []const u8,
+        out: []u8,
+    ) session_mod.SessionError!DispatchResult {
         const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
         _ = self.calls.fetchAdd(1, .seq_cst);
         self.gate_mutex.lock();
@@ -143,7 +156,7 @@ const BlockingDispatch = struct {
         const response = "OK\n";
         if (response.len > out.len) return error.ResponseTooLarge;
         @memcpy(out[0..response.len], response);
-        return response.len;
+        return .{ .response_len = response.len };
     }
 
     fn unblock(self: *@This()) void {
@@ -152,6 +165,8 @@ const BlockingDispatch = struct {
         self.gate_cond.signal();
         self.gate_mutex.unlock();
     }
+
+    fn cleanupSession(_: *anyopaque, _: u16) void {}
 };
 
 const MultiGateDispatch = struct {
@@ -164,7 +179,12 @@ const MultiGateDispatch = struct {
     gate_mutex: std.Thread.Mutex = .{},
     gate_cond: std.Thread.Condition = .{},
 
-    fn dispatch(ctx_ptr: *anyopaque, request: []const u8, out: []u8) session_mod.SessionError!usize {
+    fn dispatch(
+        ctx_ptr: *anyopaque,
+        _: u16,
+        request: []const u8,
+        out: []u8,
+    ) session_mod.SessionError!DispatchResult {
         const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
         if (request.len < 2) return error.ResponseTooLarge;
         const tag = request[1];
@@ -185,7 +205,7 @@ const MultiGateDispatch = struct {
         const response = "OK\n";
         if (response.len > out.len) return error.ResponseTooLarge;
         @memcpy(out[0..response.len], response);
-        return response.len;
+        return .{ .response_len = response.len };
     }
 
     fn release(self: *@This(), tag: u8) !void {
@@ -212,6 +232,8 @@ const MultiGateDispatch = struct {
             else => error.InvalidTag,
         };
     }
+
+    fn cleanupSession(_: *anyopaque, _: u16) void {}
 };
 
 test "reactor emits QueueFull when queue admission capacity is saturated" {
@@ -222,6 +244,7 @@ test "reactor emits QueueFull when queue admission capacity is saturated" {
     var reactor = Reactor.init(.{
         .ctx = &dispatch_ctx,
         .dispatch = &TraceDispatch.dispatch,
+        .cleanupSession = &TraceDispatch.cleanupSession,
     }, .{
         .clock = clock.clock(),
         .queue_timeout_ticks = 100,
@@ -255,6 +278,7 @@ test "reactor emits QueueTimeout exactly at deadline before dispatch" {
     var reactor = Reactor.init(.{
         .ctx = &dispatch_ctx,
         .dispatch = &TraceDispatch.dispatch,
+        .cleanupSession = &TraceDispatch.cleanupSession,
     }, .{
         .clock = clock.clock(),
         .queue_timeout_ticks = 1,
@@ -305,6 +329,7 @@ test "reactor dispatches queued sessions in round-robin fair order" {
     var reactor = Reactor.init(.{
         .ctx = &dispatch_ctx,
         .dispatch = &TraceDispatch.dispatch,
+        .cleanupSession = &TraceDispatch.cleanupSession,
     }, .{
         .clock = clock.clock(),
         .queue_timeout_ticks = 100,
@@ -348,6 +373,7 @@ test "reactor keeps progressing reads timeouts and writes while worker is busy" 
     var reactor = Reactor.init(.{
         .ctx = &dispatch_ctx,
         .dispatch = &BlockingDispatch.dispatch,
+        .cleanupSession = &BlockingDispatch.cleanupSession,
     }, .{
         .clock = clock.clock(),
         .queue_timeout_ticks = 2,
@@ -399,6 +425,7 @@ test "reactor preserves deterministic mixed completion ordering with max_infligh
     var reactor = Reactor.init(.{
         .ctx = &dispatch_ctx,
         .dispatch = &MultiGateDispatch.dispatch,
+        .cleanupSession = &MultiGateDispatch.cleanupSession,
     }, .{
         .clock = clock.clock(),
         .queue_timeout_ticks = 100,

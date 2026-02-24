@@ -152,17 +152,33 @@ pub fn main() !void {
         const DispatchCtx = struct {
             session: *session_mod.Session,
             pool: *pool_mod.ConnectionPool,
+            pin_states: [256]session_mod.SessionPinState =
+                [_]session_mod.SessionPinState{.{}} ** 256,
 
             fn dispatch(
                 ptr: *anyopaque,
+                session_id: u16,
                 request: []const u8,
                 out: []u8,
-            ) session_mod.SessionError!usize {
+            ) session_mod.SessionError!reactor_mod.Dispatcher.DispatchResult {
                 const self: *@This() = @ptrCast(@alignCast(ptr));
-                return self.session.dispatchRequest(
+                const result = try self.session.dispatchRequestForSession(
                     self.pool,
+                    &self.pin_states[session_id],
                     request,
                     out,
+                );
+                return .{
+                    .response_len = result.bytes_written,
+                    .pin_transition = result.pin_transition,
+                };
+            }
+
+            fn cleanupSession(ptr: *anyopaque, session_id: u16) void {
+                const self: *@This() = @ptrCast(@alignCast(ptr));
+                self.session.cleanupPinnedSession(
+                    self.pool,
+                    &self.pin_states[session_id],
                 );
             }
         };
@@ -174,6 +190,7 @@ pub fn main() !void {
         var reactor = Reactor.init(.{
             .ctx = &dispatch_ctx,
             .dispatch = &DispatchCtx.dispatch,
+            .cleanupSession = &DispatchCtx.cleanupSession,
         }, .{
             .clock = clock.clock(),
             .max_inflight = concurrency,

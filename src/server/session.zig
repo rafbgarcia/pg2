@@ -44,6 +44,29 @@ pub const SessionResponse = struct {
     had_mutation: bool,
 };
 
+pub const PinTransition = enum(u8) {
+    none,
+    began,
+    ended,
+};
+
+pub const DispatchResult = struct {
+    bytes_written: usize,
+    pin_transition: PinTransition = .none,
+};
+
+pub const SessionPinState = struct {
+    active: bool = false,
+    pool_conn: PoolConn = undefined,
+};
+
+const TxControl = enum(u8) {
+    none,
+    begin,
+    commit,
+    rollback,
+};
+
 /// Deterministic request/session boundary used by server-side handlers.
 ///
 /// This path tokenizes/parses a query string, executes through a checked-out
@@ -142,14 +165,86 @@ pub const Session = struct {
         };
     }
 
-    /// Runs a single request through pool checkout/execute/checkin lifecycle
-    /// and serializes the final response into `response_buf`.
+    /// Runs one request through explicit tx control handling and standard
+    /// pool checkout/execute/checkin behavior.
+    pub fn dispatchRequestForSession(
+        self: *Session,
+        pool: *ConnectionPool,
+        pin_state: *SessionPinState,
+        request: []const u8,
+        response_buf: []u8,
+    ) SessionError!DispatchResult {
+        const control = classifyTxControl(request);
+        switch (control) {
+            .none => {},
+            .begin => return self.handleBegin(pool, pin_state, response_buf),
+            .commit => return self.handleCommit(pool, pin_state, response_buf),
+            .rollback => return self.handleRollback(pool, pin_state, response_buf),
+        }
+
+        if (pin_state.active) {
+            return self.dispatchPinnedRequest(
+                pool,
+                pin_state,
+                request,
+                response_buf,
+            );
+        }
+
+        return self.dispatchAutoCommitRequest(
+            pool,
+            request,
+            response_buf,
+        );
+    }
+
+    /// Backward-compatible single-request boundary for non-reactor callers.
     pub fn dispatchRequest(
         self: *Session,
         pool: *ConnectionPool,
         request: []const u8,
         response_buf: []u8,
     ) SessionError!usize {
+        var pin_state = SessionPinState{};
+        const result = try self.dispatchRequestForSession(
+            pool,
+            &pin_state,
+            request,
+            response_buf,
+        );
+        if (pin_state.active) {
+            self.cleanupPinnedSession(pool, &pin_state);
+        }
+        return result.bytes_written;
+    }
+
+    pub fn cleanupPinnedSession(
+        self: *Session,
+        pool: *ConnectionPool,
+        pin_state: *SessionPinState,
+    ) void {
+        if (!pin_state.active) return;
+        const tx_id = pin_state.pool_conn.tx_id;
+        mutation_mod.rollbackOverflowReclaimEntriesForTx(
+            self.catalog,
+            tx_id,
+        );
+        pool.rollbackPinned(&pin_state.pool_conn) catch |rollback_err| {
+            std.log.err(
+                "pool rollbackPinned failed: slot={d} err={s}",
+                .{ pin_state.pool_conn.slot_index, @errorName(rollback_err) },
+            );
+            @panic("pool rollbackPinned failed");
+        };
+        pin_state.* = .{};
+    }
+
+    fn dispatchAutoCommitRequest(
+        self: *Session,
+        pool: *ConnectionPool,
+        request: []const u8,
+        response_buf: []u8,
+    ) SessionError!DispatchResult {
         var pool_conn = pool.checkout() catch |err| {
             const class = runtime_errors.classifySessionBoundary(err);
             const boundary_msg = try serializeBoundaryError(
@@ -157,7 +252,7 @@ pub const Session = struct {
                 class,
                 err,
             );
-            return boundary_msg.len;
+            return .{ .bytes_written = boundary_msg.len };
         };
 
         const response = self.handleRequest(
@@ -183,7 +278,7 @@ pub const Session = struct {
                 );
                 @panic("pool abort checkin failed");
             };
-            return boundary_msg.len;
+            return .{ .bytes_written = boundary_msg.len };
         };
 
         if (response.is_query_error) {
@@ -228,7 +323,7 @@ pub const Session = struct {
                             @errorName(reclaim_err),
                         },
                     ) catch return error.ResponseTooLarge;
-                    return stream.pos;
+                    return .{ .bytes_written = stream.pos };
                 };
             }
             pool.checkin(&pool_conn) catch |checkin_err| {
@@ -240,7 +335,181 @@ pub const Session = struct {
             };
         }
         std.debug.assert(response.bytes_written <= response_buf.len);
-        return response.bytes_written;
+        return .{ .bytes_written = response.bytes_written };
+    }
+
+    fn dispatchPinnedRequest(
+        self: *Session,
+        pool: *ConnectionPool,
+        pin_state: *SessionPinState,
+        request: []const u8,
+        response_buf: []u8,
+    ) SessionError!DispatchResult {
+        std.debug.assert(pin_state.active);
+        const response = self.handleRequest(
+            pool,
+            &pin_state.pool_conn,
+            request,
+            response_buf,
+        ) catch |err| {
+            const class = runtime_errors.classifySessionBoundary(err);
+            const boundary_msg = try serializeBoundaryError(
+                response_buf,
+                class,
+                err,
+            );
+            return .{ .bytes_written = boundary_msg.len };
+        };
+
+        if (response.is_query_error) {
+            mutation_mod.rollbackOverflowReclaimEntriesForTx(
+                self.catalog,
+                pin_state.pool_conn.tx_id,
+            );
+        }
+        std.debug.assert(response.bytes_written <= response_buf.len);
+        return .{ .bytes_written = response.bytes_written };
+    }
+
+    fn handleBegin(
+        self: *Session,
+        pool: *ConnectionPool,
+        pin_state: *SessionPinState,
+        response_buf: []u8,
+    ) SessionError!DispatchResult {
+        _ = self;
+        if (pin_state.active) {
+            return .{
+                .bytes_written = try serializeTxControlError(
+                    response_buf,
+                    "TransactionAlreadyActive",
+                ),
+            };
+        }
+        var pool_conn = pool.checkout() catch |err| {
+            const class = runtime_errors.classifySessionBoundary(err);
+            const boundary_msg = try serializeBoundaryError(
+                response_buf,
+                class,
+                err,
+            );
+            return .{ .bytes_written = boundary_msg.len };
+        };
+        pool.pin(&pool_conn) catch |pin_err| {
+            const class = runtime_errors.classifySessionBoundary(pin_err);
+            const boundary_msg = serializeBoundaryError(
+                response_buf,
+                class,
+                pin_err,
+            ) catch "ERR class=internal code=ResponseTooLarge\n";
+            pool.abortCheckin(&pool_conn) catch |abort_err| {
+                std.log.err(
+                    "pool abort checkin failed: slot={d} err={s}",
+                    .{ pool_conn.slot_index, @errorName(abort_err) },
+                );
+                @panic("pool abort checkin failed");
+            };
+            return .{ .bytes_written = boundary_msg.len };
+        };
+        pin_state.* = .{
+            .active = true,
+            .pool_conn = pool_conn,
+        };
+        return .{
+            .bytes_written = try serializeTxControlOk(response_buf, "BEGIN"),
+            .pin_transition = .began,
+        };
+    }
+
+    fn handleCommit(
+        self: *Session,
+        pool: *ConnectionPool,
+        pin_state: *SessionPinState,
+        response_buf: []u8,
+    ) SessionError!DispatchResult {
+        if (!pin_state.active) {
+            return .{
+                .bytes_written = try serializeTxControlError(
+                    response_buf,
+                    "TransactionNotActive",
+                ),
+            };
+        }
+        const tx_id = pin_state.pool_conn.tx_id;
+        mutation_mod.commitOverflowReclaimEntriesForTx(
+            self.catalog,
+            &self.runtime.pool,
+            &self.runtime.wal,
+            tx_id,
+            std.math.maxInt(usize),
+        ) catch |reclaim_err| {
+            self.cleanupPinnedSession(pool, pin_state);
+            var stream = std.io.fixedBufferStream(response_buf);
+            const writer = stream.writer();
+            writer.print(
+                "ERR class={s} code={s}\n",
+                .{
+                    @tagName(runtime_errors.classifyMutation(reclaim_err)),
+                    @errorName(reclaim_err),
+                },
+            ) catch return error.ResponseTooLarge;
+            return .{
+                .bytes_written = stream.pos,
+                .pin_transition = .ended,
+            };
+        };
+        pool.unpin(&pin_state.pool_conn) catch |unpin_err| {
+            const class = runtime_errors.classifySessionBoundary(unpin_err);
+            const boundary_msg = try serializeBoundaryError(
+                response_buf,
+                class,
+                unpin_err,
+            );
+            pin_state.* = .{};
+            return .{
+                .bytes_written = boundary_msg.len,
+                .pin_transition = .ended,
+            };
+        };
+        self.runtime.wal.forceFlush() catch |flush_err| {
+            const class = runtime_errors.classifySessionBoundary(flush_err);
+            const boundary_msg = try serializeBoundaryError(
+                response_buf,
+                class,
+                flush_err,
+            );
+            pin_state.* = .{};
+            return .{
+                .bytes_written = boundary_msg.len,
+                .pin_transition = .ended,
+            };
+        };
+        pin_state.* = .{};
+        return .{
+            .bytes_written = try serializeTxControlOk(response_buf, "COMMIT"),
+            .pin_transition = .ended,
+        };
+    }
+
+    fn handleRollback(
+        self: *Session,
+        pool: *ConnectionPool,
+        pin_state: *SessionPinState,
+        response_buf: []u8,
+    ) SessionError!DispatchResult {
+        if (!pin_state.active) {
+            return .{
+                .bytes_written = try serializeTxControlError(
+                    response_buf,
+                    "TransactionNotActive",
+                ),
+            };
+        }
+        self.cleanupPinnedSession(pool, pin_state);
+        return .{
+            .bytes_written = try serializeTxControlOk(response_buf, "ROLLBACK"),
+            .pin_transition = .ended,
+        };
     }
 
     /// Serve all requests from one accepted connection using bounded buffers.
@@ -253,6 +522,8 @@ pub const Session = struct {
     ) ServeError!void {
         std.debug.assert(request_buf.len > 0);
         std.debug.assert(response_buf.len > 0);
+        var pin_state = SessionPinState{};
+        defer self.cleanupPinnedSession(pool, &pin_state);
         while (true) {
             const request_opt = connection.readRequest(request_buf) catch |err| switch (err) {
                 error.WouldBlock => continue,
@@ -260,14 +531,15 @@ pub const Session = struct {
             };
             const request = request_opt orelse break;
             if (request.len > request_buf.len) return error.RequestTooLarge;
-            const response_len = try self.dispatchRequest(
+            const dispatch_result = try self.dispatchRequestForSession(
                 pool,
+                &pin_state,
                 request,
                 response_buf,
             );
             try writeResponseRetry(
                 connection,
-                response_buf[0..response_len],
+                response_buf[0..dispatch_result.bytes_written],
             );
         }
 
@@ -313,6 +585,41 @@ fn writeResponseRetry(
         };
         return;
     }
+}
+
+fn classifyTxControl(request: []const u8) TxControl {
+    const trimmed = std.mem.trim(u8, request, " \t\r\n");
+    if (trimmed.len == 0) return .none;
+    if (std.ascii.eqlIgnoreCase(trimmed, "BEGIN")) return .begin;
+    if (std.ascii.eqlIgnoreCase(trimmed, "COMMIT")) return .commit;
+    if (std.ascii.eqlIgnoreCase(trimmed, "ROLLBACK")) return .rollback;
+    return .none;
+}
+
+fn serializeTxControlOk(
+    out: []u8,
+    tx_op: []const u8,
+) error{ResponseTooLarge}!usize {
+    var stream = std.io.fixedBufferStream(out);
+    const writer = stream.writer();
+    writer.print(
+        "OK tx={s}\n",
+        .{tx_op},
+    ) catch return error.ResponseTooLarge;
+    return stream.pos;
+}
+
+fn serializeTxControlError(
+    out: []u8,
+    code: []const u8,
+) error{ResponseTooLarge}!usize {
+    var stream = std.io.fixedBufferStream(out);
+    const writer = stream.writer();
+    writer.print(
+        "ERR class=invalid_request code={s}\n",
+        .{code},
+    ) catch return error.ResponseTooLarge;
+    return stream.pos;
 }
 
 fn fixedMessage(message: []const u8) []const u8 {

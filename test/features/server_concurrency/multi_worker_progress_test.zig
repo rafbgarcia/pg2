@@ -11,6 +11,7 @@ const io_mod = pg2.storage.io;
 
 const Acceptor = transport_mod.Acceptor;
 const Connection = transport_mod.Connection;
+const DispatchResult = reactor_mod.Dispatcher.DispatchResult;
 
 const request_a = "ConcUser |> where(id == 1) { id name }";
 const request_b = "ConcUser |> where(id == 2) { id name }";
@@ -113,6 +114,7 @@ const TestAcceptor = struct {
 const GatedSessionDispatch = struct {
     session: *session_mod.Session,
     pool: *pool_mod.ConnectionPool,
+    pin_states: [3]session_mod.SessionPinState = [_]session_mod.SessionPinState{.{}} ** 3,
     calls: std.atomic.Value(usize) = std.atomic.Value(usize).init(0),
     started_order: [8]u8 = [_]u8{0} ** 8,
     started_len: usize = 0,
@@ -122,7 +124,12 @@ const GatedSessionDispatch = struct {
     gate_mutex: std.Thread.Mutex = .{},
     gate_cond: std.Thread.Condition = .{},
 
-    fn dispatch(ctx_ptr: *anyopaque, request: []const u8, out: []u8) session_mod.SessionError!usize {
+    fn dispatch(
+        ctx_ptr: *anyopaque,
+        session_id: u16,
+        request: []const u8,
+        out: []u8,
+    ) session_mod.SessionError!DispatchResult {
         const self: *@This() = @ptrCast(@alignCast(ctx_ptr));
         const tag = tagForRequest(request) catch return error.ResponseTooLarge;
 
@@ -135,8 +142,9 @@ const GatedSessionDispatch = struct {
         }
         self.gate_mutex.unlock();
 
-        const len = try self.session.dispatchRequest(
+        const session_result = try self.session.dispatchRequestForSession(
             self.pool,
+            &self.pin_states[session_id],
             request,
             out,
         );
@@ -145,7 +153,10 @@ const GatedSessionDispatch = struct {
         self.completed_order[self.completed_len] = tag;
         self.completed_len += 1;
         self.gate_mutex.unlock();
-        return len;
+        return .{
+            .response_len = session_result.bytes_written,
+            .pin_transition = session_result.pin_transition,
+        };
     }
 
     fn release(self: *@This(), tag: u8) !void {
@@ -189,6 +200,14 @@ const GatedSessionDispatch = struct {
         if (std.mem.eql(u8, request, request_c)) return 'C';
         return error.InvalidRequest;
     }
+
+    fn cleanupSession(ptr: *anyopaque, session_id: u16) void {
+        const self: *@This() = @ptrCast(@alignCast(ptr));
+        self.session.cleanupPinnedSession(
+            self.pool,
+            &self.pin_states[session_id],
+        );
+    }
 };
 
 test "feature server concurrency progresses fast session while one worker remains blocked" {
@@ -221,6 +240,7 @@ test "feature server concurrency progresses fast session while one worker remain
     var reactor = Reactor.init(.{
         .ctx = &dispatch_ctx,
         .dispatch = &GatedSessionDispatch.dispatch,
+        .cleanupSession = &GatedSessionDispatch.cleanupSession,
     }, .{
         .clock = clock.clock(),
         .queue_timeout_ticks = 1024,
