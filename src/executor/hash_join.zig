@@ -69,6 +69,67 @@ pub const PartitionSpillDescriptor = struct {
     }
 };
 
+pub const PartitionSpillBuilder = struct {
+    temp_mgr: *TempStorageManager,
+    right_key_index: u16,
+    descriptor: *PartitionSpillDescriptor,
+    writers: [max_partitions]SpillPageWriter = undefined,
+
+    pub fn init(
+        temp_mgr: *TempStorageManager,
+        right_key_index: u16,
+        descriptor: *PartitionSpillDescriptor,
+    ) PartitionSpillBuilder {
+        var builder = PartitionSpillBuilder{
+            .temp_mgr = temp_mgr,
+            .right_key_index = right_key_index,
+            .descriptor = descriptor,
+        };
+        for (0..descriptor.partition_count) |p| {
+            builder.writers[p] = SpillPageWriter.init();
+            descriptor.partition_row_counts[p] = 0;
+        }
+        descriptor.page_count = 0;
+        return builder;
+    }
+
+    pub fn appendRows(self: *PartitionSpillBuilder, rows: []const ResultRow) SpillPartitionError!void {
+        if (rows.len > 0 and self.right_key_index >= rows[0].column_count) {
+            return error.RightKeyOutOfBounds;
+        }
+        for (rows) |row| {
+            const partition = try partitionForKey(
+                row.values[self.right_key_index],
+                self.descriptor.partition_count,
+            );
+            self.descriptor.partition_row_counts[partition] += 1;
+            const appended = self.writers[partition].appendRow(&row) catch |err| return err;
+            if (!appended) {
+                try self.flushPartition(@intCast(partition));
+                const retry = self.writers[partition].appendRow(&row) catch |err| return err;
+                std.debug.assert(retry);
+            }
+        }
+    }
+
+    pub fn finish(self: *PartitionSpillBuilder) SpillPartitionError!void {
+        for (0..self.descriptor.partition_count) |p| {
+            if (self.writers[p].row_count == 0) continue;
+            try self.flushPartition(@intCast(p));
+        }
+    }
+
+    fn flushPartition(self: *PartitionSpillBuilder, partition: u8) SpillPartitionError!void {
+        if (self.descriptor.page_count >= max_spill_pages) return error.SpillPageBudgetExceeded;
+        const payload = self.writers[partition].finalize();
+        const page_id = try self.temp_mgr.allocateAndWrite(payload, TempPage.null_page_id);
+        self.descriptor.page_ids[self.descriptor.page_count] = page_id;
+        self.descriptor.page_partition[self.descriptor.page_count] = partition;
+        self.descriptor.page_count += 1;
+        self.writers[partition].reset();
+    }
+};
+
 pub const PartitionRowIterator = struct {
     temp_mgr: *TempStorageManager,
     descriptor: *const PartitionSpillDescriptor,
@@ -98,7 +159,7 @@ pub const PartitionRowIterator = struct {
     ) SpillPartitionError!bool {
         while (true) {
             if (self.reader_loaded) {
-                const has_row = self.reader.next(out, arena) catch return error.SpillError;
+                const has_row = self.reader.next(out, arena) catch |err| return err;
                 if (has_row) return true;
                 self.reader_loaded = false;
             }
@@ -336,47 +397,13 @@ pub fn spillRowsByPartition(
     right_key_index: u16,
     descriptor: *PartitionSpillDescriptor,
 ) SpillPartitionError!void {
-    if (rows.len > 0 and right_key_index >= rows[0].column_count) {
-        return error.RightKeyOutOfBounds;
-    }
-
-    var writers: [max_partitions]SpillPageWriter = undefined;
-    for (0..descriptor.partition_count) |p| {
-        writers[p] = SpillPageWriter.init();
-        descriptor.partition_row_counts[p] = 0;
-    }
-    descriptor.page_count = 0;
-
-    for (rows) |row| {
-        const partition = try partitionForKey(
-            row.values[right_key_index],
-            descriptor.partition_count,
-        );
-        descriptor.partition_row_counts[partition] += 1;
-        const appended = writers[partition].appendRow(&row) catch return error.SpillError;
-        if (!appended) {
-            if (descriptor.page_count >= max_spill_pages) return error.SpillPageBudgetExceeded;
-            const payload = writers[partition].finalize();
-            const page_id = try temp_mgr.allocateAndWrite(payload, TempPage.null_page_id);
-            descriptor.page_ids[descriptor.page_count] = page_id;
-            descriptor.page_partition[descriptor.page_count] = partition;
-            descriptor.page_count += 1;
-
-            writers[partition].reset();
-            const retry = writers[partition].appendRow(&row) catch return error.SpillError;
-            std.debug.assert(retry);
-        }
-    }
-
-    for (0..descriptor.partition_count) |p| {
-        if (writers[p].row_count == 0) continue;
-        if (descriptor.page_count >= max_spill_pages) return error.SpillPageBudgetExceeded;
-        const payload = writers[p].finalize();
-        const page_id = try temp_mgr.allocateAndWrite(payload, TempPage.null_page_id);
-        descriptor.page_ids[descriptor.page_count] = page_id;
-        descriptor.page_partition[descriptor.page_count] = @intCast(p);
-        descriptor.page_count += 1;
-    }
+    var builder = PartitionSpillBuilder.init(
+        temp_mgr,
+        right_key_index,
+        descriptor,
+    );
+    try builder.appendRows(rows);
+    try builder.finish();
 }
 
 const testing = std.testing;

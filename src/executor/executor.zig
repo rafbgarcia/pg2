@@ -89,6 +89,7 @@ pub const JoinStrategy = enum {
     none,
     nested_loop,
     hash_in_memory,
+    hash_spill,
 };
 
 pub const JoinOrder = enum {
@@ -2280,6 +2281,24 @@ const NestedHashFastPathOutcome = enum {
     failed,
 };
 
+fn setNestedHashPartitionError(
+    result: *QueryResult,
+    err: anyerror,
+) void {
+    setError(result, switch (err) {
+        error.InvalidPartitionCount => "nested relation hash spill invalid partition count",
+        error.RightKeyOutOfBounds => "join key out of bounds",
+        error.SpillPageBudgetExceeded => "nested relation hash spill temp page budget exhausted",
+        error.SpillError => "nested relation hash spill row serialization failed",
+        error.RegionExhausted => "nested relation hash spill temp page budget exhausted",
+        error.PageFull => "nested relation hash spill row too large",
+        error.InvalidPageFormat, error.UnsupportedPageVersion, error.ChecksumMismatch, error.InvalidPageType => "nested relation hash spill page corruption",
+        error.ReadError => "nested relation hash spill read failed",
+        error.WriteError => "nested relation hash spill write failed",
+        else => "nested relation hash spill failed",
+    });
+}
+
 fn tryApplyNestedSelectionHashJoinFlatNoOps(
     ctx: *const ExecContext,
     result: *QueryResult,
@@ -2322,7 +2341,162 @@ fn tryApplyNestedSelectionHashJoinFlatNoOps(
     };
     result.stats.pages_read +|= right_chunk.pages_read;
     if (!right_cursor.done) {
-        return .not_applicable;
+        var temp_mgr = TempStorageManager.init(
+            ctx.query_slot_index,
+            ctx.storage,
+            temp_mod.default_pages_per_query_slot,
+            temp_mod.nested_region_start_page_id,
+        ) catch {
+            setError(result, "nested relation hash spill temp init failed");
+            return .failed;
+        };
+        var descriptor = hash_join_mod.PartitionSpillDescriptor.init(
+            hash_join_mod.max_partitions,
+        ) catch |err| {
+            setNestedHashPartitionError(result, err);
+            return .failed;
+        };
+        // Include first chunk already loaded in `scratch_rows_a`.
+        var builder = hash_join_mod.PartitionSpillBuilder.init(
+            &temp_mgr,
+            join.right_key_index,
+            &descriptor,
+        );
+        builder.appendRows(ctx.scratch_rows_a[0..right_chunk.row_count]) catch |err| {
+            setNestedHashPartitionError(result, err);
+            return .failed;
+        };
+        while (!right_cursor.done) {
+            decode_arena.reset();
+            const chunk = scan_mod.tableScanInto(
+                ctx.catalog,
+                ctx.pool,
+                ctx.undo_log,
+                ctx.snapshot,
+                ctx.tx_manager,
+                target_model_id,
+                ctx.scratch_rows_a[0..scan_mod.scan_batch_size],
+                &decode_arena,
+                &right_cursor,
+            ) catch |err| {
+                setBoundaryError(
+                    result,
+                    "nested relation scan failed",
+                    runtime_errors.classifyScan(err),
+                    err,
+                );
+                return .failed;
+            };
+            result.stats.pages_read +|= chunk.pages_read;
+            builder.appendRows(ctx.scratch_rows_a[0..chunk.row_count]) catch |err| {
+                setNestedHashPartitionError(result, err);
+                return .failed;
+            };
+        }
+        builder.finish() catch |err| {
+            setNestedHashPartitionError(result, err);
+            return .failed;
+        };
+
+        var output_count: u16 = 0;
+        var iter_arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
+        var iter_arena = scan_mod.StringArena.init(&iter_arena_buf);
+        var right_row = ResultRow.init();
+        for (left_copy[0..left_count]) |left_row| {
+            if (join.left_key_index >= left_row.column_count) {
+                setError(result, "join key out of bounds");
+                return .failed;
+            }
+            const total_columns_with_right = @as(usize, left_row.column_count) +
+                @as(usize, target_schema.column_count);
+            if (total_columns_with_right > scan_mod.max_columns) {
+                setError(result, "join column capacity exceeded");
+                return .failed;
+            }
+            const partition = hash_join_mod.partitionForKey(
+                left_row.values[join.left_key_index],
+                descriptor.partition_count,
+            ) catch |err| {
+                setNestedHashPartitionError(result, err);
+                return .failed;
+            };
+
+            var matched = false;
+            if (descriptor.partition_row_counts[partition] > 0) {
+                var partition_iter = hash_join_mod.PartitionRowIterator.init(
+                    &temp_mgr,
+                    &descriptor,
+                    partition,
+                ) catch |err| {
+                    setNestedHashPartitionError(result, err);
+                    return .failed;
+                };
+                while (true) {
+                    iter_arena.reset();
+                    const has_right = partition_iter.next(&right_row, &iter_arena) catch |err| {
+                        setNestedHashPartitionError(result, err);
+                        return .failed;
+                    };
+                    if (!has_right) break;
+                    if (row_mod.compareValues(
+                        left_row.values[join.left_key_index],
+                        right_row.values[join.right_key_index],
+                    ) != .eq) continue;
+                    matched = true;
+                    if (@as(usize, output_count) >= caps.join_output_rows) {
+                        setError(result, "join output row capacity exceeded");
+                        return .failed;
+                    }
+                    const total_columns = @as(usize, left_row.column_count) +
+                        @as(usize, right_row.column_count);
+                    if (total_columns > scan_mod.max_columns) {
+                        setError(result, "join column capacity exceeded");
+                        return .failed;
+                    }
+                    var out = ResultRow.init();
+                    out.column_count = @intCast(total_columns);
+                    out.row_id = left_row.row_id;
+                    @memcpy(
+                        out.values[0..left_row.column_count],
+                        left_row.values[0..left_row.column_count],
+                    );
+                    var nested_col: u16 = 0;
+                    while (nested_col < right_row.column_count) : (nested_col += 1) {
+                        out.values[left_row.column_count + nested_col] = copyNestedValueIntoArena(
+                            right_row.values[nested_col],
+                            string_arena,
+                        ) catch {
+                            setError(result, "nested relation output string arena exhausted");
+                            return .failed;
+                        };
+                    }
+                    result.rows[output_count] = out;
+                    output_count += 1;
+                }
+            }
+            if (!matched) {
+                if (@as(usize, output_count) >= caps.join_output_rows) {
+                    setError(result, "join output row capacity exceeded");
+                    return .failed;
+                }
+                var out = ResultRow.init();
+                out.column_count = @intCast(total_columns_with_right);
+                out.row_id = left_row.row_id;
+                @memcpy(
+                    out.values[0..left_row.column_count],
+                    left_row.values[0..left_row.column_count],
+                );
+                var null_col: u16 = 0;
+                while (null_col < target_schema.column_count) : (null_col += 1) {
+                    out.values[left_row.column_count + null_col] = .{ .null_value = {} };
+                }
+                result.rows[output_count] = out;
+                output_count += 1;
+            }
+        }
+        result.row_count = output_count;
+        recordNestedHashSpillJoinPlan(&result.stats.plan);
+        return .applied;
     }
 
     const right_rows = ctx.scratch_rows_a[0..right_chunk.row_count];
@@ -2386,7 +2560,182 @@ fn tryApplyNestedSelectionHashJoinCollectorNoOps(
     };
     result.stats.pages_read +|= right_chunk.pages_read;
     if (!right_cursor.done) {
-        return .not_applicable;
+        var temp_mgr = TempStorageManager.init(
+            ctx.query_slot_index,
+            ctx.storage,
+            temp_mod.default_pages_per_query_slot,
+            temp_mod.nested_region_start_page_id,
+        ) catch {
+            setError(result, "nested relation hash spill temp init failed");
+            return .failed;
+        };
+        var descriptor = hash_join_mod.PartitionSpillDescriptor.init(
+            hash_join_mod.max_partitions,
+        ) catch |err| {
+            setNestedHashPartitionError(result, err);
+            return .failed;
+        };
+        var builder = hash_join_mod.PartitionSpillBuilder.init(
+            &temp_mgr,
+            join.right_key_index,
+            &descriptor,
+        );
+        builder.appendRows(ctx.scratch_rows_a[0..right_chunk.row_count]) catch |err| {
+            setNestedHashPartitionError(result, err);
+            return .failed;
+        };
+        while (!right_cursor.done) {
+            decode_arena.reset();
+            const chunk = scan_mod.tableScanInto(
+                ctx.catalog,
+                ctx.pool,
+                ctx.undo_log,
+                ctx.snapshot,
+                ctx.tx_manager,
+                target_model_id,
+                ctx.scratch_rows_a[0..scan_mod.scan_batch_size],
+                &decode_arena,
+                &right_cursor,
+            ) catch |err| {
+                setBoundaryError(
+                    result,
+                    "nested relation scan failed",
+                    runtime_errors.classifyScan(err),
+                    err,
+                );
+                return .failed;
+            };
+            result.stats.pages_read +|= chunk.pages_read;
+            builder.appendRows(ctx.scratch_rows_a[0..chunk.row_count]) catch |err| {
+                setNestedHashPartitionError(result, err);
+                return .failed;
+            };
+        }
+        builder.finish() catch |err| {
+            setNestedHashPartitionError(result, err);
+            return .failed;
+        };
+
+        var output_page_ids: [max_spill_pages]u64 = undefined;
+        var output_page_count: u32 = 0;
+        var output_rows: u64 = 0;
+        var writer = SpillPageWriter.init();
+
+        var left_iter = collector.iterator();
+        var left_arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
+        var left_arena = scan_mod.StringArena.init(&left_arena_buf);
+        var left_row = ResultRow.init();
+        var iter_arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
+        var iter_arena = scan_mod.StringArena.init(&iter_arena_buf);
+        var right_row = ResultRow.init();
+        var skip = result.collector_output_offset;
+        var remaining = result.collector_output_count;
+
+        while (remaining > 0) {
+            left_arena.reset();
+            const has_left = left_iter.next(&left_row, &left_arena) catch {
+                setError(result, "nested relation left-side spill read failed");
+                return .failed;
+            };
+            if (!has_left) break;
+            if (skip > 0) {
+                skip -= 1;
+                continue;
+            }
+            remaining -= 1;
+            if (join.left_key_index >= left_row.column_count) {
+                setError(result, "join key out of bounds");
+                return .failed;
+            }
+
+            const partition = hash_join_mod.partitionForKey(
+                left_row.values[join.left_key_index],
+                descriptor.partition_count,
+            ) catch |err| {
+                setNestedHashPartitionError(result, err);
+                return .failed;
+            };
+
+            var matched = false;
+            if (descriptor.partition_row_counts[partition] > 0) {
+                var partition_iter = hash_join_mod.PartitionRowIterator.init(
+                    &temp_mgr,
+                    &descriptor,
+                    partition,
+                ) catch |err| {
+                    setNestedHashPartitionError(result, err);
+                    return .failed;
+                };
+                while (true) {
+                    iter_arena.reset();
+                    const has_right = partition_iter.next(&right_row, &iter_arena) catch |err| {
+                        setNestedHashPartitionError(result, err);
+                        return .failed;
+                    };
+                    if (!has_right) break;
+                    if (row_mod.compareValues(
+                        left_row.values[join.left_key_index],
+                        right_row.values[join.right_key_index],
+                    ) != .eq) continue;
+                    matched = true;
+                    if (!appendNestedCollectorOutputRow(
+                        result,
+                        collector,
+                        &writer,
+                        &output_page_ids,
+                        &output_page_count,
+                        &output_rows,
+                        &left_row,
+                        &right_row,
+                        target_schema.column_count,
+                    )) return .failed;
+                }
+            }
+            if (!matched) {
+                if (!appendNestedCollectorOutputRow(
+                    result,
+                    collector,
+                    &writer,
+                    &output_page_ids,
+                    &output_page_count,
+                    &output_rows,
+                    &left_row,
+                    null,
+                    target_schema.column_count,
+                )) return .failed;
+            }
+        }
+
+        if (writer.row_count > 0) {
+            if (output_page_count >= max_spill_pages) {
+                setError(result, "nested relation spill page tracking overflow");
+                return .failed;
+            }
+            const payload = writer.finalize();
+            const page_id = collector.temp_mgr.allocateAndWrite(payload, temp_mod.TempPage.null_page_id) catch {
+                setError(result, "nested relation spill write failed");
+                return .failed;
+            };
+            output_page_ids[output_page_count] = page_id;
+            output_page_count += 1;
+        }
+
+        @memcpy(
+            collector.spill_page_ids[0..output_page_count],
+            output_page_ids[0..output_page_count],
+        );
+        collector.spill_page_count = output_page_count;
+        collector.hot_count = 0;
+        collector.hot_bytes = 0;
+        collector.total_rows = output_rows;
+        collector.iteration_started = false;
+
+        result.collector = collector;
+        result.collector_output_offset = 0;
+        result.collector_output_count = output_rows;
+        result.row_count = @intCast(@min(output_rows, scan_mod.scan_batch_size));
+        recordNestedHashSpillJoinPlan(&result.stats.plan);
+        return .applied;
     }
 
     const right_rows = ctx.scratch_rows_a[0..right_chunk.row_count];
@@ -3803,6 +4152,15 @@ fn recordNestedHashJoinPlan(plan: *PlanStats) void {
     plan.materialization_mode = .bounded_row_buffers;
 }
 
+fn recordNestedHashSpillJoinPlan(plan: *PlanStats) void {
+    if (plan.nested_relation_count < std.math.maxInt(u8)) {
+        plan.nested_relation_count += 1;
+    }
+    plan.join_strategy = .hash_spill;
+    plan.join_order = .source_then_nested;
+    plan.materialization_mode = .bounded_row_buffers;
+}
+
 /// Find the first mutation operator in the list.
 fn findMutationOp(
     ops: *const [max_operators]OpDescriptor,
@@ -4576,6 +4934,81 @@ test "execute nested relation collector path without child operators uses hash i
     try testing.expect(!result.has_error);
     try testing.expectEqual(
         JoinStrategy.hash_in_memory,
+        result.stats.plan.join_strategy,
+    );
+    try testing.expectEqual(
+        JoinOrder.source_then_nested,
+        result.stats.plan.join_order,
+    );
+    try testing.expectEqual(
+        MaterializationMode.bounded_row_buffers,
+        result.stats.plan.materialization_mode,
+    );
+    try testing.expectEqual(@as(u8, 1), result.stats.plan.nested_relation_count);
+}
+
+test "execute nested relation without child operators uses hash spill strategy when right side exceeds flat fit" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const post_model = try env.catalog.addModel("Post");
+    _ = try env.catalog.addColumn(post_model, "id", .i64, false);
+    _ = try env.catalog.addColumn(post_model, "user_id", .i64, false);
+    env.catalog.models[post_model].heap_first_page_id = 125;
+    env.catalog.models[post_model].total_pages = 1;
+    _ = try env.catalog.addAssociation(
+        env.model_id,
+        "posts",
+        AssociationKind.has_many,
+        "Post",
+    );
+    try env.catalog.resolveAssociations();
+
+    const post_page = try env.pool.pin(125);
+    heap_mod.HeapPage.init(post_page);
+    env.pool.unpin(125, true);
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const user_src = "User |> insert(id = 1, name = \"Alice\", active = true)";
+    const user_tok = tokenizer_mod.tokenize(user_src);
+    const user_p = parser_mod.parse(&user_tok, user_src);
+    try testing.expect(!user_p.has_error);
+    var user_r = try execute(&env.makeCtx(tx, &snap, &user_p.ast, &user_tok, user_src));
+    defer user_r.deinit();
+    try testing.expect(!user_r.has_error);
+
+    var post_id: u32 = 1;
+    while (post_id <= scan_mod.scan_batch_size + 32) : (post_id += 1) {
+        const owner_id: u32 = if (post_id <= 200) 1 else 2;
+        var post_buf: [128]u8 = undefined;
+        const post_src = try std.fmt.bufPrint(
+            post_buf[0..],
+            "Post |> insert(id = {d}, user_id = {d})",
+            .{ post_id, owner_id },
+        );
+        const post_tok = tokenizer_mod.tokenize(post_src);
+        const post_p = parser_mod.parse(&post_tok, post_src);
+        try testing.expect(!post_p.has_error);
+        var post_r = try execute(&env.makeCtx(tx, &snap, &post_p.ast, &post_tok, post_src));
+        defer post_r.deinit();
+        try testing.expect(!post_r.has_error);
+    }
+
+    const src = "User |> where(id == 1) { id posts { id } }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+
+    try testing.expect(!result.has_error);
+    try testing.expect(result.row_count > 0);
+    try testing.expectEqual(
+        JoinStrategy.hash_spill,
         result.stats.plan.join_strategy,
     );
     try testing.expectEqual(
