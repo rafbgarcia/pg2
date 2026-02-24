@@ -54,4 +54,5 @@ comptime {
     _ = @import("variables_and_multi_statement/multi_statement_mutation_chain_test.zig");
     _ = @import("variables_and_multi_statement/multi_statement_atomic_rollback_test.zig");
     _ = @import("server_concurrency/multi_worker_progress_test.zig");
+    _ = @import("server_concurrency/transaction_pinning_queue_pressure_test.zig");
 }
