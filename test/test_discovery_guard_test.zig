@@ -7,7 +7,6 @@ const Suite = struct {
 };
 
 const suites = [_]Suite{
-    .{ .name = "unit", .dir = "unit", .root = "test/unit/unit_specs_test.zig" },
     .{ .name = "features", .dir = "features", .root = "test/features/features_specs_test.zig" },
     .{ .name = "internals", .dir = "internals", .root = "test/internals/internals_specs_test.zig" },
     .{ .name = "stress", .dir = "stress", .root = "test/stress/stress_specs_test.zig" },

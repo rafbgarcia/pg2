@@ -10,9 +10,7 @@ The objective is strict separation by contract level first, then runtime cost.
 - Dependency rule: no session-path integration unless explicitly required by contract.
 - Runtime target: fastest lane.
 - Build targets:
-  - `zig build unit` (compile gate for `test/unit/*` suite roots).
-  - `zig build unit-run` (executes `test/unit/*` and legacy inline `src/*` tests during migration).
-  - `zig build unit-legacy` and `zig build unit-legacy-run` (legacy inline `src/*` only).
+  - `zig build unit` (runs inline `src/*` unit tests).
 
 2. `features`
 - Scope: user-facing behavior contracts (1:1 supported product features).
@@ -43,10 +41,7 @@ The objective is strict separation by contract level first, then runtime cost.
 ## Build Targets
 
 - `zig build test`: fast lane (`features`, `internals`) plus deterministic simulation gate.
-- `zig build unit`: compile `test/unit/*` lane tests.
-- `zig build unit-run`: run `test/unit/*` lane tests plus legacy inline `src/*` tests.
-- `zig build unit-legacy`: compile only legacy inline `src/*` tests.
-- `zig build unit-legacy-run`: run only legacy inline `src/*` tests.
+- `zig build unit`: run inline `src/*` unit tests.
 - `zig build sim`: simulation lane only.
 - `zig build stress`: heavy stress lane only.
 
@@ -59,5 +54,5 @@ The objective is strict separation by contract level first, then runtime cost.
 
 ## Migration Notes
 
-- Existing `src/*` inline tests are treated as legacy and are executed via `unit-run` until migration completes.
-- New test work should be added under `test/<lane>/...` and wired through generated suite roots.
+- Inline `src/*` tests are the primary unit lane while module-private invariants remain colocated.
+- `test/unit/*` is optional and can host cross-module black-box unit scenarios when needed.
