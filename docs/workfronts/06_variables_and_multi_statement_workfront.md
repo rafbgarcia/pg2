@@ -214,6 +214,7 @@ Current coverage implemented:
 - `statement_error_index_test.zig`
 - `response_shape_multi_statement_test.zig`
 - `shared_snapshot_read_your_writes_test.zig`
+- `variable_spill_sorted_source_test.zig`
 
 ### Gate
 - Feature suite passes under `zig build test`.
