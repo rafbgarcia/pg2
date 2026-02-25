@@ -77,6 +77,7 @@ pub fn serializeQueryResult(
         // Tree protocol always uses the flat array path.
         try serializeTreeProtocol(writer, result, &projection, catalog, tokens, source);
         if (pool_stats) |stats| {
+            const oldest_active = if (tx_stats) |ts| ts.oldest_active_tx_id else std.math.maxInt(u64);
             try serializeInspectStats(
                 writer,
                 &result.stats,
@@ -84,8 +85,8 @@ pub fn serializeQueryResult(
                 runtime_stats,
                 tx_stats,
                 catalog.snapshotOverflowReclaimStats(),
-                catalog.snapshotSlotReclaimStats(),
-                catalog.snapshotIndexReclaimStats(),
+                catalog.snapshotSlotReclaimStatsAtOldest(oldest_active),
+                catalog.snapshotIndexReclaimStatsAtOldest(oldest_active),
             );
         }
         return;
@@ -120,6 +121,7 @@ pub fn serializeQueryResult(
     }
 
     if (pool_stats) |stats| {
+        const oldest_active = if (tx_stats) |ts| ts.oldest_active_tx_id else std.math.maxInt(u64);
         try serializeInspectStats(
             writer,
             &result.stats,
@@ -127,8 +129,8 @@ pub fn serializeQueryResult(
             runtime_stats,
             tx_stats,
             catalog.snapshotOverflowReclaimStats(),
-            catalog.snapshotSlotReclaimStats(),
-            catalog.snapshotIndexReclaimStats(),
+            catalog.snapshotSlotReclaimStatsAtOldest(oldest_active),
+            catalog.snapshotIndexReclaimStatsAtOldest(oldest_active),
         );
     }
 }
@@ -223,9 +225,10 @@ fn serializeInspectStats(
         },
     ) catch return error.ResponseTooLarge;
     writer.print(
-        "INSPECT heap_reclaim queue_depth={d} reclaim_enqueued_total={d} reclaim_dequeued_total={d} reclaimed_slots_total={d} reclaim_failures_total={d}\n",
+        "INSPECT heap_reclaim queue_depth={d} pinned_by_snapshot={d} reclaim_enqueued_total={d} reclaim_dequeued_total={d} reclaimed_slots_total={d} reclaim_failures_total={d}\n",
         .{
             slot_stats.queue_depth,
+            slot_stats.pinned_by_snapshot,
             slot_stats.enqueued_total,
             slot_stats.dequeued_total,
             slot_stats.reclaimed_total,
@@ -233,9 +236,10 @@ fn serializeInspectStats(
         },
     ) catch return error.ResponseTooLarge;
     writer.print(
-        "INSPECT index_reclaim queue_depth={d} reclaim_enqueued_total={d} reclaim_dequeued_total={d} reclaimed_entries_total={d} reclaim_failures_total={d}\n",
+        "INSPECT index_reclaim queue_depth={d} pinned_by_snapshot={d} reclaim_enqueued_total={d} reclaim_dequeued_total={d} reclaimed_entries_total={d} reclaim_failures_total={d}\n",
         .{
             index_stats.queue_depth,
+            index_stats.pinned_by_snapshot,
             index_stats.enqueued_total,
             index_stats.dequeued_total,
             index_stats.reclaimed_total,

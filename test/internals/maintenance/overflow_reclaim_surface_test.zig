@@ -105,7 +105,7 @@ test "internal inspect exposes overflow reclaim backlog and throughput counters"
         std.mem.indexOf(
             u8,
             result,
-            "INSPECT heap_reclaim queue_depth=0 reclaim_enqueued_total=0 reclaim_dequeued_total=0 reclaimed_slots_total=0 reclaim_failures_total=0\n",
+            "INSPECT heap_reclaim queue_depth=0 pinned_by_snapshot=0 reclaim_enqueued_total=0 reclaim_dequeued_total=0 reclaimed_slots_total=0 reclaim_failures_total=0\n",
         ) != null,
     );
 }

@@ -135,6 +135,20 @@ pub const SlotReclaimQueue = struct {
         }
         return false;
     }
+
+    pub fn countPinnedBySnapshot(self: *const SlotReclaimQueue, oldest_active: u64) u32 {
+        var count: u32 = 0;
+        var idx = self.head;
+        var remaining = self.len;
+        while (remaining > 0) : (remaining -= 1) {
+            const entry = self.entries[idx];
+            if (entry.state == .committed and entry.deleting_tx_id >= oldest_active) {
+                count += 1;
+            }
+            idx = (idx + 1) % slot_reclaim_queue_capacity;
+        }
+        return count;
+    }
 };
 
 pub const IndexReclaimEntryState = enum(u8) {
@@ -316,6 +330,20 @@ pub const IndexReclaimQueue = struct {
         const end = start + entry.key_len;
         if (start > self.key_bytes_len or end > self.key_bytes_len) return self.key_bytes[0..0];
         return self.key_bytes[start..end];
+    }
+
+    pub fn countPinnedBySnapshot(self: *const IndexReclaimQueue, oldest_active: u64) u32 {
+        var count: u32 = 0;
+        var idx = self.head;
+        var remaining = self.len;
+        while (remaining > 0) : (remaining -= 1) {
+            const entry = self.entries[idx];
+            if (entry.state == .committed and entry.deleting_tx_id >= oldest_active) {
+                count += 1;
+            }
+            idx = (idx + 1) % index_reclaim_queue_capacity;
+        }
+        return count;
     }
 
     fn compact(self: *IndexReclaimQueue) void {

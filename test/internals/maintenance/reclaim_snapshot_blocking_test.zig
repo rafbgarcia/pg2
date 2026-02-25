@@ -42,7 +42,7 @@ test "internal long-lived snapshot blocks slot reclaim until snapshot closes" {
         std.mem.indexOf(
             u8,
             result,
-            "INSPECT heap_reclaim queue_depth=1 reclaim_enqueued_total=1 reclaim_dequeued_total=0 reclaimed_slots_total=0 reclaim_failures_total=0\n",
+            "INSPECT heap_reclaim queue_depth=1 pinned_by_snapshot=0 reclaim_enqueued_total=1 reclaim_dequeued_total=0 reclaimed_slots_total=0 reclaim_failures_total=0\n",
         ) != null,
     );
 
@@ -70,7 +70,7 @@ test "internal long-lived snapshot blocks slot reclaim until snapshot closes" {
         std.mem.indexOf(
             u8,
             result,
-            "INSPECT heap_reclaim queue_depth=0 reclaim_enqueued_total=1 reclaim_dequeued_total=1 reclaimed_slots_total=1 reclaim_failures_total=0\n",
+            "INSPECT heap_reclaim queue_depth=0 pinned_by_snapshot=0 reclaim_enqueued_total=1 reclaim_dequeued_total=1 reclaimed_slots_total=1 reclaim_failures_total=0\n",
         ) != null,
     );
 }

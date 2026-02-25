@@ -192,6 +192,7 @@ pub const SlotReclaimStats = struct {
 
 pub const SlotReclaimStatsSnapshot = struct {
     queue_depth: u32 = 0,
+    pinned_by_snapshot: u32 = 0,
     enqueued_total: u64 = 0,
     dequeued_total: u64 = 0,
     reclaimed_total: u64 = 0,
@@ -207,6 +208,7 @@ pub const IndexReclaimStats = struct {
 
 pub const IndexReclaimStatsSnapshot = struct {
     queue_depth: u32 = 0,
+    pinned_by_snapshot: u32 = 0,
     enqueued_total: u64 = 0,
     dequeued_total: u64 = 0,
     reclaimed_total: u64 = 0,
@@ -627,8 +629,16 @@ pub const Catalog = struct {
     pub fn snapshotSlotReclaimStats(
         self: *const Catalog,
     ) SlotReclaimStatsSnapshot {
+        return self.snapshotSlotReclaimStatsAtOldest(std.math.maxInt(u64));
+    }
+
+    pub fn snapshotSlotReclaimStatsAtOldest(
+        self: *const Catalog,
+        oldest_active: u64,
+    ) SlotReclaimStatsSnapshot {
         return .{
             .queue_depth = @intCast(self.slot_reclaim_queue.len),
+            .pinned_by_snapshot = self.slot_reclaim_queue.countPinnedBySnapshot(oldest_active),
             .enqueued_total = self.slot_reclaim_stats.enqueued_total,
             .dequeued_total = self.slot_reclaim_stats.dequeued_total,
             .reclaimed_total = self.slot_reclaim_stats.reclaimed_total,
@@ -655,8 +665,16 @@ pub const Catalog = struct {
     pub fn snapshotIndexReclaimStats(
         self: *const Catalog,
     ) IndexReclaimStatsSnapshot {
+        return self.snapshotIndexReclaimStatsAtOldest(std.math.maxInt(u64));
+    }
+
+    pub fn snapshotIndexReclaimStatsAtOldest(
+        self: *const Catalog,
+        oldest_active: u64,
+    ) IndexReclaimStatsSnapshot {
         return .{
             .queue_depth = @intCast(self.index_reclaim_queue.len),
+            .pinned_by_snapshot = self.index_reclaim_queue.countPinnedBySnapshot(oldest_active),
             .enqueued_total = self.index_reclaim_stats.enqueued_total,
             .dequeued_total = self.index_reclaim_stats.dequeued_total,
             .reclaimed_total = self.index_reclaim_stats.reclaimed_total,

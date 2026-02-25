@@ -27,6 +27,7 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
   - scan module now has opt-in `indexFindWithCleanup` / `indexRangeScanIntoWithCleanup` APIs for opportunistic cleanup while preserving read-only no-side-effect defaults.
 - Phase 5 observability foundation started:
   - inspect now emits deterministic tx counters: `active_count`, `oldest_active_tx_id`, `next_tx_id`, `base_tx_id`.
+  - inspect now emits `pinned_by_snapshot` for heap/index reclaim queues.
   - added deterministic maintenance test for long-lived snapshot blocking + post-close reclaim resume path.
 - Crash/replay matrix expanded:
   - added slot-reclaim replay idempotency coverage;

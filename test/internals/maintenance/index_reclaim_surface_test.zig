@@ -44,7 +44,7 @@ test "internal delete enqueues index reclaim metadata and reports inspect counte
         std.mem.indexOf(
             u8,
             result,
-            "INSPECT index_reclaim queue_depth=1 reclaim_enqueued_total=1 reclaim_dequeued_total=0 reclaimed_entries_total=0 reclaim_failures_total=0\n",
+            "INSPECT index_reclaim queue_depth=1 pinned_by_snapshot=0 reclaim_enqueued_total=1 reclaim_dequeued_total=0 reclaimed_entries_total=0 reclaim_failures_total=0\n",
         ) != null,
     );
 
