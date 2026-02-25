@@ -18,7 +18,9 @@ comptime {
     _ = @import("maintenance/reclaim_snapshot_blocking_test.zig");
     _ = @import("query_protocol/tree_response_test.zig");
     _ = @import("runtime/planner_overflow_test.zig");
-    _ = @import("server/reactor_queueing_test.zig");
+    _ = @import("server/reactor_queueing_admission_test.zig");
+    _ = @import("server/reactor_queueing_max_inflight_test.zig");
+    _ = @import("server/reactor_queueing_progress_test.zig");
     _ = @import("server/reactor_transaction_pinning_test.zig");
     _ = @import("server/transport_progress_test.zig");
     _ = @import("spill/nested_parent_overflow_contract_test.zig");

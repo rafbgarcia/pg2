@@ -30,6 +30,7 @@ Refactor the test system to enforce one deterministic source of truth for test i
 - 2026-02-25: Audited non-feature test roots and aligned `test/stress/runtime_rss_gate_test.zig` schema/index initialization to shared harness semantics (missing-PK-index metadata + initialize all unique index trees), removing the remaining setup drift.
 - 2026-02-25: Started Phase 4 monolith decomposition by splitting `test/stress/spill_phase2_gate_test.zig` into focused modules (`scan`, `collector`, `nested_selection`, `nested_hash_spill`) plus shared helper module `test/stress/spill_phase2_gate_helpers.zig`, preserving stress suite coverage.
 - 2026-02-25: Continued Phase 4 by splitting `test/features/expressions/insert_test.zig` into focused modules (`single_row_and_wide`, `multi_row_behavior`, `constraints_and_defaults`) plus shared request/schema helper module `test/features/expressions/insert_helpers.zig`.
+- 2026-02-25: Completed the current Phase 4 hotspot set by splitting `test/internals/server/reactor_queueing_test.zig` into focused modules (`admission`, `progress`, `max_inflight`) plus shared deterministic fixture/helper module `test/internals/server/reactor_queueing_helpers.zig`.
 
 ## Scope
 1. Consolidate shared test runtime/helpers under `test/shared/`.
