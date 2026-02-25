@@ -22,16 +22,7 @@ test "feature spilled sorted let list remains query-correct across statements" {
         \\}
     );
 
-    var i: u32 = 1;
-    while (i <= 8205) : (i += 1) {
-        var req_buf: [128]u8 = undefined;
-        const req = try std.fmt.bufPrint(
-            req_buf[0..],
-            "SpillSortUser |> insert(id = {d}, active = true) {{}}",
-            .{i},
-        );
-        _ = try executor.run(req);
-    }
+    try executor.seedActiveRows("SpillSortUser", 1, 8205, 256);
 
     const result = try executor.run(
         \\let ids = SpillSortUser |> where(active == true) |> sort(id asc) { id }

@@ -149,6 +149,43 @@ pub const TestExecutor = struct {
         try self.runtime.wal.forceFlush();
         return self.response_buf[0..result.bytes_written];
     }
+
+    /// Seed `{id, active=true}` rows using chunked multi-row insert statements.
+    /// This keeps feature tests deterministic while avoiding per-row request overhead.
+    pub fn seedActiveRows(
+        self: *TestExecutor,
+        model_name: []const u8,
+        first_id: u32,
+        last_id_inclusive: u32,
+        chunk_size: u16,
+    ) !void {
+        if (chunk_size == 0) return error.InvalidBatchSize;
+        if (first_id > last_id_inclusive) return;
+
+        var next_id = first_id;
+        while (next_id <= last_id_inclusive) {
+            const remaining = (last_id_inclusive - next_id) + 1;
+            const this_chunk: u32 = @min(@as(u32, chunk_size), remaining);
+            const chunk_end = next_id + this_chunk - 1;
+
+            var req_buf: [32 * 1024]u8 = undefined;
+            var stream = std.io.fixedBufferStream(req_buf[0..]);
+            const writer = stream.writer();
+            try writer.print("{s} |> insert(", .{model_name});
+
+            var id = next_id;
+            var first = true;
+            while (id <= chunk_end) : (id += 1) {
+                if (!first) try writer.writeAll(", ");
+                first = false;
+                try writer.print("(id = {d}, active = true)", .{id});
+            }
+            try writer.writeAll(") {}");
+
+            _ = try self.run(stream.getWritten());
+            next_id = chunk_end + 1;
+        }
+    }
 };
 
 pub const FeatureEnv = struct {

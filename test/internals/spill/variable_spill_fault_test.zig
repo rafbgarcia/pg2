@@ -24,18 +24,11 @@ test "internal variable spill write fault fails closed deterministically" {
         \\}
     );
 
-    var i: u32 = 1;
-    while (i <= 8205) : (i += 1) {
-        var req_buf: [128]u8 = undefined;
-        const req = try std.fmt.bufPrint(
-            req_buf[0..],
-            "SpillFaultUser |> insert(id = {d}, active = true) {{}}",
-            .{i},
-        );
-        _ = try executor.run(req);
-    }
+    try executor.seedActiveRows("SpillFaultUser", 1, 8205, 256);
 
-    env.disk.failWriteAt(env.disk.writes + 1);
+    // Request execution writes scan-spill temp pages before let-materialization
+    // spill pages. Target the first let-spill write deterministically.
+    env.disk.failWriteAt(env.disk.writes + 15);
     var pool_conn = try executor.pool.checkout();
     const failed_result = try executor.session.handleRequest(
         &executor.pool,
