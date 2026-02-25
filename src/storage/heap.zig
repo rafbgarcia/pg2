@@ -106,13 +106,17 @@ const SlottedHeader = struct {
 };
 
 /// A slot entry: offset and length of a row within the content area.
-/// A length of 0 indicates a deleted slot (tombstone).
+///
+/// Slot state encoding:
+/// - `len > 0`: live tuple.
+/// - `len == 0 && offset > 0`: tombstoned (not reclaimable yet).
+/// - `len == 0 && offset == 0`: reclaimed free slot (reusable by insert).
 const Slot = struct {
     offset: u16,
     len: u16,
 
     const size = 4;
-    /// Sentinel value for deleted slots.
+    /// Sentinel value for deleted/reclaimed slots.
     const deleted_len: u16 = 0;
 
     fn read(content: *const [content_size]u8, index: u16) Slot {
@@ -188,9 +192,11 @@ pub const HeapPage = struct {
 
         var header = SlottedHeader.read(&page.content);
         std.debug.assert(header.slot_count < max_slot_count);
+        const reusable_slot = find_reclaimed_slot(page, header);
 
-        // Check if there's enough space: we need room for the slot entry + row data.
-        const needed = Slot.size + row_len;
+        // Check if there's enough space.
+        // Reusing a reclaimed slot needs only row payload bytes.
+        const needed = if (reusable_slot != null) row_len else Slot.size + row_len;
         if (header.free_end - header.free_start < needed) {
             _ = maybe_compact_for_required_space(page, needed);
             header = SlottedHeader.read(&page.content);
@@ -205,12 +211,14 @@ pub const HeapPage = struct {
         @memcpy(page.content[row_offset..][0..row_len], data);
 
         // Write slot entry.
-        const slot_index = header.slot_count;
+        const slot_index = reusable_slot orelse header.slot_count;
         Slot.write_at(&page.content, slot_index, .{ .offset = row_offset, .len = row_len });
 
-        // Update header.
-        header.slot_count += 1;
-        header.free_start += Slot.size;
+        // Update header only when a new slot entry is appended.
+        if (reusable_slot == null) {
+            header.slot_count += 1;
+            header.free_start += Slot.size;
+        }
         header.write(&page.content);
 
         std.debug.assert(header.free_start <= header.free_end);
@@ -307,6 +315,25 @@ pub const HeapPage = struct {
         std.debug.assert(Slot.read(&page.content, slot_idx).len == Slot.deleted_len);
     }
 
+    /// Reclaim a tombstoned slot for reuse by future inserts.
+    /// Returns true when reclamation changed slot state, false when the slot
+    /// was already reclaimed.
+    pub fn reclaim(page: *Page, slot_idx: u16) HeapError!bool {
+        std.debug.assert(page.header.page_type == .heap);
+        const header = SlottedHeader.read(&page.content);
+        if (slot_idx >= header.slot_count) return error.InvalidSlot;
+
+        var slot = Slot.read(&page.content, slot_idx);
+        if (slot.len != Slot.deleted_len) return error.InvalidSlot;
+        if (slot.offset == 0) return false;
+
+        slot.offset = 0;
+        slot.len = Slot.deleted_len;
+        Slot.write_at(&page.content, slot_idx, slot);
+        std.debug.assert(Slot.read(&page.content, slot_idx).offset == 0);
+        return true;
+    }
+
     /// Returns the number of live (non-deleted) rows in the page.
     pub fn live_count(page: *const Page) u16 {
         std.debug.assert(page.header.page_type == .heap);
@@ -400,6 +427,15 @@ fn maybe_compact_for_required_space(page: *Page, required_space: u16) bool {
     std.debug.assert(after >= before);
     std.debug.assert(after >= required_space);
     return true;
+}
+
+fn find_reclaimed_slot(page: *const Page, header: SlottedHeader) ?u16 {
+    var i: u16 = 0;
+    while (i < header.slot_count) : (i += 1) {
+        const slot = Slot.read(&page.content, i);
+        if (slot.len == Slot.deleted_len and slot.offset == 0) return i;
+    }
+    return null;
 }
 
 fn fragmented_bytes_with_header(page: *const Page, header: SlottedHeader) u16 {
@@ -521,6 +557,40 @@ test "delete marks slot as tombstone" {
     // Reading deleted slot should fail.
     const result = HeapPage.read(&page, s0);
     try std.testing.expectError(HeapError.InvalidSlot, result);
+}
+
+test "insert does not reuse tombstoned slot before reclaim" {
+    var page = Page.init(0, .free);
+    HeapPage.init(&page);
+
+    const s0 = try HeapPage.insert(&page, "row-a");
+    try HeapPage.delete(&page, s0);
+    const s1 = try HeapPage.insert(&page, "row-b");
+    try std.testing.expectEqual(@as(u16, 1), s1);
+}
+
+test "reclaim enables deterministic slot reuse" {
+    var page = Page.init(0, .free);
+    HeapPage.init(&page);
+
+    const s0 = try HeapPage.insert(&page, "row-a");
+    try HeapPage.delete(&page, s0);
+    try std.testing.expect(try HeapPage.reclaim(&page, s0));
+
+    const s1 = try HeapPage.insert(&page, "row-b");
+    try std.testing.expectEqual(@as(u16, 0), s1);
+    try std.testing.expectEqual(@as(u16, 1), HeapPage.slot_count(&page));
+    try std.testing.expectEqualSlices(u8, "row-b", try HeapPage.read(&page, s1));
+}
+
+test "reclaim is idempotent for already reclaimed slot" {
+    var page = Page.init(0, .free);
+    HeapPage.init(&page);
+
+    const s0 = try HeapPage.insert(&page, "row-a");
+    try HeapPage.delete(&page, s0);
+    try std.testing.expect(try HeapPage.reclaim(&page, s0));
+    try std.testing.expect(!(try HeapPage.reclaim(&page, s0)));
 }
 
 test "update in-place with smaller data" {
