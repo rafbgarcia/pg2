@@ -34,10 +34,28 @@ pub const RoutingStorage = struct {
         };
     }
 
-    fn route(self: *const RoutingStorage, page_id: u64) Storage {
-        if (page_id <= data_last_page_id) return self.data_storage;
-        if (page_id <= wal_last_page_id) return self.wal_storage;
-        return self.temp_storage;
+    const RoutedStorage = struct {
+        storage: Storage,
+        local_page_id: u64,
+    };
+
+    fn route(self: *const RoutingStorage, page_id: u64) RoutedStorage {
+        if (page_id <= data_last_page_id) {
+            return .{
+                .storage = self.data_storage,
+                .local_page_id = page_id,
+            };
+        }
+        if (page_id <= wal_last_page_id) {
+            return .{
+                .storage = self.wal_storage,
+                .local_page_id = page_id - wal_meta_page_id,
+            };
+        }
+        return .{
+            .storage = self.temp_storage,
+            .local_page_id = page_id - temp_first_page_id,
+        };
     }
 
     const vtable = Storage.VTable{
@@ -48,12 +66,14 @@ pub const RoutingStorage = struct {
 
     fn readImpl(ptr: *anyopaque, page_id: u64, buf: *[page_size]u8) StorageError!void {
         const self: *RoutingStorage = @ptrCast(@alignCast(ptr));
-        try self.route(page_id).read(page_id, buf);
+        const routed = self.route(page_id);
+        try routed.storage.read(routed.local_page_id, buf);
     }
 
     fn writeImpl(ptr: *anyopaque, page_id: u64, data: *const [page_size]u8) StorageError!void {
         const self: *RoutingStorage = @ptrCast(@alignCast(ptr));
-        try self.route(page_id).write(page_id, data);
+        const routed = self.route(page_id);
+        try routed.storage.write(routed.local_page_id, data);
     }
 
     fn fsyncImpl(ptr: *anyopaque) StorageError!void {
@@ -64,7 +84,7 @@ pub const RoutingStorage = struct {
     }
 };
 
-test "RoutingStorage maps boundary page ids to the expected domain" {
+test "RoutingStorage maps boundary page ids to the expected domain with local ids" {
     const disk_mod = @import("../simulator/disk.zig");
     const SimulatedDisk = disk_mod.SimulatedDisk;
 
@@ -94,10 +114,14 @@ test "RoutingStorage maps boundary page ids to the expected domain" {
 
     try std.testing.expect(data_disk.hasPending(999_998));
     try std.testing.expect(!data_disk.hasPending(999_999));
-    try std.testing.expect(wal_disk.hasPending(999_999));
-    try std.testing.expect(wal_disk.hasPending(19_999_999));
+
+    // WAL local ids: 999_999 -> 0, 19_999_999 -> 19_000_000
+    try std.testing.expect(wal_disk.hasPending(0));
+    try std.testing.expect(wal_disk.hasPending(19_000_000));
     try std.testing.expect(!wal_disk.hasPending(20_000_000));
-    try std.testing.expect(temp_disk.hasPending(20_000_000));
+
+    // Temp local id: 20_000_000 -> 0
+    try std.testing.expect(temp_disk.hasPending(0));
 }
 
 test "RoutingStorage returns data from routed backing stores" {
