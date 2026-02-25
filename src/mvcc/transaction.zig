@@ -244,6 +244,18 @@ pub const TxManager = struct {
         return self.oldest_active;
     }
 
+    pub fn getActiveCount(self: *const TxManager) u16 {
+        return self.active_count;
+    }
+
+    pub fn getNextTxId(self: *const TxManager) TxId {
+        return self.next_tx_id;
+    }
+
+    pub fn getBaseTxId(self: *const TxManager) TxId {
+        return self.base_tx_id;
+    }
+
     /// Predict the oldest-active watermark immediately after `tx_id` commits.
     /// Requires `tx_id` to be currently active.
     pub fn oldestActiveAfterCommit(self: *const TxManager, tx_id: TxId) TxId {

@@ -34,6 +34,7 @@ const Acceptor = transport_mod.Acceptor;
 const Connection = transport_mod.Connection;
 const serializeQueryResult = serialization_mod.serializeQueryResult;
 const RuntimeInspectStats = diagnostics_mod.RuntimeInspectStats;
+const TxInspectStats = diagnostics_mod.TxInspectStats;
 
 pub const SessionError = request_mod.RequestError || error{ResponseTooLarge};
 pub const ServeError = SessionError ||
@@ -178,6 +179,15 @@ pub const Session = struct {
             };
         }
         const include_inspect = astHasInspectOp(&parsed.ast);
+        const tx_stats: ?TxInspectStats = if (include_inspect)
+            .{
+                .active_count = self.runtime.tx_manager.getActiveCount(),
+                .oldest_active_tx_id = self.runtime.tx_manager.getOldestActive(),
+                .next_tx_id = self.runtime.tx_manager.getNextTxId(),
+                .base_tx_id = self.runtime.tx_manager.getBaseTxId(),
+            }
+        else
+            null;
 
         var result = try request_mod.executeWithPoolConn(
             self.runtime,
@@ -198,6 +208,7 @@ pub const Session = struct {
             self.catalog,
             pool_stats,
             runtime_inspect_stats,
+            tx_stats,
             &parsed.ast,
             &tokens,
             source,

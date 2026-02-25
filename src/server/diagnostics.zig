@@ -12,3 +12,10 @@ pub const RuntimeInspectStats = struct {
     max_pin_wait_ticks: u64 = 0,
     max_pin_duration_ticks: u64 = 0,
 };
+
+pub const TxInspectStats = struct {
+    active_count: u16 = 0,
+    oldest_active_tx_id: u64 = 0,
+    next_tx_id: u64 = 0,
+    base_tx_id: u64 = 0,
+};

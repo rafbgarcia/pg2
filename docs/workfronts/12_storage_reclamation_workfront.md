@@ -25,6 +25,8 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
   - slot-reclaim drain now performs reclaim-time index delete + WAL `index_reclaim_delete`;
   - inspect surface now exposes `index_reclaim` queue/counter stats;
   - scan module now has opt-in `indexFindWithCleanup` / `indexRangeScanIntoWithCleanup` APIs for opportunistic cleanup while preserving read-only no-side-effect defaults.
+- Phase 5 observability foundation started:
+  - inspect now emits deterministic tx counters: `active_count`, `oldest_active_tx_id`, `next_tx_id`, `base_tx_id`.
 - Full test suite is green after these changes (`zig build test --summary all` passes on 2026-02-25).
 
 ## Status Snapshot (2026-02-25)
@@ -60,7 +62,8 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
   - **Not complete against this workfront:** opt-in scan cleanup is not yet wired into a write-context caller path, and crash/replay matrix for index reclaim WAL path still needs explicit assertions.
 - **Phase 5 (Reclamation Under Concurrency):** partial
   - Some server/concurrency surfaces exist; baseline pinning coverage exists.
-  - **Not complete against this workfront:** targeted long-running-snapshot reclaim-blocking stress matrix and reclaim observability (pinned-by-snapshot counters/age) still pending.
+  - Added deterministic tx inspect counters to expose reclaim watermark pressure without wall-clock metrics.
+  - **Not complete against this workfront:** targeted long-running-snapshot reclaim-blocking/resume stress matrix and explicit pinned-by-snapshot reclaim counters are still pending.
 
 ### Current Gap-to-Gate Summary
 - **Complete now:** foundational slot reclaim + rollback safety + WAL/replay plumbing for slot reclaim.

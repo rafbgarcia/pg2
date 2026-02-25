@@ -21,6 +21,7 @@ const ResultRow = scan_mod.ResultRow;
 const StringArena = scan_mod.StringArena;
 const SpillingResultCollector = spill_collector_mod.SpillingResultCollector;
 const RuntimeInspectStats = diagnostics_mod.RuntimeInspectStats;
+const TxInspectStats = diagnostics_mod.TxInspectStats;
 const serializeValue = session.serializeValue;
 const buildTreeProjection = tree_protocol.buildTreeProjection;
 const countProtocolRootRows = tree_protocol.countProtocolRootRows;
@@ -32,6 +33,7 @@ pub fn serializeQueryResult(
     catalog: *const Catalog,
     pool_stats: ?PoolStats,
     runtime_stats: ?RuntimeInspectStats,
+    tx_stats: ?TxInspectStats,
     ast: *const Ast,
     tokens: *const tokenizer_mod.TokenizeResult,
     source: []const u8,
@@ -80,6 +82,7 @@ pub fn serializeQueryResult(
                 &result.stats,
                 stats,
                 runtime_stats,
+                tx_stats,
                 catalog.snapshotOverflowReclaimStats(),
                 catalog.snapshotSlotReclaimStats(),
                 catalog.snapshotIndexReclaimStats(),
@@ -122,6 +125,7 @@ pub fn serializeQueryResult(
             &result.stats,
             stats,
             runtime_stats,
+            tx_stats,
             catalog.snapshotOverflowReclaimStats(),
             catalog.snapshotSlotReclaimStats(),
             catalog.snapshotIndexReclaimStats(),
@@ -140,6 +144,7 @@ fn serializeInspectStats(
     exec_stats: *const exec_mod.ExecStats,
     pool_stats: PoolStats,
     runtime_stats: ?RuntimeInspectStats,
+    tx_stats: ?TxInspectStats,
     overflow_stats: OverflowReclaimStatsSnapshot,
     slot_stats: SlotReclaimStatsSnapshot,
     index_stats: IndexReclaimStatsSnapshot,
@@ -192,6 +197,17 @@ fn serializeInspectStats(
                 stats.max_pin_wait_ticks,
                 stats.max_pin_duration_ticks,
                 request_invariant_ok,
+            },
+        ) catch return error.ResponseTooLarge;
+    }
+    if (tx_stats) |stats| {
+        writer.print(
+            "INSPECT tx active_count={d} oldest_active_tx_id={d} next_tx_id={d} base_tx_id={d}\n",
+            .{
+                stats.active_count,
+                stats.oldest_active_tx_id,
+                stats.next_tx_id,
+                stats.base_tx_id,
             },
         ) catch return error.ResponseTooLarge;
     }
