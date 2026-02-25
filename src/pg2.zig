@@ -7,6 +7,8 @@
 //! - Serves as the primary import entrypoint for binaries/tests.
 pub const storage = struct {
     pub const io = @import("storage/io.zig");
+    pub const file_storage = @import("storage/file_storage.zig");
+    pub const routing_storage = @import("storage/routing_storage.zig");
     pub const page = @import("storage/page.zig");
     pub const buffer_pool = @import("storage/buffer_pool.zig");
     pub const wal = @import("storage/wal.zig");
@@ -80,6 +82,8 @@ pub const server = struct {
 comptime {
     // Force test discovery in all imported modules.
     _ = storage.io;
+    _ = storage.file_storage;
+    _ = storage.routing_storage;
     _ = storage.page;
     _ = storage.buffer_pool;
     _ = storage.wal;
