@@ -418,18 +418,19 @@ pub fn reclaimOverflowChain(
         }
 
         const prev_head = overflow_allocator.freeListHead();
-        writeFreeListNextPointer(pinned.page, prev_head);
-        pinned.page.header.page_type = .free;
-        _ = overflow_allocator.pushFreeListHead(current) catch |err|
-            return mapOverflowAllocatorError(err);
         const push_lsn = try appendOverflowFreeListPushWal(
             wal,
             tx_id,
             current,
             prev_head,
-            overflow_allocator.freeListHead(),
+            current,
             overflow_allocator.next_page_id,
         );
+        writeFreeListNextPointer(pinned.page, prev_head);
+        pinned.page.header.page_type = .free;
+        const pushed_prev_head = overflow_allocator.pushFreeListHead(current) catch |err|
+            return mapOverflowAllocatorError(err);
+        std.debug.assert(pushed_prev_head == prev_head);
         pinned.page.header.lsn = push_lsn;
         pinned.markDirty();
         try persistOverflowAllocatorMetadata(
@@ -458,29 +459,36 @@ fn allocateOverflowPage(
         if (pinned.page.header.page_type != .free) return error.Corruption;
         const next_head = readFreeListNextPointer(pinned.page, overflow_allocator) catch
             return error.Corruption;
-        const page_id = overflow_allocator.popFreeListHead(next_head) catch |err|
-            return mapOverflowAllocatorError(err);
         const pop_lsn = try appendOverflowFreeListPopWal(
             wal,
             tx_id,
-            page_id,
-            overflow_allocator.freeListHead(),
+            head,
+            next_head,
             overflow_allocator.next_page_id,
         );
+        const page_id = overflow_allocator.popFreeListHead(next_head) catch |err|
+            return mapOverflowAllocatorError(err);
+        std.debug.assert(page_id == head);
         pinned.page.header.lsn = pop_lsn;
         try persistOverflowAllocatorMetadata(pool, overflow_allocator, pop_lsn);
         return page_id;
     }
 
-    const page_id = overflow_allocator.allocateFresh() catch |err|
-        return mapOverflowAllocatorError(err);
+    if (overflow_allocator.next_page_id >= overflow_allocator.region_end_page_id) {
+        return mapOverflowAllocatorError(error.RegionExhausted);
+    }
+    const page_id = overflow_allocator.next_page_id;
+    const next_page_id = page_id + 1;
     const pop_lsn = try appendOverflowFreeListPopWal(
         wal,
         tx_id,
         page_id,
         overflow_allocator.freeListHead(),
-        overflow_allocator.next_page_id,
+        next_page_id,
     );
+    const allocated_page_id = overflow_allocator.allocateFresh() catch |err|
+        return mapOverflowAllocatorError(err);
+    std.debug.assert(allocated_page_id == page_id);
     try persistOverflowAllocatorMetadata(pool, overflow_allocator, pop_lsn);
     return page_id;
 }
@@ -640,4 +648,92 @@ pub fn decodeOverflowRelinkRecordMeta(payload: []const u8) MutationError!Overflo
         .old_first_page_id = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[0..8]).*),
         .new_first_page_id = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[8..16]).*),
     };
+}
+
+const testing = std.testing;
+const disk_mod = @import("../simulator/disk.zig");
+
+test "reclaimOverflowChain leaves allocator/page unchanged when free-list push WAL append fails" {
+    var disk = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
+    defer pool.deinit();
+
+    var wal = Wal.init(testing.allocator, disk.storage());
+    defer wal.deinit();
+    try wal.reserveBufferCapacity(1);
+
+    var catalog: Catalog = .{};
+    catalog.overflow_page_allocator = try OverflowPageIdAllocator.initWithBounds(40_000, 4);
+
+    const first_page_id = catalog.overflow_page_allocator.firstAllocatablePageId();
+    try catalog.overflow_page_allocator.setAllocatorState(0, first_page_id + 1);
+
+    {
+        const page = try pool.pin(first_page_id);
+        OverflowPage.init(page);
+        try OverflowPage.writeChunk(page, "safe", OverflowPage.null_page_id);
+        pool.unpin(first_page_id, true);
+    }
+
+    try testing.expectError(
+        error.OutOfMemory,
+        reclaimOverflowChain(
+            &catalog,
+            &pool,
+            &wal,
+            1,
+            first_page_id,
+        ),
+    );
+
+    try testing.expectEqual(@as(u64, 0), catalog.overflow_page_allocator.freeListHead());
+
+    const page = try pool.pin(first_page_id);
+    defer pool.unpin(first_page_id, false);
+    try testing.expectEqual(page_mod.PageType.overflow, page.header.page_type);
+    const chunk = try OverflowPage.readChunk(page);
+    try testing.expectEqual(OverflowPage.null_page_id, chunk.next_page_id);
+    try testing.expectEqualSlices(u8, "safe", chunk.payload);
+}
+
+test "allocateOverflowPage keeps free-list head when free-list pop WAL append fails" {
+    var disk = disk_mod.SimulatedDisk.init(testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
+    defer pool.deinit();
+
+    var wal = Wal.init(testing.allocator, disk.storage());
+    defer wal.deinit();
+    try wal.reserveBufferCapacity(1);
+
+    var allocator = try OverflowPageIdAllocator.initWithBounds(50_000, 4);
+    const head = allocator.firstAllocatablePageId();
+    try allocator.setAllocatorState(head, head + 1);
+
+    {
+        const page = try pool.pin(head);
+        page.header.page_type = .free;
+        writeFreeListNextPointer(page, 0);
+        pool.unpin(head, true);
+    }
+
+    try testing.expectError(
+        error.OutOfMemory,
+        allocateOverflowPage(
+            &pool,
+            &wal,
+            1,
+            &allocator,
+        ),
+    );
+
+    try testing.expectEqual(head, allocator.freeListHead());
+
+    const page = try pool.pin(head);
+    defer pool.unpin(head, false);
+    try testing.expectEqual(page_mod.PageType.free, page.header.page_type);
+    try testing.expectEqual(@as(u64, 0), try readFreeListNextPointer(page, &allocator));
 }
