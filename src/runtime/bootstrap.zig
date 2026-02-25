@@ -15,6 +15,7 @@ const static_alloc_mod = @import("static_allocator.zig");
 const disk_mod = @import("../simulator/disk.zig");
 const scan_mod = @import("../executor/scan.zig");
 const spill_collector_mod = @import("../executor/spill_collector.zig");
+const executor_mod = @import("../executor/executor.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
 const ast_mod = @import("../parser/ast.zig");
 
@@ -77,6 +78,9 @@ pub const BootstrapConfig = struct {
     /// to temp pages. When a query's accumulated result bytes exceed this
     /// threshold, the SpillingResultCollector flushes its hot batch to disk.
     work_memory_bytes_per_slot: u64 = 4 * 1024 * 1024,
+    /// Per-request variable list element threshold before spilling variable
+    /// materialization to temp pages.
+    variable_list_values_before_spill: u16 = executor_mod.default_variable_list_values_before_spill,
     max_tokens_effective: u16 = tokenizer_mod.max_tokens,
     max_ast_nodes_effective: u16 = ast_mod.max_ast_nodes,
     hard_max_tokens: u16 = tokenizer_mod.max_tokens,
@@ -96,6 +100,7 @@ pub const QueryBuffers = struct {
     collector: *SpillingResultCollector,
     temp_pages_per_query_slot: u64,
     work_memory_bytes_per_slot: u64,
+    variable_list_values_before_spill: u16,
 };
 
 /// Core runtime composition built in allocator init phase and sealed before
@@ -120,6 +125,7 @@ pub const BootstrappedRuntime = struct {
     max_query_slots: u16,
     temp_pages_per_query_slot: u64,
     work_memory_bytes_per_slot: u64,
+    variable_list_values_before_spill: u16,
     max_tokens_effective: u16,
     max_ast_nodes_effective: u16,
     hard_max_tokens: u16,
@@ -140,6 +146,8 @@ pub const BootstrappedRuntime = struct {
         if (config.undo_max_data_bytes == 0) return error.InvalidConfig;
         if (config.query_string_arena_bytes_per_slot == 0) return error.InvalidConfig;
         if (config.temp_pages_per_query_slot == 0) return error.InvalidConfig;
+        if (config.variable_list_values_before_spill == 0) return error.InvalidConfig;
+        if (config.variable_list_values_before_spill > executor_mod.default_variable_list_values_before_spill) return error.InvalidConfig;
         if (config.max_tokens_effective == 0) return error.InvalidConfig;
         if (config.max_ast_nodes_effective == 0) return error.InvalidConfig;
         if (config.hard_max_tokens == 0) return error.InvalidConfig;
@@ -265,6 +273,7 @@ pub const BootstrappedRuntime = struct {
 
         runtime.temp_pages_per_query_slot = config.temp_pages_per_query_slot;
         runtime.work_memory_bytes_per_slot = config.work_memory_bytes_per_slot;
+        runtime.variable_list_values_before_spill = config.variable_list_values_before_spill;
         runtime.max_tokens_effective = config.max_tokens_effective;
         runtime.max_ast_nodes_effective = config.max_ast_nodes_effective;
         runtime.hard_max_tokens = config.hard_max_tokens;
@@ -312,6 +321,7 @@ pub const BootstrappedRuntime = struct {
                     .collector = &self.query_collectors[slot_index],
                     .temp_pages_per_query_slot = self.temp_pages_per_query_slot,
                     .work_memory_bytes_per_slot = self.work_memory_bytes_per_slot,
+                    .variable_list_values_before_spill = self.variable_list_values_before_spill,
                 };
             }
         }
@@ -435,6 +445,8 @@ fn requiredBytesWithin(
     if (config.undo_max_data_bytes == 0) return error.InvalidConfig;
     if (config.query_string_arena_bytes_per_slot == 0) return error.InvalidConfig;
     if (config.temp_pages_per_query_slot == 0) return error.InvalidConfig;
+    if (config.variable_list_values_before_spill == 0) return error.InvalidConfig;
+    if (config.variable_list_values_before_spill > executor_mod.default_variable_list_values_before_spill) return error.InvalidConfig;
     if (config.max_tokens_effective == 0) return error.InvalidConfig;
     if (config.max_ast_nodes_effective == 0) return error.InvalidConfig;
     if (config.hard_max_tokens == 0) return error.InvalidConfig;

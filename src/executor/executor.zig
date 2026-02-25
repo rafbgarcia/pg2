@@ -157,7 +157,8 @@ pub const ExecStats = struct {
 };
 
 const max_request_variables: u16 = 128;
-const max_variable_list_values: u16 = 8192;
+pub const default_variable_list_values_before_spill: u16 = 8192;
+const max_variable_list_values_capacity: u16 = default_variable_list_values_before_spill;
 const max_variable_spill_pages: u16 = @intCast(max_spill_pages);
 const variable_arena_divisor: usize = 4;
 const variable_arena_min_bytes: usize = 64 * 1024;
@@ -203,8 +204,9 @@ const VariableArena = struct {
 pub const RequestState = struct {
     vars: [max_request_variables]RequestVariable = undefined,
     var_count: u16 = 0,
-    list_values: [max_variable_list_values]Value = [_]Value{.{ .null_value = {} }} ** max_variable_list_values,
+    list_values: [max_variable_list_values_capacity]Value = [_]Value{.{ .null_value = {} }} ** max_variable_list_values_capacity,
     list_used: u16 = 0,
+    variable_list_limit: u16 = max_variable_list_values_capacity,
     variable_spill_page_ids: [max_variable_spill_pages]u64 = [_]u64{0} ** max_variable_spill_pages,
     variable_spill_page_used: u16 = 0,
     variable_temp_mgr: TempStorageManager,
@@ -217,6 +219,7 @@ pub const RequestState = struct {
         query_slot_index: u16,
         storage: Storage,
         temp_pages_per_query_slot: u64,
+        variable_list_limit: u16,
     ) error{OutOfMemory}!RequestState {
         std.debug.assert(string_arena_bytes.len > 0);
         var variable_bytes = string_arena_bytes.len / variable_arena_divisor;
@@ -234,6 +237,7 @@ pub const RequestState = struct {
             temp_mod.variable_region_start_page_id,
         ) catch return error.OutOfMemory;
         return .{
+            .variable_list_limit = variable_list_limit,
             .variable_temp_mgr = variable_temp_mgr,
             .variable_arena = .{ .bytes = string_arena_bytes[statement_end..] },
             .statement_string_arena_bytes = string_arena_bytes[0..statement_end],
@@ -352,6 +356,7 @@ pub const ExecContext = struct {
     collector: *SpillingResultCollector,
     temp_pages_per_query_slot: u64 = temp_mod.default_pages_per_query_slot,
     work_memory_bytes_per_slot: u64,
+    variable_list_values_before_spill: u16 = default_variable_list_values_before_spill,
     request_state: ?*RequestState = null,
 };
 
@@ -379,6 +384,7 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
         ctx.query_slot_index,
         ctx.storage,
         ctx.temp_pages_per_query_slot,
+        ctx.variable_list_values_before_spill,
     );
     request_state.reset();
     exec_ctx.request_state = &request_state;
@@ -784,7 +790,7 @@ fn materializeLetFromResult(
             }
         }
         const list_count = @min(remaining, std.math.maxInt(u32));
-        if (list_count > 0 and list_count > @as(u64, max_variable_list_values - state.list_used)) {
+        if (list_count > 0 and list_count > @as(u64, state.variable_list_limit - state.list_used)) {
             try materializeCollectorRowsToSpillVariable(state, &iter, &out, &arena, skip, remaining, name_token);
             return;
         }
@@ -798,7 +804,7 @@ fn materializeLetFromResult(
                 continue;
             }
             if (out.column_count != 1) return error.OutOfMemory;
-            if (state.list_used >= max_variable_list_values) return error.OutOfMemory;
+            if (state.list_used >= state.variable_list_limit) return error.OutOfMemory;
             state.list_values[state.list_used] = try copyValueForVariable(state, out.values[0]);
             state.list_used += 1;
             remaining -= 1;
@@ -814,7 +820,7 @@ fn materializeLetFromResult(
         return;
     }
     const list_count = result.row_count;
-    if (list_count > 0 and list_count > max_variable_list_values - state.list_used) {
+    if (list_count > 0 and list_count > state.variable_list_limit - state.list_used) {
         try materializeFlatRowsToSpillVariable(state, result.rows[0..result.row_count], name_token);
         return;
     }
@@ -823,7 +829,7 @@ fn materializeLetFromResult(
     while (row_idx < result.row_count) : (row_idx += 1) {
         const row = &result.rows[row_idx];
         if (row.column_count != 1) return error.OutOfMemory;
-        if (state.list_used >= max_variable_list_values) return error.OutOfMemory;
+        if (state.list_used >= state.variable_list_limit) return error.OutOfMemory;
         state.list_values[state.list_used] = try copyValueForVariable(state, row.values[0]);
         state.list_used += 1;
     }

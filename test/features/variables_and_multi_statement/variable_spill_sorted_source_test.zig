@@ -3,6 +3,7 @@ const std = @import("std");
 const feature = @import("../test_env_test.zig");
 
 test "feature spilled sorted let list remains query-correct across statements" {
+    const seeded_rows: u32 = 257;
     var env: feature.FeatureEnv = undefined;
     try env.initWithConfig(.{
         .max_query_slots = 1,
@@ -11,6 +12,7 @@ test "feature spilled sorted let list remains query-correct across statements" {
         .wal_buffer_capacity_bytes = 8 * 1024 * 1024,
         .wal_flush_threshold_bytes = 1 * 1024 * 1024,
         .query_string_arena_bytes_per_slot = 256 * 1024,
+        .variable_list_values_before_spill = 64,
     });
     defer env.deinit();
 
@@ -22,7 +24,7 @@ test "feature spilled sorted let list remains query-correct across statements" {
         \\}
     );
 
-    try executor.seedActiveRows("SpillSortUser", 1, 8205, 256);
+    try executor.seedActiveRows("SpillSortUser", 1, seeded_rows, 128);
 
     const result = try executor.run(
         \\let ids = SpillSortUser |> where(active == true) |> sort(id asc) { id }
@@ -30,7 +32,7 @@ test "feature spilled sorted let list remains query-correct across statements" {
         \\SpillSortUser |> where(active == false) |> sort(id asc) |> limit(1) { id }
     );
     try std.testing.expectEqualStrings(
-        "OK returned_rows=1 inserted_rows=0 updated_rows=8205 deleted_rows=0\n1\n",
+        "OK returned_rows=1 inserted_rows=0 updated_rows=257 deleted_rows=0\n1\n",
         result,
     );
 }

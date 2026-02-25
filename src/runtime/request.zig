@@ -70,6 +70,7 @@ fn makeExecContext(
         .collector = request.pool_conn.query_buffers.collector,
         .temp_pages_per_query_slot = request.pool_conn.query_buffers.temp_pages_per_query_slot,
         .work_memory_bytes_per_slot = request.pool_conn.query_buffers.work_memory_bytes_per_slot,
+        .variable_list_values_before_spill = request.pool_conn.query_buffers.variable_list_values_before_spill,
     };
 }
 

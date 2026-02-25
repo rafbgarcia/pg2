@@ -5,6 +5,7 @@ const internal = @import("../../features/test_env_test.zig");
 const mutation_mod = pg2.executor.mutation;
 
 test "internal variable spill write fault fails closed deterministically" {
+    const seeded_rows: u32 = 257;
     var env: internal.FeatureEnv = undefined;
     try env.initWithConfig(.{
         .max_query_slots = 1,
@@ -13,6 +14,7 @@ test "internal variable spill write fault fails closed deterministically" {
         .wal_buffer_capacity_bytes = 8 * 1024 * 1024,
         .wal_flush_threshold_bytes = 1 * 1024 * 1024,
         .query_string_arena_bytes_per_slot = 256 * 1024,
+        .variable_list_values_before_spill = 64,
     });
     defer env.deinit();
 
@@ -24,11 +26,9 @@ test "internal variable spill write fault fails closed deterministically" {
         \\}
     );
 
-    try executor.seedActiveRows("SpillFaultUser", 1, 8205, 256);
+    try executor.seedActiveRows("SpillFaultUser", 1, seeded_rows, 128);
 
-    // Request execution writes scan-spill temp pages before let-materialization
-    // spill pages. Target the first let-spill write deterministically.
-    env.disk.failWriteAt(env.disk.writes + 15);
+    env.disk.failWriteAt(env.disk.writes + 1);
     var pool_conn = try executor.pool.checkout();
     const failed_result = try executor.session.handleRequest(
         &executor.pool,
@@ -59,7 +59,7 @@ test "internal variable spill write fault fails closed deterministically" {
         \\SpillFaultUser |> where(active == false) |> sort(id asc) |> limit(1) { id }
     );
     try std.testing.expectEqualStrings(
-        "OK returned_rows=1 inserted_rows=0 updated_rows=8205 deleted_rows=0\n1\n",
+        "OK returned_rows=1 inserted_rows=0 updated_rows=257 deleted_rows=0\n1\n",
         recovered,
     );
 }
