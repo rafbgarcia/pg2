@@ -39,7 +39,7 @@ fn insertUsersBatched(
         }
         try writer.writeAll(") {}");
 
-        const result = try executor.run(stream.getWritten());
+        const result = try executor.runSeed(stream.getWritten());
         var expected_buf: [96]u8 = undefined;
         const expected = try std.fmt.bufPrint(
             expected_buf[0..],

@@ -32,6 +32,18 @@ const memory_budget_bytes: usize = 256 * 1024 * 1024;
 const rss_limit_scale: f64 = 1.35;
 const batch_size: u32 = 256;
 const sample_interval_ns: i128 = std.time.ns_per_s;
+const storage_checkpoint_every_batches: u32 = 16;
+const storage_near_limit_window_bytes: u64 = 64 * 1024 * 1024;
+
+fn refreshOnDiskUsage(
+    runtime: *BootstrappedRuntime,
+    storage_root: *RuntimeStorageRoot,
+) !u64 {
+    try runtime.wal.forceFlush();
+    try runtime.pool.flushAll();
+    const usage = try storage_root.snapshotUsage();
+    return usage.data_pg2_bytes + usage.wal_pg2_bytes + usage.temp_pg2_bytes;
+}
 
 fn applySchemaAndInit(runtime: *BootstrappedRuntime, catalog: *Catalog) !void {
     const schema =
@@ -161,25 +173,19 @@ fn sampleRssMacos(allocator: std.mem.Allocator) !u64 {
 fn percentile95(samples: []const u64) !u64 {
     std.debug.assert(samples.len > 0);
     const allocator = std.testing.allocator;
-    var sorted = try allocator.alloc(u64, samples.len);
+    const sorted = try allocator.alloc(u64, samples.len);
     defer allocator.free(sorted);
     @memcpy(sorted, samples);
 
-    var i: usize = 0;
-    while (i < sorted.len) : (i += 1) {
-        var j: usize = i + 1;
-        while (j < sorted.len) : (j += 1) {
-            if (sorted[j] < sorted[i]) {
-                const tmp = sorted[i];
-                sorted[i] = sorted[j];
-                sorted[j] = tmp;
-            }
-        }
-    }
+    std.sort.heap(u64, sorted, {}, lessThanU64);
 
     const rank = (95 * sorted.len + 99) / 100;
     const idx = if (rank == 0) 0 else rank - 1;
     return sorted[idx];
+}
+
+fn lessThanU64(_: void, a: u64, b: u64) bool {
+    return a < b;
 }
 
 test "wf14 rss p95 remains within 1.35x memory budget under sustained file-backed growth" {
@@ -223,8 +229,8 @@ test "wf14 rss p95 remains within 1.35x memory budget under sustained file-backe
     var next_row_id: u64 = 1;
     var now_ns: i128 = std.time.nanoTimestamp();
     var next_sample_ns = now_ns + sample_interval_ns;
-    var usage = try storage_root.snapshotUsage();
-    var on_disk_bytes = usage.data_pg2_bytes + usage.wal_pg2_bytes + usage.temp_pg2_bytes;
+    var on_disk_bytes = try refreshOnDiskUsage(&runtime, &storage_root);
+    var batches_since_storage_checkpoint: u32 = 0;
 
     while (inserted_rows < target_rows and on_disk_bytes < target_storage_bytes) {
         const remaining = target_rows - inserted_rows;
@@ -232,11 +238,14 @@ test "wf14 rss p95 remains within 1.35x memory budget under sustained file-backe
         try runBatchInsert(&session, &pool, next_row_id, rows_this_batch);
         next_row_id += rows_this_batch;
         inserted_rows += rows_this_batch;
+        batches_since_storage_checkpoint += 1;
 
-        try runtime.wal.forceFlush();
-        try runtime.pool.flushAll();
-        usage = try storage_root.snapshotUsage();
-        on_disk_bytes = usage.data_pg2_bytes + usage.wal_pg2_bytes + usage.temp_pg2_bytes;
+        const bytes_remaining = target_storage_bytes -| on_disk_bytes;
+        const near_storage_limit = bytes_remaining <= storage_near_limit_window_bytes;
+        if (near_storage_limit or batches_since_storage_checkpoint >= storage_checkpoint_every_batches) {
+            on_disk_bytes = try refreshOnDiskUsage(&runtime, &storage_root);
+            batches_since_storage_checkpoint = 0;
+        }
 
         now_ns = std.time.nanoTimestamp();
         while (now_ns >= next_sample_ns) : (next_sample_ns += sample_interval_ns) {
@@ -247,6 +256,11 @@ test "wf14 rss p95 remains within 1.35x memory budget under sustained file-backe
 
     if (rss_samples.items.len == 0) {
         try rss_samples.append(std.testing.allocator, try sampleRssBytes(std.testing.allocator));
+    }
+
+    // Ensure final assertion checks against a current durable size.
+    if (batches_since_storage_checkpoint > 0) {
+        on_disk_bytes = try refreshOnDiskUsage(&runtime, &storage_root);
     }
 
     const warmup_count = (rss_samples.items.len + 9) / 10;
