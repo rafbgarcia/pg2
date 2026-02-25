@@ -97,7 +97,12 @@ Additional confirmed decisions (2026-02-25):
 - `let` variables are materialized as scalar or single-column scalar-list values for cross-statement use; no persisted rowset-handle variable kind is exposed across statement boundaries.
 - Variable memory behavior uses deterministic thresholds with spill-backed materialization as the default over hard-fail-on-size.
 - Multi-statement mutation counters remain aggregated across statements, while response rows remain final-statement-only.
-- Error payloads prioritize immediate user comprehension with a clear `message` plus deterministic context (`statement_index`, `phase`, `code`, `path`, `line`, `col` when available).
+  - Error payloads prioritize immediate user comprehension with a clear `message` plus deterministic context (`statement_index`, `phase`, `code`, `path`, `line`, `col` when available).
+- Newly completed:
+  - Spill-backed `let` list materialization for rowsets exceeding in-memory variable list capacity.
+  - Cross-statement `in(field, var_list)` correctness when `var_list` is spill-backed.
+  - Deterministic spill-read failure propagation in predicate evaluation paths (including mutation predicates).
+  - Deterministic spill write-fault fail-closed behavior with successful subsequent recovery request.
 
 ### Error Contract (clarity-first)
 Canonical shape:
@@ -181,7 +186,7 @@ Examples:
   - bounded in-memory behavior
   - deterministic spill behavior for variable materialization
   - deterministic hard-failure behavior for spill storage faults
-- Status: Incomplete (spill-backed variable materialization across statement boundaries still pending).
+- Status: Complete.
 
 ## Phase 6: Feature Test Matrix (One File Per Capability)
 Create dedicated files under `test/features/variables_and_multi_statement/`:
@@ -213,4 +218,4 @@ Current coverage implemented:
 ### Gate
 - Feature suite passes under `zig build test`.
 - At least one deterministic fault/recovery scenario added under `test/internals/` for rollback correctness.
-- Status: Feature suite passes; internals fault scenario specific to variable spill materialization still pending with Phase 5.
+- Status: Complete (`variable_memory_boundaries_test.zig` and `variable_spill_fault_test.zig` added and passing).

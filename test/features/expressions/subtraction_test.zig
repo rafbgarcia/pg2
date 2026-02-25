@@ -56,7 +56,7 @@ test "feature update subtraction fails closed on type mismatch" {
         "CounterMismatch |> where(id == 1) |> update(value = value - \"1\") {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: update failed; class=fatal; code=TypeMismatch\n",
+        "ERR query: message=\"update failed\" phase=execution code=TypeMismatch path=query line=1 col=1\n",
         result,
     );
 }
@@ -79,7 +79,7 @@ test "feature update subtraction fails closed on underflow for constrained integ
         "CounterUnderflow |> where(id == 1) |> update(value = value - 1) {}",
     );
 
-    try expectContains(result, "ERR query: phase=mutation code=IntegerOutOfRange");
+    try expectContains(result, "phase=mutation code=IntegerOutOfRange");
     try expectContains(result, "path=update.value");
     try expectContains(result, "message=\"value is out of range (0 to 255)\"");
 }
@@ -102,7 +102,7 @@ test "feature update subtraction fails closed on null arithmetic operand" {
         "CounterNull |> where(id == 1) |> update(value = value - 1) {}",
     );
 
-    try expectContains(result, "ERR query: phase=mutation code=NullArithmeticOperand");
+    try expectContains(result, "phase=mutation code=NullArithmeticOperand");
     try expectContains(result, "path=update.value");
     try expectContains(result, "message=\"arithmetic operand cannot be null\"");
 }

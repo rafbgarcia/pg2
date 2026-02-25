@@ -54,7 +54,7 @@ test "feature i32 fields fail closed when insert value is out of range" {
         "TelemetryCounterValidation |> insert(id = 1, delta = 2147483648) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: phase=mutation code=IntegerOutOfRange path=insert.delta line=1 col=54 message=\"value is out of range (-2147483648 to 2147483647)\"\n",
+        "ERR query: message=\"value is out of range (-2147483648 to 2147483647)\" phase=mutation code=IntegerOutOfRange path=insert.delta line=1 col=54\n",
         result,
     );
 }

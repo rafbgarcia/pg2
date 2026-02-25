@@ -29,7 +29,7 @@ const serializeTreeProtocol = tree_protocol.serializeTreeProtocol;
 
 pub fn serializeQueryResult(
     writer: anytype,
-    result: *const exec_mod.QueryResult,
+    result: *exec_mod.QueryResult,
     catalog: *const Catalog,
     pool_stats: ?PoolStats,
     runtime_stats: ?RuntimeInspectStats,
@@ -40,12 +40,25 @@ pub fn serializeQueryResult(
 ) error{ResponseTooLarge}!void {
     std.debug.assert(result.row_count <= result.rows.len);
     if (result.getError()) |message| {
-        writer.print("ERR query: {s}\n", .{message}) catch
-            return error.ResponseTooLarge;
+        try serializeCanonicalQueryError(writer, message);
         return;
     }
 
     const tree_projection = buildTreeProjection(ast, tokens, source, catalog);
+    if (!result.has_final_payload and tree_projection == null and result.collector != null) {
+        if (!collectorWindowReadable(
+            result.collector.?,
+            result.collector_output_offset,
+            result.collector_output_count,
+        )) {
+            exec_mod.setError(
+                result,
+                "spill collector read failed during serialization",
+            );
+            try serializeCanonicalQueryError(writer, result.getError().?);
+            return;
+        }
+    }
 
     // Determine returned row count: when a spill collector is active,
     // use its total count; otherwise fall back to the flat row_count.
@@ -124,8 +137,8 @@ pub fn serializeQueryResult(
         while (true) {
             if (remaining == 0) break;
             arena.reset();
-            const has_row = iter.next(&out, &arena) catch break;
-            if (!has_row) break;
+            const has_row = iter.next(&out, &arena) catch return error.ResponseTooLarge;
+            if (!has_row) return error.ResponseTooLarge;
             if (skip > 0) {
                 skip -= 1;
                 continue;
@@ -160,6 +173,179 @@ fn collectorWindowCount(total_rows: u64, offset: u64, count: u64) u64 {
     if (offset >= total_rows) return 0;
     const available = total_rows - offset;
     return @min(available, count);
+}
+
+const CanonicalQueryError = struct {
+    statement_index: ?u16 = null,
+    message: []const u8,
+    phase: []const u8 = "execution",
+    code: []const u8 = "QueryExecutionError",
+    path: []const u8 = "query",
+    line: u16 = 1,
+    col: u16 = 1,
+};
+
+fn serializeCanonicalQueryError(writer: anytype, raw_message: []const u8) error{ResponseTooLarge}!void {
+    const canonical = parseCanonicalQueryError(raw_message);
+    if (canonical.statement_index) |statement_index| {
+        writer.print("ERR query: statement_index={d} ", .{statement_index}) catch
+            return error.ResponseTooLarge;
+    } else {
+        writer.writeAll("ERR query: ") catch return error.ResponseTooLarge;
+    }
+    writer.writeAll("message=\"") catch return error.ResponseTooLarge;
+    try writeEscapedQueryErrorMessage(writer, canonical.message);
+    writer.print(
+        "\" phase={s} code={s} path={s} line={d} col={d}\n",
+        .{
+            canonical.phase,
+            canonical.code,
+            canonical.path,
+            canonical.line,
+            canonical.col,
+        },
+    ) catch return error.ResponseTooLarge;
+}
+
+fn writeEscapedQueryErrorMessage(writer: anytype, message: []const u8) error{ResponseTooLarge}!void {
+    for (message) |ch| {
+        if (ch == '"' or ch == '\\') {
+            writer.writeByte('\\') catch return error.ResponseTooLarge;
+        }
+        writer.writeByte(ch) catch return error.ResponseTooLarge;
+    }
+}
+
+fn parseCanonicalQueryError(raw_message: []const u8) CanonicalQueryError {
+    var parsed = CanonicalQueryError{
+        .message = raw_message,
+    };
+    const with_stmt = parseStatementIndexPrefix(raw_message);
+    parsed.statement_index = with_stmt.statement_index;
+    const trimmed = std.mem.trim(u8, with_stmt.rest, " \t\r\n");
+    if (trimmed.len == 0) return parsed;
+
+    if (parseKeyValueError(trimmed)) |kv| {
+        parsed.message = kv.message;
+        parsed.phase = kv.phase;
+        parsed.code = kv.code;
+        parsed.path = kv.path;
+        parsed.line = kv.line;
+        parsed.col = kv.col;
+        return parsed;
+    }
+
+    if (parseLegacyBoundaryError(trimmed)) |legacy| {
+        parsed.message = legacy.message;
+        parsed.code = legacy.code;
+        return parsed;
+    }
+
+    parsed.message = trimmed;
+    return parsed;
+}
+
+fn parseStatementIndexPrefix(raw: []const u8) struct { statement_index: ?u16, rest: []const u8 } {
+    const prefix = "statement_index=";
+    if (!std.mem.startsWith(u8, raw, prefix)) {
+        return .{ .statement_index = null, .rest = raw };
+    }
+    var cursor: usize = prefix.len;
+    const start = cursor;
+    while (cursor < raw.len and std.ascii.isDigit(raw[cursor])) : (cursor += 1) {}
+    if (cursor == start) return .{ .statement_index = null, .rest = raw };
+    const parsed = std.fmt.parseInt(u16, raw[start..cursor], 10) catch
+        return .{ .statement_index = null, .rest = raw };
+    while (cursor < raw.len and raw[cursor] == ' ') : (cursor += 1) {}
+    return .{ .statement_index = parsed, .rest = raw[cursor..] };
+}
+
+fn parseLegacyBoundaryError(raw: []const u8) ?struct { message: []const u8, code: []const u8 } {
+    const class_key = "; class=";
+    const code_key = "; code=";
+    const class_pos = std.mem.indexOf(u8, raw, class_key) orelse return null;
+    const code_pos = std.mem.indexOf(u8, raw, code_key) orelse return null;
+    if (code_pos <= class_pos) return null;
+    const message = std.mem.trim(u8, raw[0..class_pos], " \t\r\n");
+    const code_start = code_pos + code_key.len;
+    if (code_start >= raw.len) return null;
+    const code = std.mem.trim(u8, raw[code_start..], " \t\r\n");
+    if (message.len == 0 or code.len == 0) return null;
+    return .{ .message = message, .code = code };
+}
+
+fn parseKeyValueError(raw: []const u8) ?struct {
+    message: []const u8,
+    phase: []const u8,
+    code: []const u8,
+    path: []const u8,
+    line: u16,
+    col: u16,
+} {
+    const message = extractQuotedField(raw, "message=\"") orelse return null;
+    const phase = extractTokenField(raw, "phase=") orelse return null;
+    const code = extractTokenField(raw, "code=") orelse return null;
+    const path = extractTokenField(raw, "path=") orelse return null;
+    const line = parseFieldU16(raw, "line=") orelse 1;
+    const col = parseFieldU16(raw, "col=") orelse 1;
+    return .{
+        .message = message,
+        .phase = phase,
+        .code = code,
+        .path = path,
+        .line = line,
+        .col = col,
+    };
+}
+
+fn extractQuotedField(raw: []const u8, key: []const u8) ?[]const u8 {
+    const start = std.mem.indexOf(u8, raw, key) orelse return null;
+    var cursor = start + key.len;
+    const message_start = cursor;
+    while (cursor < raw.len) : (cursor += 1) {
+        if (raw[cursor] == '"' and (cursor == message_start or raw[cursor - 1] != '\\')) {
+            return raw[message_start..cursor];
+        }
+    }
+    return null;
+}
+
+fn extractTokenField(raw: []const u8, key: []const u8) ?[]const u8 {
+    const start = std.mem.indexOf(u8, raw, key) orelse return null;
+    var cursor = start + key.len;
+    const field_start = cursor;
+    while (cursor < raw.len and raw[cursor] != ' ') : (cursor += 1) {}
+    if (cursor == field_start) return null;
+    return raw[field_start..cursor];
+}
+
+fn parseFieldU16(raw: []const u8, key: []const u8) ?u16 {
+    const token = extractTokenField(raw, key) orelse return null;
+    return std.fmt.parseInt(u16, token, 10) catch null;
+}
+
+fn collectorWindowReadable(
+    collector: *SpillingResultCollector,
+    offset: u64,
+    count: u64,
+) bool {
+    var iter = collector.iterator();
+    var arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
+    var arena = StringArena.init(&arena_buf);
+    var out = ResultRow.init();
+    var skip = offset;
+    var remaining = count;
+    while (remaining > 0) {
+        arena.reset();
+        const has_row = iter.next(&out, &arena) catch return false;
+        if (!has_row) return false;
+        if (skip > 0) {
+            skip -= 1;
+            continue;
+        }
+        remaining -= 1;
+    }
+    return true;
 }
 
 fn serializeInspectStats(

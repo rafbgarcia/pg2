@@ -54,7 +54,7 @@ test "feature u32 fields fail closed when insert value is out of range" {
         "PageStatsValidation |> insert(id = 1, bytes_written = 4294967296) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: phase=mutation code=IntegerOutOfRange path=insert.bytes_written line=1 col=55 message=\"value is out of range (0 to 4294967295)\"\n",
+        "ERR query: message=\"value is out of range (0 to 4294967295)\" phase=mutation code=IntegerOutOfRange path=insert.bytes_written line=1 col=55\n",
         result,
     );
 }

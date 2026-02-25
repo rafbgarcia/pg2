@@ -54,7 +54,7 @@ test "feature u64 fields fail closed when insert value is out of range" {
         "EventLogValidation |> insert(id = 1, sequence = -1) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: phase=mutation code=IntegerOutOfRange path=insert.sequence line=1 col=49 message=\"value is out of range (0 to 18446744073709551615)\"\n",
+        "ERR query: message=\"value is out of range (0 to 18446744073709551615)\" phase=mutation code=IntegerOutOfRange path=insert.sequence line=1 col=49\n",
         result,
     );
 }

@@ -75,7 +75,7 @@ test "feature upper fails closed on non-string input" {
         "UpperMismatch |> where(id == 1) |> update(v = upper(1)) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: update failed; class=fatal; code=TypeMismatch\n",
+        "ERR query: message=\"update failed\" phase=execution code=TypeMismatch path=query line=1 col=1\n",
         result,
     );
 }
@@ -98,7 +98,7 @@ test "feature upper fails closed on invalid arity" {
         "UpperArity |> where(id == 1) |> update(v = upper(v, \"y\")) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: update failed; class=fatal; code=TypeMismatch\n",
+        "ERR query: message=\"update failed\" phase=execution code=TypeMismatch path=query line=1 col=1\n",
         result,
     );
 }

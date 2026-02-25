@@ -56,7 +56,7 @@ test "feature update division fails closed on type mismatch" {
         "CounterMismatch |> where(id == 1) |> update(value = value / \"2\") {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: update failed; class=fatal; code=TypeMismatch\n",
+        "ERR query: message=\"update failed\" phase=execution code=TypeMismatch path=query line=1 col=1\n",
         result,
     );
 }
@@ -79,7 +79,7 @@ test "feature update division fails closed on divide by zero" {
         "CounterZero |> where(id == 1) |> update(value = value / 0) {}",
     );
 
-    try expectContains(result, "ERR query: update failed; class=fatal; code=DivisionByZero");
+    try expectContains(result, "ERR query: message=\"update failed\" phase=execution code=DivisionByZero path=query line=1 col=1");
 }
 
 test "feature update division fails closed on null arithmetic operand" {
@@ -100,7 +100,7 @@ test "feature update division fails closed on null arithmetic operand" {
         "CounterNull |> where(id == 1) |> update(value = value / 2) {}",
     );
 
-    try expectContains(result, "ERR query: phase=mutation code=NullArithmeticOperand");
+    try expectContains(result, "phase=mutation code=NullArithmeticOperand");
     try expectContains(result, "path=update.value");
     try expectContains(result, "message=\"arithmetic operand cannot be null\"");
 }

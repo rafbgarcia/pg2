@@ -138,7 +138,7 @@ test "feature membership assignment fails closed on type mismatch" {
         "TypeMismatchMembership |> where(id == 1) |> update(in_scope = in(status, [1, 2])) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: update failed; class=fatal; code=TypeMismatch\n",
+        "ERR query: message=\"update failed\" phase=execution code=TypeMismatch path=query line=1 col=1\n",
         result,
     );
 }

@@ -65,7 +65,7 @@ test "feature sqrt fails closed on invalid arity and type" {
         "SqrtMismatch |> where(id == 1) |> update(value = sqrt(value, 1)) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: update failed; class=fatal; code=TypeMismatch\n",
+        "ERR query: message=\"update failed\" phase=execution code=TypeMismatch path=query line=1 col=1\n",
         result,
     );
 
@@ -73,7 +73,7 @@ test "feature sqrt fails closed on invalid arity and type" {
         "SqrtMismatch |> where(id == 1) |> update(value = sqrt(\"x\")) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: update failed; class=fatal; code=TypeMismatch\n",
+        "ERR query: message=\"update failed\" phase=execution code=TypeMismatch path=query line=1 col=1\n",
         result,
     );
 }
@@ -96,7 +96,7 @@ test "feature sqrt fails closed on negative numeric input" {
         "SqrtNegative |> where(id == 1) |> update(value = sqrt(value)) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: update failed; class=fatal; code=NumericDomain\n",
+        "ERR query: message=\"update failed\" phase=execution code=NumericDomain path=query line=1 col=1\n",
         result,
     );
 }

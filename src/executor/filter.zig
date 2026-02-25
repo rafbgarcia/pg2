@@ -53,6 +53,7 @@ pub const EvalError = error{
     UndefinedVariable,
     AmbiguousIdentifier,
     VariableTypeMismatch,
+    VariableStorageRead,
     ClockUnavailable,
 };
 
@@ -85,6 +86,7 @@ pub const VariableRef = union(enum) {
     not_found,
     scalar: Value,
     list: []const Value,
+    list_spilled,
 };
 
 /// Bundles all ambient evaluation state needed during expression evaluation.
@@ -102,6 +104,14 @@ pub const EvalContext = struct {
         source: []const u8,
         token_index: u16,
     ) EvalError!VariableRef = null,
+    resolve_spilled_membership_ctx: ?*const anyopaque = null,
+    resolve_spilled_membership: ?*const fn (
+        ctx: *const anyopaque,
+        tokens: *const TokenizeResult,
+        source: []const u8,
+        list_token: u16,
+        needle: Value,
+    ) EvalError!Value = null,
     string_arena: ?*scan_mod.StringArena = null,
 };
 
@@ -223,7 +233,7 @@ pub fn evaluateExpressionFull(
                 switch (variable_ref) {
                     .not_found => return error.ColumnNotFound,
                     .scalar => |scalar| try evalPush(&eval_stack, &eval_count, scalar),
-                    .list => return error.VariableTypeMismatch,
+                    .list, .list_spilled => return error.VariableTypeMismatch,
                 }
             },
             .apply_parameter => |tok_idx| {
@@ -310,6 +320,19 @@ pub fn evaluateExpressionFull(
                     .not_found => return error.UndefinedVariable,
                     .scalar => return error.VariableTypeMismatch,
                     .list => |list| list,
+                    .list_spilled => {
+                        const resolve_spilled_membership = eval_ctx.resolve_spilled_membership orelse
+                            return error.VariableStorageRead;
+                        const value = try resolve_spilled_membership(
+                            eval_ctx.resolve_spilled_membership_ctx orelse return error.VariableStorageRead,
+                            tokens,
+                            source,
+                            info.list_token,
+                            needle,
+                        );
+                        try evalPush(&eval_stack, &eval_count, value);
+                        continue;
+                    },
                 };
                 const result = try applyMembershipFunction(
                     tokens,

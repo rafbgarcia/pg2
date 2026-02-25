@@ -54,7 +54,7 @@ test "feature i8 fields fail closed when insert value is out of range" {
         "DeviceStateValidation |> insert(id = 1, level = -129) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: phase=mutation code=IntegerOutOfRange path=insert.level line=1 col=49 message=\"value is out of range (-128 to 127)\"\n",
+        "ERR query: message=\"value is out of range (-128 to 127)\" phase=mutation code=IntegerOutOfRange path=insert.level line=1 col=49\n",
         result,
     );
 }

@@ -67,7 +67,7 @@ test "feature abs fails closed on invalid arity and type" {
         "AbsMismatch |> where(id == 1) |> update(value = abs(value, 1)) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: update failed; class=fatal; code=TypeMismatch\n",
+        "ERR query: message=\"update failed\" phase=execution code=TypeMismatch path=query line=1 col=1\n",
         result,
     );
 
@@ -75,7 +75,7 @@ test "feature abs fails closed on invalid arity and type" {
         "AbsMismatch |> where(id == 1) |> update(value = abs(\"x\")) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: update failed; class=fatal; code=TypeMismatch\n",
+        "ERR query: message=\"update failed\" phase=execution code=TypeMismatch path=query line=1 col=1\n",
         result,
     );
 }

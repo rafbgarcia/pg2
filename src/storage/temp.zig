@@ -57,6 +57,13 @@ pub const default_pages_per_query_slot: u64 = 1024;
 pub const nested_region_start_page_id: u64 = default_region_start_page_id +
     (default_pages_per_query_slot * (std.math.maxInt(u16) + 1));
 
+/// Dedicated page-id region for request-scoped variable spill.
+///
+/// Kept disjoint from root and nested spill regions by reserving one full
+/// u16 slot-space worth of default temp pages after the nested region.
+pub const variable_region_start_page_id: u64 = nested_region_start_page_id +
+    (default_pages_per_query_slot * (std.math.maxInt(u16) + 1));
+
 // ---------------------------------------------------------------------------
 // Error types
 // ---------------------------------------------------------------------------

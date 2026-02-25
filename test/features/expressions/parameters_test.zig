@@ -21,7 +21,7 @@ test "feature parameters fail closed for undefined where binding" {
         "ParamWhere |> where(id == $target_id) { id }",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: undefined parameter in where expression\n",
+        "ERR query: message=\"undefined parameter in where expression\" phase=execution code=QueryExecutionError path=query line=1 col=1\n",
         result,
     );
 }
@@ -43,7 +43,7 @@ test "feature parameters fail closed for undefined mutation assignment binding" 
         "ParamMutation |> insert(id = 1, name = $missing) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=UndefinedParameter\n",
+        "ERR query: message=\"insert failed\" phase=execution code=UndefinedParameter path=query line=1 col=1\n",
         result,
     );
 }

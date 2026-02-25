@@ -54,7 +54,7 @@ test "feature u8 fields fail closed when insert value is out of range" {
         "PacketValidation |> insert(id = 1, hops = 256) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: phase=mutation code=IntegerOutOfRange path=insert.hops line=1 col=43 message=\"value is out of range (0 to 255)\"\n",
+        "ERR query: message=\"value is out of range (0 to 255)\" phase=mutation code=IntegerOutOfRange path=insert.hops line=1 col=43\n",
         result,
     );
 }

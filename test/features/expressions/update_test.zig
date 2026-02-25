@@ -135,7 +135,7 @@ test "feature update assignment fails closed on null arithmetic operand" {
     const result = try executor.run(
         "UpdateAssignmentNullArithmetic |> update(flag = base + bonus >= 10) {}",
     );
-    try std.testing.expect(std.mem.indexOf(u8, result, "ERR query: phase=mutation code=NullArithmeticOperand") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "phase=mutation code=NullArithmeticOperand") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "path=update.flag") != null);
 }
 
@@ -192,7 +192,7 @@ test "feature update assignment fails closed on incompatible comparison types" {
         "UpdateAssignmentTypeMismatch |> update(flag = status == 1) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: update failed; class=fatal; code=TypeMismatch\n",
+        "ERR query: message=\"update failed\" phase=execution code=TypeMismatch path=query line=1 col=1\n",
         result,
     );
 }
@@ -218,7 +218,7 @@ test "feature update where predicate fails closed for non-boolean outputs" {
         "UpdateWhereTypeMismatch |> where(base + bonus) |> update(flag = true) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: where expression must evaluate to boolean\n",
+        "ERR query: message=\"where expression must evaluate to boolean\" phase=execution code=QueryExecutionError path=query line=1 col=1\n",
         result,
     );
 

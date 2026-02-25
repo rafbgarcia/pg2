@@ -93,7 +93,7 @@ test "feature insert explicit out-of-range integer does not fallback to default"
         "Packet |> insert(id = 1, hops = 300) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: phase=mutation code=IntegerOutOfRange path=insert.hops line=1 col=33 message=\"value is out of range (0 to 255)\"\n",
+        "ERR query: message=\"value is out of range (0 to 255)\" phase=mutation code=IntegerOutOfRange path=insert.hops line=1 col=33\n",
         result,
     );
 }

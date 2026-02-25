@@ -19,7 +19,7 @@ test "feature insert fails closed on type mismatch" {
         "User |> insert(id = 1, active = \"yes\") {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: phase=mutation code=TypeMismatch path=insert.active line=1 col=33 message=\"value type is incompatible with bool\"\n",
+        "ERR query: message=\"value type is incompatible with bool\" phase=mutation code=TypeMismatch path=insert.active line=1 col=33\n",
         result,
     );
 }

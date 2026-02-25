@@ -23,7 +23,7 @@ test "feature insert fails closed on foreign-key violation" {
         "Post |> insert(id = 10, user_id = 999) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=ReferentialIntegrityViolation\n",
+        "ERR query: message=\"insert failed\" phase=execution code=ReferentialIntegrityViolation path=query line=1 col=1\n",
         result,
     );
 }

@@ -189,7 +189,7 @@ pub const Session = struct {
         }
         if (missingCrudReturningBlock(&parsed.ast)) {
             writer.writeAll(
-                "ERR query: returning block required for CRUD statements; use {} for no returned rows\n",
+                "ERR query: message=\"returning block required for CRUD statements; use {} for no returned rows\" phase=semantic code=MissingReturningBlock path=query line=1 col=1\n",
             ) catch return error.ResponseTooLarge;
             return .{
                 .bytes_written = stream.pos,

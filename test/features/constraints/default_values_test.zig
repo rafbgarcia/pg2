@@ -46,7 +46,7 @@ test "feature insert keeps explicit null semantics even when default exists" {
         "User |> insert(id = 1, display_name = null) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=NullNotAllowed\n",
+        "ERR query: message=\"insert failed\" phase=execution code=NullNotAllowed path=query line=1 col=1\n",
         result,
     );
 }

@@ -80,6 +80,8 @@ pub fn buildRowFromAssignments(
         .parameter_resolver = &parameter_resolver,
         .variable_resolver_ctx = eval_ctx.variable_resolver_ctx,
         .resolve_variable = eval_ctx.resolve_variable,
+        .resolve_spilled_membership_ctx = eval_ctx.resolve_spilled_membership_ctx,
+        .resolve_spilled_membership = eval_ctx.resolve_spilled_membership,
         .string_arena = string_arena,
     };
     while (current != null_node) {
@@ -186,6 +188,8 @@ pub fn applyAssignments(
         .parameter_resolver = &parameter_resolver,
         .variable_resolver_ctx = eval_ctx.variable_resolver_ctx,
         .resolve_variable = eval_ctx.resolve_variable,
+        .resolve_spilled_membership_ctx = eval_ctx.resolve_spilled_membership_ctx,
+        .resolve_spilled_membership = eval_ctx.resolve_spilled_membership,
         .string_arena = string_arena,
     };
     while (current != null_node) {

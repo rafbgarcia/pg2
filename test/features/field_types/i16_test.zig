@@ -54,7 +54,7 @@ test "feature i16 fields fail closed when insert value is out of range" {
         "SensorSampleValidation |> insert(id = 1, delta = -32769) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: phase=mutation code=IntegerOutOfRange path=insert.delta line=1 col=50 message=\"value is out of range (-32768 to 32767)\"\n",
+        "ERR query: message=\"value is out of range (-32768 to 32767)\" phase=mutation code=IntegerOutOfRange path=insert.delta line=1 col=50\n",
         result,
     );
 }

@@ -62,7 +62,7 @@ test "feature i64 fields fail closed when insert value is out of range" {
         "LedgerEntryValidation |> insert(id = 1, balance_cents = -9223372036854775809) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: phase=mutation code=IntegerOutOfRange path=insert.balance_cents line=1 col=57 message=\"value is out of range (-9223372036854775808 to 9223372036854775807)\"\n",
+        "ERR query: message=\"value is out of range (-9223372036854775808 to 9223372036854775807)\" phase=mutation code=IntegerOutOfRange path=insert.balance_cents line=1 col=57\n",
         result,
     );
 }

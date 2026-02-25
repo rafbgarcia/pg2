@@ -1196,6 +1196,8 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
         .parameter_resolver = &parameter_resolver,
         .variable_resolver_ctx = eval_ctx.variable_resolver_ctx,
         .resolve_variable = eval_ctx.resolve_variable,
+        .resolve_spilled_membership_ctx = eval_ctx.resolve_spilled_membership_ctx,
+        .resolve_spilled_membership = eval_ctx.resolve_spilled_membership,
         .string_arena = &string_arena,
     };
 
@@ -1252,6 +1254,7 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                     error.UndefinedVariable => return error.ColumnNotFound,
                     error.AmbiguousIdentifier => return error.TypeMismatch,
                     error.VariableTypeMismatch => return error.TypeMismatch,
+                    error.VariableStorageRead => return error.StorageRead,
                     error.ClockUnavailable => return error.PredicateClockUnavailable,
                     else => continue,
                 };
@@ -1456,6 +1459,8 @@ pub fn executeDeleteWithReturningAndParameters(
         .parameter_resolver = &parameter_resolver,
         .variable_resolver_ctx = eval_ctx.variable_resolver_ctx,
         .resolve_variable = eval_ctx.resolve_variable,
+        .resolve_spilled_membership_ctx = eval_ctx.resolve_spilled_membership_ctx,
+        .resolve_spilled_membership = eval_ctx.resolve_spilled_membership,
         .string_arena = &string_arena,
     };
 
@@ -1515,6 +1520,7 @@ pub fn executeDeleteWithReturningAndParameters(
                     error.UndefinedVariable => return error.ColumnNotFound,
                     error.AmbiguousIdentifier => return error.TypeMismatch,
                     error.VariableTypeMismatch => return error.TypeMismatch,
+                    error.VariableStorageRead => return error.StorageRead,
                     error.ClockUnavailable => return error.PredicateClockUnavailable,
                     else => continue,
                 };
@@ -2135,6 +2141,7 @@ pub fn mapFilterError(err: filter_mod.EvalError) MutationError {
         error.UndefinedVariable => error.ColumnNotFound,
         error.AmbiguousIdentifier => error.TypeMismatch,
         error.VariableTypeMismatch => error.TypeMismatch,
+        error.VariableStorageRead => error.StorageRead,
         error.ClockUnavailable => error.ClockUnavailable,
     };
 }

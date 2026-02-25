@@ -54,7 +54,7 @@ test "internal integer matrix insert reports failing column path for mixed assig
         "IntegerMatrixValidation |> insert(id = 1, v_i8 = 10, v_u16 = 65536) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: phase=mutation code=IntegerOutOfRange path=insert.v_u16 line=1 col=62 message=\"value is out of range (0 to 65535)\"\n",
+        "ERR query: message=\"value is out of range (0 to 65535)\" phase=mutation code=IntegerOutOfRange path=insert.v_u16 line=1 col=62\n",
         result,
     );
 }

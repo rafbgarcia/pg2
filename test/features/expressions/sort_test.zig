@@ -88,5 +88,5 @@ test "feature sort fails closed when key expression evaluation fails" {
     const result = try executor.run(
         "SortEvalFailure |> sort(value + 1 asc) { id value }",
     );
-    try expectContains(result, "ERR query: sort key evaluation failed");
+    try expectContains(result, "message=\"sort key evaluation failed\"");
 }

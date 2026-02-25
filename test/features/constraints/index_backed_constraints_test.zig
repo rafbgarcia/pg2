@@ -32,7 +32,7 @@ test "non-PK unique constraint enforced via B+ tree rejects duplicate" {
         "User |> insert(id = 2, email = \"alice@test.com\", name = \"Bob\") {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        "ERR query: message=\"insert failed\" phase=execution code=DuplicateKey path=query line=1 col=1\n",
         result,
     );
 }
@@ -116,7 +116,7 @@ test "INSERT maintains all unique indexes — B+ tree find returns correct RowId
         "User |> insert(id = 3, email = \"alice@test.com\", name = \"Charlie\") {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        "ERR query: message=\"insert failed\" phase=execution code=DuplicateKey path=query line=1 col=1\n",
         result,
     );
 }
@@ -219,7 +219,7 @@ test "FK check uses PK index — invalid FK fails" {
         "Post |> insert(id = 10, user_id = 999) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=ReferentialIntegrityViolation\n",
+        "ERR query: message=\"insert failed\" phase=execution code=ReferentialIntegrityViolation path=query line=1 col=1\n",
         result,
     );
 }

@@ -80,7 +80,7 @@ test "feature having fails closed on invalid aggregate operand type" {
     const result = try executor.run(
         "BadAggregate |> group(status) |> having(sum(status) > 0) { status }",
     );
-    try expectContains(result, "ERR query: aggregate evaluation failed");
+    try expectContains(result, "message=\"aggregate evaluation failed\"");
 }
 
 test "feature having fails closed for non-boolean predicate outputs" {
@@ -104,7 +104,7 @@ test "feature having fails closed for non-boolean predicate outputs" {
         "HavingTypeMismatch |> group(status) |> having(sum(points)) { status }",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: having expression must evaluate to boolean\n",
+        "ERR query: message=\"having expression must evaluate to boolean\" phase=execution code=QueryExecutionError path=query line=1 col=1\n",
         result,
     );
 }

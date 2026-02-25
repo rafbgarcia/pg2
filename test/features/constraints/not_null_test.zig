@@ -19,7 +19,7 @@ test "feature insert fails closed on not-null violation from missing required fi
         "User |> insert(id = 1) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=NullNotAllowed\n",
+        "ERR query: message=\"insert failed\" phase=execution code=NullNotAllowed path=query line=1 col=1\n",
         result,
     );
 }

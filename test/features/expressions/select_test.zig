@@ -347,7 +347,7 @@ test "feature computed select fails closed on incompatible comparison types" {
     const result = try executor.run(
         "ComputedSelectTypeMismatch |> sort(id asc) { id bad: status == 1 }",
     );
-    try expectContains(result, "ERR query: select computed expression evaluation failed");
+    try expectContains(result, "message=\"select computed expression evaluation failed\"");
 }
 
 test "feature nested child where fails closed for non-boolean predicate outputs" {
@@ -376,7 +376,7 @@ test "feature nested child where fails closed for non-boolean predicate outputs"
         "User |> sort(id asc) { name posts |> where(id + user_id) { id } }",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: where expression must evaluate to boolean\n",
+        "ERR query: message=\"where expression must evaluate to boolean\" phase=execution code=QueryExecutionError path=query line=1 col=1\n",
         result,
     );
 }
@@ -407,7 +407,7 @@ test "feature nested child having fails closed for non-boolean predicate outputs
         "User |> sort(id asc) { name posts |> having(id + user_id) { id } }",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: having expression must evaluate to boolean\n",
+        "ERR query: message=\"having expression must evaluate to boolean\" phase=execution code=QueryExecutionError path=query line=1 col=1\n",
         result,
     );
 }

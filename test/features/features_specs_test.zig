@@ -60,6 +60,7 @@ comptime {
     _ = @import("variables_and_multi_statement/statement_error_index_test.zig");
     _ = @import("variables_and_multi_statement/response_shape_multi_statement_test.zig");
     _ = @import("variables_and_multi_statement/shared_snapshot_read_your_writes_test.zig");
+    _ = @import("variables_and_multi_statement/variable_memory_boundaries_test.zig");
     _ = @import("server_concurrency/multi_worker_progress_test.zig");
     _ = @import("server_concurrency/transaction_pinning_queue_pressure_test.zig");
 }

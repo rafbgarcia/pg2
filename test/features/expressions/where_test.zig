@@ -112,7 +112,7 @@ test "feature where fails closed for non-boolean predicate outputs" {
         "WhereFailClosed |> where(base + bonus) |> sort(id asc) { id }",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: where expression must evaluate to boolean\n",
+        "ERR query: message=\"where expression must evaluate to boolean\" phase=execution code=QueryExecutionError path=query line=1 col=1\n",
         result,
     );
 }

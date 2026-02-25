@@ -38,7 +38,9 @@ const temp_mod = @import("../storage/temp.zig");
 
 const SpillingResultCollector = spill_collector_mod.SpillingResultCollector;
 const SpillPageWriter = spill_row_mod.SpillPageWriter;
+const SpillPageReader = spill_row_mod.SpillPageReader;
 const TempStorageManager = temp_mod.TempStorageManager;
+const TempPage = temp_mod.TempPage;
 const max_spill_pages = spill_collector_mod.max_spill_pages;
 
 const Allocator = std.mem.Allocator;
@@ -156,6 +158,7 @@ pub const ExecStats = struct {
 
 const max_request_variables: u16 = 128;
 const max_variable_list_values: u16 = 8192;
+const max_variable_spill_pages: u16 = @intCast(max_spill_pages);
 const variable_arena_divisor: usize = 4;
 const variable_arena_min_bytes: usize = 64 * 1024;
 
@@ -164,6 +167,11 @@ const VariableValue = union(enum) {
     list: struct {
         start: u16,
         count: u16,
+    },
+    list_spill: struct {
+        page_start: u16,
+        page_count: u16,
+        row_count: u32,
     },
 };
 
@@ -197,11 +205,19 @@ pub const RequestState = struct {
     var_count: u16 = 0,
     list_values: [max_variable_list_values]Value = [_]Value{.{ .null_value = {} }} ** max_variable_list_values,
     list_used: u16 = 0,
+    variable_spill_page_ids: [max_variable_spill_pages]u64 = [_]u64{0} ** max_variable_spill_pages,
+    variable_spill_page_used: u16 = 0,
+    variable_temp_mgr: TempStorageManager,
     variable_arena: VariableArena,
     statement_string_arena_bytes: []u8,
     final_payload: []const u8 = &.{},
 
-    fn init(string_arena_bytes: []u8) RequestState {
+    fn init(
+        string_arena_bytes: []u8,
+        query_slot_index: u16,
+        storage: Storage,
+        temp_pages_per_query_slot: u64,
+    ) error{OutOfMemory}!RequestState {
         std.debug.assert(string_arena_bytes.len > 0);
         var variable_bytes = string_arena_bytes.len / variable_arena_divisor;
         if (variable_bytes < variable_arena_min_bytes and string_arena_bytes.len > variable_arena_min_bytes) {
@@ -211,7 +227,14 @@ pub const RequestState = struct {
             variable_bytes = string_arena_bytes.len / 2;
         }
         const statement_end = string_arena_bytes.len - variable_bytes;
+        const variable_temp_mgr = TempStorageManager.init(
+            query_slot_index,
+            storage,
+            temp_pages_per_query_slot,
+            temp_mod.variable_region_start_page_id,
+        ) catch return error.OutOfMemory;
         return .{
+            .variable_temp_mgr = variable_temp_mgr,
             .variable_arena = .{ .bytes = string_arena_bytes[statement_end..] },
             .statement_string_arena_bytes = string_arena_bytes[0..statement_end],
         };
@@ -220,6 +243,8 @@ pub const RequestState = struct {
     fn reset(self: *RequestState) void {
         self.var_count = 0;
         self.list_used = 0;
+        self.variable_spill_page_used = 0;
+        self.variable_temp_mgr.reset();
         self.variable_arena.reset();
         self.final_payload = &.{};
     }
@@ -349,7 +374,12 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
     var result = QueryResult.init(ctx.result_rows);
     errdefer result.deinit();
     var exec_ctx = ctx.*;
-    var request_state = RequestState.init(ctx.string_arena_bytes);
+    var request_state = try RequestState.init(
+        ctx.string_arena_bytes,
+        ctx.query_slot_index,
+        ctx.storage,
+        ctx.temp_pages_per_query_slot,
+    );
     request_state.reset();
     exec_ctx.request_state = &request_state;
     var string_arena = scan_mod.StringArena.init(request_state.statement_string_arena_bytes);
@@ -533,8 +563,21 @@ fn executeLetBindingStatement(
     if (bound_node.tag == .pipeline) {
         executePipelineStatement(ctx, result, bound, string_arena);
         if (result.has_error) return;
-        materializeLetFromResult(result, state, name_token, statement_index) catch {
-            setStatementError(result, statement_index, "let materialization exceeded variable memory budget");
+        const allow_full_collector_fallback =
+            !pipelineHasLimitOrOffset(ctx.ast, bound);
+        materializeLetFromResult(
+            result,
+            state,
+            name_token,
+            statement_index,
+            allow_full_collector_fallback,
+        ) catch |err| {
+            switch (err) {
+                error.OutOfMemory => setStatementError(result, statement_index, "let materialization exceeded variable memory budget"),
+                error.SpillWriteFailed => setStatementError(result, statement_index, "let materialization spill write failed"),
+                error.SpillReadFailed => setStatementError(result, statement_index, "let materialization spill read failed"),
+                error.SpillCorrupt => setStatementError(result, statement_index, "let materialization spill data corrupt"),
+            }
         };
         result.row_count = 0;
         result.collector = null;
@@ -601,6 +644,18 @@ fn executeExpressionStatement(
     };
     result.has_final_payload = true;
     result.final_payload = payload_buf[0..stream.pos];
+}
+
+fn pipelineHasLimitOrOffset(ast: *const Ast, pipeline_node: NodeIndex) bool {
+    const pipeline = ast.getNode(pipeline_node);
+    if (pipeline.tag != .pipeline) return false;
+    var op = pipeline.data.binary.rhs;
+    while (op != null_node) {
+        const node = ast.getNode(op);
+        if (node.tag == .op_limit or node.tag == .op_offset) return true;
+        op = node.next;
+    }
+    return false;
 }
 
 const empty_row_schema = RowSchema{};
@@ -696,7 +751,8 @@ fn materializeLetFromResult(
     state: *RequestState,
     name_token: u16,
     statement_index: u16,
-) error{OutOfMemory}!void {
+    allow_full_collector_fallback: bool,
+) error{ OutOfMemory, SpillWriteFailed, SpillReadFailed, SpillCorrupt }!void {
     _ = statement_index;
     if (result.collector) |collector| {
         var iter = collector.iterator();
@@ -705,11 +761,18 @@ fn materializeLetFromResult(
         var out = ResultRow.init();
         var skip = result.collector_output_offset;
         var remaining = result.collector_output_count;
+        if (allow_full_collector_fallback and
+            remaining == 0 and
+            skip == 0 and
+            collector.totalRowCount() > 0)
+        {
+            remaining = collector.totalRowCount();
+        }
         if (remaining == 1) {
             while (remaining > 0) {
                 arena.reset();
-                const has_row = iter.next(&out, &arena) catch break;
-                if (!has_row) break;
+                const has_row = iter.next(&out, &arena) catch return error.SpillReadFailed;
+                if (!has_row) return error.SpillCorrupt;
                 if (skip > 0) {
                     skip -= 1;
                     continue;
@@ -720,11 +783,16 @@ fn materializeLetFromResult(
                 return;
             }
         }
+        const list_count = @min(remaining, std.math.maxInt(u32));
+        if (list_count > 0 and list_count > @as(u64, max_variable_list_values - state.list_used)) {
+            try materializeCollectorRowsToSpillVariable(state, &iter, &out, &arena, skip, remaining, name_token);
+            return;
+        }
         const list_start = state.list_used;
         while (remaining > 0) {
             arena.reset();
-            const has_row = iter.next(&out, &arena) catch break;
-            if (!has_row) break;
+            const has_row = iter.next(&out, &arena) catch return error.SpillReadFailed;
+            if (!has_row) return error.SpillCorrupt;
             if (skip > 0) {
                 skip -= 1;
                 continue;
@@ -745,6 +813,11 @@ fn materializeLetFromResult(
         try stateAddVariableScalar(state, name_token, scalar);
         return;
     }
+    const list_count = result.row_count;
+    if (list_count > 0 and list_count > max_variable_list_values - state.list_used) {
+        try materializeFlatRowsToSpillVariable(state, result.rows[0..result.row_count], name_token);
+        return;
+    }
     const list_start = state.list_used;
     var row_idx: u16 = 0;
     while (row_idx < result.row_count) : (row_idx += 1) {
@@ -755,6 +828,96 @@ fn materializeLetFromResult(
         state.list_used += 1;
     }
     try stateAddVariableList(state, name_token, list_start, state.list_used - list_start);
+}
+
+fn materializeFlatRowsToSpillVariable(
+    state: *RequestState,
+    rows: []const ResultRow,
+    name_token: u16,
+) error{ OutOfMemory, SpillWriteFailed }!void {
+    var page_writer = SpillPageWriter.init();
+    const page_start = state.variable_spill_page_used;
+    var page_count: u16 = 0;
+    var row_count: u32 = 0;
+    for (rows) |row| {
+        if (row.column_count != 1) return error.OutOfMemory;
+        var single = ResultRow.init();
+        single.column_count = 1;
+        single.values[0] = row.values[0];
+        try appendVariableSpillRow(state, &page_writer, &single, &page_count);
+        row_count += 1;
+    }
+    try flushVariableSpillWriter(state, &page_writer, &page_count);
+    try stateAddVariableSpillList(state, name_token, page_start, page_count, row_count);
+}
+
+fn materializeCollectorRowsToSpillVariable(
+    state: *RequestState,
+    iter: *SpillingResultCollector.Iterator,
+    out: *ResultRow,
+    arena: *scan_mod.StringArena,
+    initial_skip: u64,
+    initial_remaining: u64,
+    name_token: u16,
+) error{ OutOfMemory, SpillWriteFailed, SpillReadFailed, SpillCorrupt }!void {
+    var page_writer = SpillPageWriter.init();
+    const page_start = state.variable_spill_page_used;
+    var page_count: u16 = 0;
+    var skip = initial_skip;
+    var remaining = initial_remaining;
+    var row_count: u32 = 0;
+
+    while (remaining > 0) {
+        arena.reset();
+        const has_row = iter.next(out, arena) catch return error.SpillReadFailed;
+        if (!has_row) return error.SpillCorrupt;
+        if (skip > 0) {
+            skip -= 1;
+            continue;
+        }
+        if (out.column_count != 1) return error.OutOfMemory;
+        var single = ResultRow.init();
+        single.column_count = 1;
+        single.values[0] = out.values[0];
+        try appendVariableSpillRow(state, &page_writer, &single, &page_count);
+        row_count += 1;
+        remaining -= 1;
+    }
+    try flushVariableSpillWriter(state, &page_writer, &page_count);
+    try stateAddVariableSpillList(state, name_token, page_start, page_count, row_count);
+}
+
+fn appendVariableSpillRow(
+    state: *RequestState,
+    page_writer: *SpillPageWriter,
+    row: *const ResultRow,
+    page_count: *u16,
+) error{ OutOfMemory, SpillWriteFailed }!void {
+    const appended = page_writer.appendRow(row) catch return error.SpillWriteFailed;
+    if (appended) return;
+    try flushVariableSpillWriter(state, page_writer, page_count);
+    const retried = page_writer.appendRow(row) catch return error.SpillWriteFailed;
+    if (!retried) return error.SpillWriteFailed;
+}
+
+fn flushVariableSpillWriter(
+    state: *RequestState,
+    page_writer: *SpillPageWriter,
+    page_count: *u16,
+) error{ OutOfMemory, SpillWriteFailed }!void {
+    if (page_writer.row_count == 0) return;
+    if (state.variable_spill_page_used >= max_variable_spill_pages) {
+        return error.OutOfMemory;
+    }
+    const payload = page_writer.finalize();
+    const page_id = state.variable_temp_mgr.allocateAndWrite(
+        payload,
+        TempPage.null_page_id,
+    ) catch return error.SpillWriteFailed;
+    state.variable_spill_page_ids[state.variable_spill_page_used] = page_id;
+    state.variable_spill_page_used += 1;
+    page_count.* += 1;
+    page_writer.reset();
 }
 
 fn copyValueForVariable(state: *RequestState, value: Value) error{OutOfMemory}!Value {
@@ -807,6 +970,25 @@ fn stateAddVariableList(
     state.vars[state.var_count] = .{
         .name_token = name_token,
         .value = .{ .list = .{ .start = start, .count = count } },
+    };
+    state.var_count += 1;
+}
+
+fn stateAddVariableSpillList(
+    state: *RequestState,
+    name_token: u16,
+    page_start: u16,
+    page_count: u16,
+    row_count: u32,
+) error{OutOfMemory}!void {
+    if (state.var_count >= max_request_variables) return error.OutOfMemory;
+    state.vars[state.var_count] = .{
+        .name_token = name_token,
+        .value = .{ .list_spill = .{
+            .page_start = page_start,
+            .page_count = page_count,
+            .row_count = row_count,
+        } },
     };
     state.var_count += 1;
 }
@@ -2081,6 +2263,13 @@ fn rewriteCollectorForPostOps(
                         },
                         error.VariableTypeMismatch => {
                             setPredicateVariableTypeMismatchError(result, switch (stage.kind) {
+                                .having_filter => "having",
+                                else => "where",
+                            });
+                            return false;
+                        },
+                        error.VariableStorageRead => {
+                            setPredicateVariableStorageReadError(result, switch (stage.kind) {
                                 .having_filter => "having",
                                 else => "where",
                             });
@@ -4735,6 +4924,10 @@ fn applyWhereFilter(
                     setPredicateVariableTypeMismatchError(result, predicate_scope);
                     return;
                 },
+                error.VariableStorageRead => {
+                    setPredicateVariableStorageReadError(result, predicate_scope);
+                    return;
+                },
                 else => false,
             }
         else
@@ -4770,6 +4963,10 @@ fn applyWhereFilter(
                 },
                 error.VariableTypeMismatch => {
                     setPredicateVariableTypeMismatchError(result, predicate_scope);
+                    return;
+                },
+                error.VariableStorageRead => {
+                    setPredicateVariableStorageReadError(result, predicate_scope);
                     return;
                 },
                 else => false,
@@ -4855,6 +5052,19 @@ fn setPredicateVariableTypeMismatchError(result: *QueryResult, scope: []const u8
     setError(result, msg);
 }
 
+fn setPredicateVariableStorageReadError(result: *QueryResult, scope: []const u8) void {
+    var msg_buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        msg_buf[0..],
+        "variable storage read failed in {s} expression",
+        .{scope},
+    ) catch {
+        setError(result, "variable storage read failed in predicate expression");
+        return;
+    };
+    setError(result, msg);
+}
+
 fn setPredicateClockUnavailableError(result: *QueryResult, scope: []const u8) void {
     var msg_buf: [96]u8 = undefined;
     const msg = std.fmt.bufPrint(
@@ -4891,6 +5101,8 @@ pub fn evalContextForExec(
             .statement_timestamp_micros = ctx.statement_timestamp_micros,
             .variable_resolver_ctx = ctx,
             .resolve_variable = resolveVariableBinding,
+            .resolve_spilled_membership_ctx = ctx,
+            .resolve_spilled_membership = resolveSpilledVariableMembership,
             .string_arena = string_arena,
         },
     };
@@ -4938,7 +5150,84 @@ fn resolveVariableBinding(
     return switch (variable.value) {
         .scalar => |scalar| .{ .scalar = scalar },
         .list => |list| .{ .list = state.list_values[list.start .. list.start + list.count] },
+        .list_spill => .list_spilled,
     };
+}
+
+fn resolveSpilledVariableMembership(
+    raw_ctx: *const anyopaque,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    list_token: u16,
+    needle: Value,
+) filter_mod.EvalError!Value {
+    const ctx: *const ExecContext = @ptrCast(@alignCast(raw_ctx));
+    _ = tokens;
+    _ = source;
+    if (needle == .null_value) return .{ .null_value = {} };
+    const state = ctx.request_state orelse return error.UndefinedVariable;
+    const idx = stateFindVariable(ctx, state, list_token) orelse return error.UndefinedVariable;
+    const variable = state.vars[idx];
+    switch (variable.value) {
+        .scalar => return error.VariableTypeMismatch,
+        .list => |list| {
+            var saw_null = false;
+            for (state.list_values[list.start .. list.start + list.count]) |element| {
+                if (element == .null_value) {
+                    saw_null = true;
+                    continue;
+                }
+                const matches = filter_mod.applyBinaryOp(
+                    needle,
+                    element,
+                    .equal_equal,
+                ) catch return error.VariableTypeMismatch;
+                if (matches == .bool and matches.bool) {
+                    return .{ .bool = true };
+                }
+            }
+            return if (saw_null) .{ .null_value = {} } else .{ .bool = false };
+        },
+        .list_spill => |spill| {
+            var saw_null = false;
+            var page_idx: u16 = 0;
+            var arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
+            var arena = scan_mod.StringArena.init(&arena_buf);
+            var row = ResultRow.init();
+            while (page_idx < spill.page_count) : (page_idx += 1) {
+                const page_slot = spill.page_start + page_idx;
+                if (page_slot >= state.variable_spill_page_used) return error.VariableStorageRead;
+                const page_id = state.variable_spill_page_ids[page_slot];
+                const read_result = state.variable_temp_mgr.readPage(page_id) catch
+                    return error.VariableStorageRead;
+                const chunk = TempPage.readChunk(&read_result.page) catch
+                    return error.VariableStorageRead;
+                var page_reader = SpillPageReader.init(chunk.payload) catch
+                    return error.VariableStorageRead;
+                while (true) {
+                    arena.reset();
+                    const has_row = page_reader.next(&row, &arena) catch
+                        return error.VariableStorageRead;
+                    if (!has_row) break;
+                    if (row.column_count != 1) return error.VariableStorageRead;
+                    const element = row.values[0];
+                    if (element == .null_value) {
+                        saw_null = true;
+                        continue;
+                    }
+                    const matches = filter_mod.applyBinaryOp(
+                        needle,
+                        element,
+                        .equal_equal,
+                    ) catch return error.VariableTypeMismatch;
+                    if (matches == .bool and matches.bool) {
+                        return .{ .bool = true };
+                    }
+                }
+            }
+            return if (saw_null) .{ .null_value = {} } else .{ .bool = false };
+        },
+    }
 }
 
 /// Truncate result to limit rows.
@@ -5314,6 +5603,10 @@ fn materializeRowsMatchingPredicate(
                 },
                 error.VariableTypeMismatch => {
                     setPredicateVariableTypeMismatchError(out, "where");
+                    return false;
+                },
+                error.VariableStorageRead => {
+                    setPredicateVariableStorageReadError(out, "where");
                     return false;
                 },
                 else => false,

@@ -326,7 +326,7 @@ test "feature insert duplicate key fails closed late in high-volume workload" {
         "User |> insert(id = 299, name = \"duplicate\", active = true) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        "ERR query: message=\"insert failed\" phase=execution code=DuplicateKey path=query line=1 col=1\n",
         result,
     );
 
@@ -409,7 +409,7 @@ test "feature multi-row insert duplicate key fails closed and inserts nothing" {
         "User |> insert((id = 1, name = \"Alice\", active = true), (id = 1, name = \"Bob\", active = false)) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        "ERR query: message=\"insert failed\" phase=execution code=DuplicateKey path=query line=1 col=1\n",
         result,
     );
 
@@ -488,7 +488,7 @@ test "feature multi-row insert large batch maintains non-PK unique index entries
         "User |> insert(id = 999, email = \"user-40@test.com\", name = \"dup\") {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        "ERR query: message=\"insert failed\" phase=execution code=DuplicateKey path=query line=1 col=1\n",
         result,
     );
 }
@@ -537,7 +537,7 @@ test "feature multi-row insert token-bound batch preserves heap and unique index
         "User |> insert(id = 5001, email = \"user-85@test.com\", name = \"dup\") {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        "ERR query: message=\"insert failed\" phase=execution code=DuplicateKey path=query line=1 col=1\n",
         result,
     );
 }
@@ -590,7 +590,7 @@ test "feature multi-row insert rejects PK duplicate against existing row" {
         "User |> insert((id = 1, name = \"dup\"), (id = 2, name = \"new\")) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        "ERR query: message=\"insert failed\" phase=execution code=DuplicateKey path=query line=1 col=1\n",
         result,
     );
 
@@ -637,7 +637,7 @@ test "feature multi-row insert enforces FK constraints for valid and invalid bat
         "Post |> insert((id = 12, user_id = 1), (id = 13, user_id = 999)) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=ReferentialIntegrityViolation\n",
+        "ERR query: message=\"insert failed\" phase=execution code=ReferentialIntegrityViolation path=query line=1 col=1\n",
         result,
     );
 
@@ -690,7 +690,7 @@ test "feature multi-row insert non-PK unique in-batch duplicate fails closed" {
         "User |> insert((id = 1, email = \"dup@test.com\", name = \"A\"), (id = 2, email = \"dup@test.com\", name = \"B\")) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        "ERR query: message=\"insert failed\" phase=execution code=DuplicateKey path=query line=1 col=1\n",
         result,
     );
 
@@ -728,7 +728,7 @@ test "feature multi-row insert nullable unique skips null keys and still rejects
         "User |> insert((id = 3, email = \"dup@test.com\", name = \"C\"), (id = 4, email = \"dup@test.com\", name = \"D\")) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        "ERR query: message=\"insert failed\" phase=execution code=DuplicateKey path=query line=1 col=1\n",
         result,
     );
 
@@ -788,7 +788,7 @@ test "feature multi-row insert token-bound mixed nullable unique keys stay corre
     );
     result = try executor.run(dup_req);
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        "ERR query: message=\"insert failed\" phase=execution code=DuplicateKey path=query line=1 col=1\n",
         result,
     );
 

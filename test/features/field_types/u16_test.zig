@@ -54,7 +54,7 @@ test "feature u16 fields fail closed when insert value is out of range" {
         "OrderStatsValidation |> insert(id = 1, daily_orders = 65536) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: phase=mutation code=IntegerOutOfRange path=insert.daily_orders line=1 col=55 message=\"value is out of range (0 to 65535)\"\n",
+        "ERR query: message=\"value is out of range (0 to 65535)\" phase=mutation code=IntegerOutOfRange path=insert.daily_orders line=1 col=55\n",
         result,
     );
 }

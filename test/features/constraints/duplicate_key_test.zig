@@ -27,7 +27,7 @@ test "feature insert fails closed on duplicate primary key" {
         "User |> insert(id = 1, name = \"Bob\") {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: insert failed; class=fatal; code=DuplicateKey\n",
+        "ERR query: message=\"insert failed\" phase=execution code=DuplicateKey path=query line=1 col=1\n",
         result,
     );
 }

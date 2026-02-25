@@ -109,7 +109,7 @@ test "feature coalesce fails closed on empty argument list" {
         "CoalesceMismatch |> where(id == 1) |> update(value = coalesce()) {}",
     );
     try std.testing.expectEqualStrings(
-        "ERR query: update failed; class=fatal; code=TypeMismatch\n",
+        "ERR query: message=\"update failed\" phase=execution code=TypeMismatch path=query line=1 col=1\n",
         result,
     );
 }

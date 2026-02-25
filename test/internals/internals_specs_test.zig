@@ -23,4 +23,5 @@ comptime {
     _ = @import("spill/temp_storage_surface_test.zig");
     _ = @import("spill/temp_spill_determinism_test.zig");
     _ = @import("spill/nested_parent_overflow_contract_test.zig");
+    _ = @import("spill/variable_spill_fault_test.zig");
 }
