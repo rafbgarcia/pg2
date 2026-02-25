@@ -67,6 +67,7 @@ pub const runtime = struct {
     pub const request = @import("runtime/request.zig");
     pub const error_taxonomy = @import("runtime/error_taxonomy.zig");
     pub const static_allocator = @import("runtime/static_allocator.zig");
+    pub const storage_root = @import("runtime/storage_root.zig");
 };
 
 pub const server = struct {
@@ -124,6 +125,7 @@ comptime {
     _ = runtime.request;
     _ = runtime.error_taxonomy;
     _ = runtime.static_allocator;
+    _ = runtime.storage_root;
     _ = server.session;
     _ = server.pool;
     _ = server.diagnostics;

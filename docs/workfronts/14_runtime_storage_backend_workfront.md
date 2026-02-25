@@ -7,7 +7,7 @@
 ### Checklist
 
 - [x] Phase 1 complete: production file-backed storage exists and is unit-tested.
-- [ ] Phase 2 complete: server mode boots on production storage path.
+- [x] Phase 2 complete: server mode boots on production storage path.
 - [ ] Phase 3 complete: memory/storage accounting boundaries are enforced and observable.
 - [ ] Phase 4 complete: crash/restart and durability gates proven under file-backed runtime.
 

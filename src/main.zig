@@ -10,13 +10,13 @@ const builtin = @import("builtin");
 const runtime_config = @import("pg2").runtime.config;
 const runtime_planner = @import("pg2").runtime.planner;
 const runtime_bootstrap = @import("pg2").runtime.bootstrap;
+const runtime_storage_root_mod = @import("pg2").runtime.storage_root;
 const session_mod = @import("pg2").server.session;
 const pool_mod = @import("pg2").server.pool;
 const diagnostics_mod = @import("pg2").server.diagnostics;
 const reactor_mod = @import("pg2").server.reactor;
 const io_uring_transport_mod = @import("pg2").server.io_uring_transport;
 const catalog_mod = @import("pg2").catalog.meta;
-const disk_mod = @import("pg2").simulator.disk;
 const io_mod = @import("pg2").storage.io;
 
 pub fn main() !void {
@@ -26,30 +26,61 @@ pub fn main() !void {
     var args = std.process.args();
     _ = args.skip(); // program name
 
+    var argv = std.ArrayList([]const u8).init(allocator);
+    defer argv.deinit();
+    while (args.next()) |arg| {
+        argv.append(arg) catch {
+            try stdout.writeAll("startup failed: argument parsing allocation failed\n");
+            return;
+        };
+    }
+
+    if (argv.items.len > 0 and std.mem.eql(u8, argv.items[0], "lock")) {
+        try handleLockCommand(stdout, argv.items[1..]);
+        return;
+    }
+
     var memory_bytes: usize = runtime_config.default_memory_bytes;
     var listen_addr: ?[]const u8 = null;
+    var storage_root_path: []const u8 = runtime_storage_root_mod.default_storage_root;
 
-    while (args.next()) |arg| {
+    var index: usize = 0;
+    while (index < argv.items.len) : (index += 1) {
+        const arg = argv.items[index];
         if (std.mem.eql(u8, arg, "--memory")) {
-            const raw = args.next() orelse {
+            index += 1;
+            if (index >= argv.items.len) {
                 try stdout.writeAll("missing value for --memory\n");
                 return;
-            };
+            }
+            const raw = argv.items[index];
             memory_bytes = runtime_config.parseMemoryBytes(raw) catch {
                 try stdout.writeAll("invalid --memory value\n");
                 return;
             };
         } else if (std.mem.eql(u8, arg, "--listen")) {
-            const raw = args.next() orelse {
+            index += 1;
+            if (index >= argv.items.len) {
                 try stdout.writeAll("missing value for --listen\n");
                 return;
-            };
+            }
+            const raw = argv.items[index];
             listen_addr = raw;
+        } else if (std.mem.eql(u8, arg, "--storage")) {
+            index += 1;
+            if (index >= argv.items.len) {
+                try stdout.writeAll("missing value for --storage\n");
+                return;
+            }
+            storage_root_path = argv.items[index];
         } else if (std.mem.eql(u8, arg, "--help")) {
             try stdout.writeAll(
-                \\Usage: pg2 [--memory <bytes|MiB|GiB>] [--listen <host:port>]
+                \\Usage:
+                \\  pg2 [--memory <bytes|MiB|GiB>] [--listen <host:port>] [--storage <dir>]
+                \\  pg2 lock inspect [--storage <dir>]
                 \\  --memory       Startup memory budget (default: 512MiB)
                 \\  --listen       Start server accept loop (Linux-only target)
+                \\  --storage      Runtime storage root (default: .pg2)
                 \\
             );
             return;
@@ -59,8 +90,49 @@ pub fn main() !void {
         }
     }
 
-    var disk = disk_mod.SimulatedDisk.init(allocator);
-    defer disk.deinit();
+    var storage_root = runtime_storage_root_mod.RuntimeStorageRoot.openOrCreate(
+        storage_root_path,
+    ) catch |err| switch (err) {
+        error.StorageRootOpenFailed => {
+            try stdout.writeAll("startup failed: could not open storage root\n");
+            return;
+        },
+        error.LockOpenFailed => {
+            try stdout.writeAll("startup failed: could not open storage lock file\n");
+            return;
+        },
+        error.WriterAlreadyActive => {
+            try stdout.writeAll(
+                "startup failed: another writer is active for this storage root\n",
+            );
+            return;
+        },
+        error.LockAcquireFailed => {
+            try stdout.writeAll("startup failed: could not acquire storage root lock\n");
+            return;
+        },
+        error.LockMetadataWriteFailed => {
+            try stdout.writeAll("startup failed: could not write lock metadata\n");
+            return;
+        },
+        error.DataFileOpenFailed => {
+            try stdout.writeAll("startup failed: could not open data.pg2\n");
+            return;
+        },
+        error.WalFileOpenFailed => {
+            try stdout.writeAll("startup failed: could not open wal.pg2\n");
+            return;
+        },
+        error.TempFileOpenFailed => {
+            try stdout.writeAll("startup failed: could not open temp.pg2\n");
+            return;
+        },
+        error.TempTruncateFailed => {
+            try stdout.writeAll("startup failed: could not truncate temp.pg2\n");
+            return;
+        },
+    };
+    defer storage_root.deinit();
 
     const detected_vcpus = runtime_config.detectVcpus();
     const plan = runtime_planner.planFromMemory(memory_bytes, detected_vcpus) catch |err| switch (err) {
@@ -79,7 +151,7 @@ pub fn main() !void {
     };
     const required_bytes = runtime_bootstrap.requiredBytesForConfig(
         allocator,
-        disk.storage(),
+        storage_root.storage(),
         plan.bootstrap,
     ) catch |err| switch (err) {
         error.InsufficientMemoryBudget => {
@@ -117,7 +189,7 @@ pub fn main() !void {
 
     var runtime = runtime_bootstrap.BootstrappedRuntime.init(
         memory_region,
-        disk.storage(),
+        storage_root.storage(),
         plan.bootstrap,
     ) catch |err| switch (err) {
         error.InsufficientMemoryBudget => {
@@ -247,4 +319,71 @@ pub fn main() !void {
             };
         }
     }
+}
+
+fn handleLockCommand(stdout: std.fs.File, args: []const []const u8) !void {
+    if (args.len == 0 or !std.mem.eql(u8, args[0], "inspect")) {
+        try stdout.writeAll("unknown lock command\n");
+        return;
+    }
+
+    var storage_root_path: []const u8 = runtime_storage_root_mod.default_storage_root;
+    var index: usize = 1;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--storage")) {
+            index += 1;
+            if (index >= args.len) {
+                try stdout.writeAll("missing value for --storage\n");
+                return;
+            }
+            storage_root_path = args[index];
+            continue;
+        }
+
+        if (std.mem.eql(u8, arg, "--help")) {
+            try stdout.writeAll("Usage: pg2 lock inspect [--storage <dir>]\n");
+            return;
+        }
+
+        try stdout.writeAll("unknown argument\n");
+        return;
+    }
+
+    const metadata = runtime_storage_root_mod.RuntimeStorageRoot.inspectLockMetadata(
+        storage_root_path,
+    ) catch |err| switch (err) {
+        error.StorageRootOpenFailed => {
+            try stdout.writeAll("lock inspect failed: could not open storage root\n");
+            return;
+        },
+        error.LockOpenFailed => {
+            try stdout.writeAll("lock inspect failed: LOCK file not found\n");
+            return;
+        },
+        error.LockReadFailed => {
+            try stdout.writeAll("lock inspect failed: could not read LOCK file\n");
+            return;
+        },
+        error.InvalidLockMetadata => {
+            try stdout.writeAll("lock inspect failed: invalid lock metadata format\n");
+            return;
+        },
+    };
+
+    var buf: [512]u8 = undefined;
+    const out = std.fmt.bufPrint(
+        &buf,
+        "storage={s}\npid={d}\nhostname={s}\nstarted_at_unix_ns={d}\n",
+        .{
+            storage_root_path,
+            metadata.pid,
+            metadata.hostname(),
+            metadata.started_at_unix_ns,
+        },
+    ) catch {
+        try stdout.writeAll("lock inspect failed: output formatting overflow\n");
+        return;
+    };
+    try stdout.writeAll(out);
 }
