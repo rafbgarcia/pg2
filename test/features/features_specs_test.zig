@@ -53,6 +53,13 @@ comptime {
     _ = @import("variables_and_multi_statement/multi_statement_read_chain_test.zig");
     _ = @import("variables_and_multi_statement/multi_statement_mutation_chain_test.zig");
     _ = @import("variables_and_multi_statement/multi_statement_atomic_rollback_test.zig");
+    _ = @import("variables_and_multi_statement/let_test.zig");
+    _ = @import("variables_and_multi_statement/undefined_variable_test.zig");
+    _ = @import("variables_and_multi_statement/duplicate_variable_test.zig");
+    _ = @import("variables_and_multi_statement/invalid_variable_type_usage_test.zig");
+    _ = @import("variables_and_multi_statement/statement_error_index_test.zig");
+    _ = @import("variables_and_multi_statement/response_shape_multi_statement_test.zig");
+    _ = @import("variables_and_multi_statement/shared_snapshot_read_your_writes_test.zig");
     _ = @import("server_concurrency/multi_worker_progress_test.zig");
     _ = @import("server_concurrency/transaction_pinning_queue_pressure_test.zig");
 }

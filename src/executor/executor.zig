@@ -154,6 +154,77 @@ pub const ExecStats = struct {
     plan: PlanStats = .{},
 };
 
+const max_request_variables: u16 = 128;
+const max_variable_list_values: u16 = 8192;
+const variable_arena_divisor: usize = 4;
+const variable_arena_min_bytes: usize = 64 * 1024;
+
+const VariableValue = union(enum) {
+    scalar: Value,
+    list: struct {
+        start: u16,
+        count: u16,
+    },
+};
+
+const RequestVariable = struct {
+    name_token: u16,
+    value: VariableValue,
+};
+
+const VariableArena = struct {
+    bytes: []u8,
+    used: usize = 0,
+
+    fn reset(self: *VariableArena) void {
+        self.used = 0;
+    }
+
+    fn alloc(self: *VariableArena, comptime T: type, count: usize) error{OutOfMemory}![]T {
+        if (count == 0) return &[_]T{};
+        const aligned = std.mem.alignForward(usize, self.used, @alignOf(T));
+        const size = @sizeOf(T) * count;
+        const end = aligned + size;
+        if (end > self.bytes.len) return error.OutOfMemory;
+        const ptr: [*]T = @ptrCast(@alignCast(self.bytes[aligned..end].ptr));
+        self.used = end;
+        return ptr[0..count];
+    }
+};
+
+pub const RequestState = struct {
+    vars: [max_request_variables]RequestVariable = undefined,
+    var_count: u16 = 0,
+    list_values: [max_variable_list_values]Value = [_]Value{.{ .null_value = {} }} ** max_variable_list_values,
+    list_used: u16 = 0,
+    variable_arena: VariableArena,
+    statement_string_arena_bytes: []u8,
+    final_payload: []const u8 = &.{},
+
+    fn init(string_arena_bytes: []u8) RequestState {
+        std.debug.assert(string_arena_bytes.len > 0);
+        var variable_bytes = string_arena_bytes.len / variable_arena_divisor;
+        if (variable_bytes < variable_arena_min_bytes and string_arena_bytes.len > variable_arena_min_bytes) {
+            variable_bytes = variable_arena_min_bytes;
+        }
+        if (variable_bytes >= string_arena_bytes.len) {
+            variable_bytes = string_arena_bytes.len / 2;
+        }
+        const statement_end = string_arena_bytes.len - variable_bytes;
+        return .{
+            .variable_arena = .{ .bytes = string_arena_bytes[statement_end..] },
+            .statement_string_arena_bytes = string_arena_bytes[0..statement_end],
+        };
+    }
+
+    fn reset(self: *RequestState) void {
+        self.var_count = 0;
+        self.list_used = 0;
+        self.variable_arena.reset();
+        self.final_payload = &.{};
+    }
+};
+
 /// Result of executing a query. Row storage is fixed-capacity and embedded to
 /// avoid runtime allocation in the hot execution path.
 pub const QueryResult = struct {
@@ -169,6 +240,8 @@ pub const QueryResult = struct {
     /// Collector-backed output window. Used only when `collector != null`.
     collector_output_offset: u64 = 0,
     collector_output_count: u64 = 0,
+    has_final_payload: bool = false,
+    final_payload: []const u8 = &.{},
 
     pub fn init(rows: []ResultRow) QueryResult {
         std.debug.assert(rows.len >= scan_mod.scan_batch_size);
@@ -254,6 +327,7 @@ pub const ExecContext = struct {
     collector: *SpillingResultCollector,
     temp_pages_per_query_slot: u64 = temp_mod.default_pages_per_query_slot,
     work_memory_bytes_per_slot: u64,
+    request_state: ?*RequestState = null,
 };
 
 /// Operator kind extracted from the AST.
@@ -274,13 +348,18 @@ pub const OpDescriptor = struct {
 pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
     var result = QueryResult.init(ctx.result_rows);
     errdefer result.deinit();
-    var string_arena = scan_mod.StringArena.init(ctx.string_arena_bytes);
+    var exec_ctx = ctx.*;
+    var request_state = RequestState.init(ctx.string_arena_bytes);
+    request_state.reset();
+    exec_ctx.request_state = &request_state;
+    var string_arena = scan_mod.StringArena.init(request_state.statement_string_arena_bytes);
     string_arena.reset();
 
     const first_stmt = findFirstStatement(ctx.ast) orelse {
         setError(&result, "no statements found in query");
         return result;
     };
+    const include_statement_index = ctx.ast.getNode(first_stmt).next != null_node;
 
     var total_stats = ExecStats{};
     var statement_index: u16 = 0;
@@ -288,12 +367,15 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
     while (stmt != null_node) : (statement_index += 1) {
         resetQueryResultForStatement(&result);
         executeSingleStatement(
-            ctx,
+            &exec_ctx,
             &result,
             stmt,
             statement_index,
             &string_arena,
         );
+        if (result.has_error and include_statement_index) {
+            prefixStatementIndexIfMissing(&result, statement_index);
+        }
         accumulateStatementStats(&total_stats, &result.stats);
 
         if (result.has_error) {
@@ -310,6 +392,18 @@ pub fn execute(ctx: *const ExecContext) error{OutOfMemory}!QueryResult {
     return result;
 }
 
+fn prefixStatementIndexIfMissing(result: *QueryResult, statement_index: u16) void {
+    const current = result.getError() orelse return;
+    if (std.mem.startsWith(u8, current, "statement_index=")) return;
+    var buf: [512]u8 = undefined;
+    const formatted = std.fmt.bufPrint(
+        buf[0..],
+        "statement_index={d} {s}",
+        .{ statement_index, current },
+    ) catch current;
+    setError(result, formatted);
+}
+
 fn resetQueryResultForStatement(result: *QueryResult) void {
     result.row_count = 0;
     result.stats = .{};
@@ -317,6 +411,8 @@ fn resetQueryResultForStatement(result: *QueryResult) void {
     result.collector = null;
     result.collector_output_offset = 0;
     result.collector_output_count = 0;
+    result.has_final_payload = false;
+    result.final_payload = &.{};
     @memset(result.error_message[0..], 0);
 }
 
@@ -388,10 +484,19 @@ fn executeSingleStatement(
             statement_node,
             string_arena,
         ),
-        .let_binding => setStatementError(
+        .expr_stmt => executeExpressionStatement(
+            ctx,
             result,
+            statement_node,
             statement_index,
-            "let bindings are not executable yet",
+            string_arena,
+        ),
+        .let_binding => executeLetBindingStatement(
+            ctx,
+            result,
+            statement_node,
+            statement_index,
+            string_arena,
         ),
         else => setStatementError(
             result,
@@ -399,6 +504,311 @@ fn executeSingleStatement(
             "unsupported statement type",
         ),
     }
+}
+
+fn executeLetBindingStatement(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    statement_node: NodeIndex,
+    statement_index: u16,
+    string_arena: *scan_mod.StringArena,
+) void {
+    const state = ctx.request_state orelse {
+        setStatementError(result, statement_index, "request variable state unavailable");
+        return;
+    };
+    const let_node = ctx.ast.getNode(statement_node);
+    const name_token = let_node.extra;
+    if (stateFindVariable(ctx, state, name_token) != null) {
+        setStatementError(result, statement_index, "duplicate let variable name");
+        return;
+    }
+
+    const bound = let_node.data.unary;
+    if (bound == null_node) {
+        setStatementError(result, statement_index, "let binding is missing a value");
+        return;
+    }
+    const bound_node = ctx.ast.getNode(bound);
+    if (bound_node.tag == .pipeline) {
+        executePipelineStatement(ctx, result, bound, string_arena);
+        if (result.has_error) return;
+        materializeLetFromResult(result, state, name_token, statement_index) catch {
+            setStatementError(result, statement_index, "let materialization exceeded variable memory budget");
+        };
+        result.row_count = 0;
+        result.collector = null;
+        result.collector_output_offset = 0;
+        result.collector_output_count = 0;
+        return;
+    }
+
+    var exec_eval = evalContextForExec(ctx, string_arena);
+    const scalar = filter_mod.evaluateExpressionFull(
+        ctx.ast,
+        ctx.tokens,
+        ctx.source,
+        bound,
+        &.{},
+        &empty_row_schema,
+        null,
+        &exec_eval.eval_ctx,
+    ) catch {
+        setStatementError(result, statement_index, "let scalar evaluation failed");
+        return;
+    };
+    const stored = copyValueForVariable(state, scalar) catch {
+        setStatementError(result, statement_index, "let scalar exceeds variable memory budget");
+        return;
+    };
+    stateAddVariableScalar(state, name_token, stored) catch {
+        setStatementError(result, statement_index, "too many let variables in request");
+        return;
+    };
+}
+
+fn executeExpressionStatement(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    statement_node: NodeIndex,
+    statement_index: u16,
+    string_arena: *scan_mod.StringArena,
+) void {
+    const state = ctx.request_state orelse {
+        setStatementError(result, statement_index, "request variable state unavailable");
+        return;
+    };
+    const stmt = ctx.ast.getNode(statement_node);
+    const expr_node = stmt.data.unary;
+    if (expr_node == null_node) {
+        setStatementError(result, statement_index, "expression statement is empty");
+        return;
+    }
+    const payload_buf = state.variable_arena.alloc(u8, state.variable_arena.bytes.len - state.variable_arena.used) catch {
+        setStatementError(result, statement_index, "final payload exceeded variable memory budget");
+        return;
+    };
+    var stream = std.io.fixedBufferStream(payload_buf);
+    const writer = stream.writer();
+    serializeExpressionPayload(
+        ctx,
+        expr_node,
+        string_arena,
+        writer,
+    ) catch {
+        setStatementError(result, statement_index, "failed to serialize expression payload");
+        return;
+    };
+    result.has_final_payload = true;
+    result.final_payload = payload_buf[0..stream.pos];
+}
+
+const empty_row_schema = RowSchema{};
+
+fn serializeExpressionPayload(
+    ctx: *const ExecContext,
+    expr_node: NodeIndex,
+    string_arena: *scan_mod.StringArena,
+    writer: anytype,
+) !void {
+    const node = ctx.ast.getNode(expr_node);
+    switch (node.tag) {
+        .expr_list => {
+            try writer.writeAll("[");
+            var value_node = node.data.unary;
+            var first = true;
+            while (value_node != null_node) {
+                if (!first) try writer.writeAll(",");
+                first = false;
+                try serializeExpressionPayload(ctx, value_node, string_arena, writer);
+                value_node = ctx.ast.getNode(value_node).next;
+            }
+            try writer.writeAll("]");
+        },
+        .expr_object => {
+            try writer.writeAll("{");
+            var field = node.data.unary;
+            var first = true;
+            while (field != null_node) {
+                const field_node = ctx.ast.getNode(field);
+                if (field_node.tag != .expr_object_field) return error.InvalidLiteral;
+                if (!first) try writer.writeAll(",");
+                first = false;
+                const key_raw = ctx.tokens.getText(field_node.extra, ctx.source);
+                try writer.writeAll("\"");
+                if (key_raw.len >= 2 and key_raw[0] == '"' and key_raw[key_raw.len - 1] == '"') {
+                    try writer.writeAll(key_raw[1 .. key_raw.len - 1]);
+                } else {
+                    try writer.writeAll(key_raw);
+                }
+                try writer.writeAll("\":");
+                try serializeExpressionPayload(ctx, field_node.data.unary, string_arena, writer);
+                field = field_node.next;
+            }
+            try writer.writeAll("}");
+        },
+        else => {
+            var exec_eval = evalContextForExec(ctx, string_arena);
+            const value = try filter_mod.evaluateExpressionFull(
+                ctx.ast,
+                ctx.tokens,
+                ctx.source,
+                expr_node,
+                &.{},
+                &empty_row_schema,
+                null,
+                &exec_eval.eval_ctx,
+            );
+            try serializeScalarJson(writer, value);
+        },
+    }
+}
+
+fn serializeScalarJson(writer: anytype, value: Value) !void {
+    switch (value) {
+        .i8 => |v| try writer.print("{d}", .{v}),
+        .i16 => |v| try writer.print("{d}", .{v}),
+        .i32 => |v| try writer.print("{d}", .{v}),
+        .i64 => |v| try writer.print("{d}", .{v}),
+        .u8 => |v| try writer.print("{d}", .{v}),
+        .u16 => |v| try writer.print("{d}", .{v}),
+        .u32 => |v| try writer.print("{d}", .{v}),
+        .u64 => |v| try writer.print("{d}", .{v}),
+        .f64 => |v| try writer.print("{d}", .{v}),
+        .bool => |v| try writer.writeAll(if (v) "true" else "false"),
+        .timestamp => |v| try writer.print("{d}", .{v}),
+        .null_value => try writer.writeAll("null"),
+        .string => |v| {
+            try writer.writeAll("\"");
+            for (v) |ch| {
+                if (ch == '"' or ch == '\\') {
+                    try writer.writeByte('\\');
+                }
+                try writer.writeByte(ch);
+            }
+            try writer.writeAll("\"");
+        },
+    }
+}
+
+fn materializeLetFromResult(
+    result: *const QueryResult,
+    state: *RequestState,
+    name_token: u16,
+    statement_index: u16,
+) error{OutOfMemory}!void {
+    _ = statement_index;
+    if (result.collector) |collector| {
+        var iter = collector.iterator();
+        var arena_buf: [scan_mod.max_row_size_bytes + 192]u8 = undefined;
+        var arena = scan_mod.StringArena.init(&arena_buf);
+        var out = ResultRow.init();
+        var skip = result.collector_output_offset;
+        var remaining = result.collector_output_count;
+        if (remaining == 1) {
+            while (remaining > 0) {
+                arena.reset();
+                const has_row = iter.next(&out, &arena) catch break;
+                if (!has_row) break;
+                if (skip > 0) {
+                    skip -= 1;
+                    continue;
+                }
+                if (out.column_count != 1) return error.OutOfMemory;
+                const scalar = try copyValueForVariable(state, out.values[0]);
+                try stateAddVariableScalar(state, name_token, scalar);
+                return;
+            }
+        }
+        const list_start = state.list_used;
+        while (remaining > 0) {
+            arena.reset();
+            const has_row = iter.next(&out, &arena) catch break;
+            if (!has_row) break;
+            if (skip > 0) {
+                skip -= 1;
+                continue;
+            }
+            if (out.column_count != 1) return error.OutOfMemory;
+            if (state.list_used >= max_variable_list_values) return error.OutOfMemory;
+            state.list_values[state.list_used] = try copyValueForVariable(state, out.values[0]);
+            state.list_used += 1;
+            remaining -= 1;
+        }
+        try stateAddVariableList(state, name_token, list_start, state.list_used - list_start);
+        return;
+    }
+
+    if (result.row_count == 1) {
+        if (result.rows[0].column_count != 1) return error.OutOfMemory;
+        const scalar = try copyValueForVariable(state, result.rows[0].values[0]);
+        try stateAddVariableScalar(state, name_token, scalar);
+        return;
+    }
+    const list_start = state.list_used;
+    var row_idx: u16 = 0;
+    while (row_idx < result.row_count) : (row_idx += 1) {
+        const row = &result.rows[row_idx];
+        if (row.column_count != 1) return error.OutOfMemory;
+        if (state.list_used >= max_variable_list_values) return error.OutOfMemory;
+        state.list_values[state.list_used] = try copyValueForVariable(state, row.values[0]);
+        state.list_used += 1;
+    }
+    try stateAddVariableList(state, name_token, list_start, state.list_used - list_start);
+}
+
+fn copyValueForVariable(state: *RequestState, value: Value) error{OutOfMemory}!Value {
+    return switch (value) {
+        .string => |s| .{ .string = try copyStringForVariable(state, s) },
+        else => value,
+    };
+}
+
+fn copyStringForVariable(state: *RequestState, s: []const u8) error{OutOfMemory}![]const u8 {
+    const copied = try state.variable_arena.alloc(u8, s.len);
+    @memcpy(copied, s);
+    return copied;
+}
+
+fn stateFindVariable(
+    ctx: *const ExecContext,
+    state: *const RequestState,
+    token_index: u16,
+) ?u16 {
+    const name = ctx.tokens.getText(token_index, ctx.source);
+    var i: u16 = 0;
+    while (i < state.var_count) : (i += 1) {
+        const candidate = ctx.tokens.getText(state.vars[i].name_token, ctx.source);
+        if (std.mem.eql(u8, name, candidate)) return i;
+    }
+    return null;
+}
+
+fn stateAddVariableScalar(
+    state: *RequestState,
+    name_token: u16,
+    value: Value,
+) error{OutOfMemory}!void {
+    if (state.var_count >= max_request_variables) return error.OutOfMemory;
+    state.vars[state.var_count] = .{
+        .name_token = name_token,
+        .value = .{ .scalar = value },
+    };
+    state.var_count += 1;
+}
+
+fn stateAddVariableList(
+    state: *RequestState,
+    name_token: u16,
+    start: u16,
+    count: u16,
+) error{OutOfMemory}!void {
+    if (state.var_count >= max_request_variables) return error.OutOfMemory;
+    state.vars[state.var_count] = .{
+        .name_token = name_token,
+        .value = .{ .list = .{ .start = start, .count = count } },
+    };
+    state.var_count += 1;
 }
 
 fn executePipelineStatement(
@@ -4479,6 +4889,8 @@ pub fn evalContextForExec(
         },
         .eval_ctx = .{
             .statement_timestamp_micros = ctx.statement_timestamp_micros,
+            .variable_resolver_ctx = ctx,
+            .resolve_variable = resolveVariableBinding,
             .string_arena = string_arena,
         },
     };
@@ -4509,6 +4921,24 @@ fn resolveParameterBinding(
         }
     }
     return error.UndefinedParameter;
+}
+
+fn resolveVariableBinding(
+    raw_ctx: *const anyopaque,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    token_index: u16,
+) filter_mod.EvalError!filter_mod.VariableRef {
+    const ctx: *const ExecContext = @ptrCast(@alignCast(raw_ctx));
+    _ = tokens;
+    _ = source;
+    const state = ctx.request_state orelse return .not_found;
+    const idx = stateFindVariable(ctx, state, token_index) orelse return .not_found;
+    const variable = state.vars[idx];
+    return switch (variable.value) {
+        .scalar => |scalar| .{ .scalar = scalar },
+        .list => |list| .{ .list = state.list_values[list.start .. list.start + list.count] },
+    };
 }
 
 /// Truncate result to limit rows.

@@ -49,7 +49,9 @@ pub fn serializeQueryResult(
 
     // Determine returned row count: when a spill collector is active,
     // use its total count; otherwise fall back to the flat row_count.
-    const returned_rows: u32 = if (tree_projection) |projection|
+    const returned_rows: u32 = if (result.has_final_payload)
+        1
+    else if (tree_projection) |projection|
         countProtocolRootRows(result, &projection)
     else if (result.collector) |collector|
         @intCast(@min(
@@ -72,6 +74,25 @@ pub fn serializeQueryResult(
             result.stats.rows_deleted,
         },
     ) catch return error.ResponseTooLarge;
+
+    if (result.has_final_payload) {
+        writer.writeAll(result.final_payload) catch return error.ResponseTooLarge;
+        writer.writeAll("\n") catch return error.ResponseTooLarge;
+        if (pool_stats) |stats| {
+            const oldest_active = if (tx_stats) |ts| ts.oldest_active_tx_id else std.math.maxInt(u64);
+            try serializeInspectStats(
+                writer,
+                &result.stats,
+                stats,
+                runtime_stats,
+                tx_stats,
+                catalog.snapshotOverflowReclaimStats(),
+                catalog.snapshotSlotReclaimStatsAtOldest(oldest_active),
+                catalog.snapshotIndexReclaimStatsAtOldest(oldest_active),
+            );
+        }
+        return;
+    }
 
     if (tree_projection) |projection| {
         // Tree protocol always uses the flat array path.

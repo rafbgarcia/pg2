@@ -87,16 +87,6 @@ pub const VariableRef = union(enum) {
     list: []const Value,
 };
 
-pub const VariableResolver = struct {
-    ctx: *const anyopaque,
-    resolve: *const fn (
-        ctx: *const anyopaque,
-        tokens: *const TokenizeResult,
-        source: []const u8,
-        token_index: u16,
-    ) EvalError!VariableRef,
-};
-
 /// Bundles all ambient evaluation state needed during expression evaluation.
 ///
 /// This struct consolidates what were previously individual parameters threaded
@@ -105,7 +95,13 @@ pub const VariableResolver = struct {
 pub const EvalContext = struct {
     statement_timestamp_micros: ?i64 = null,
     parameter_resolver: ?*const ParameterResolver = null,
-    variable_resolver: ?*const VariableResolver = null,
+    variable_resolver_ctx: ?*const anyopaque = null,
+    resolve_variable: ?*const fn (
+        ctx: *const anyopaque,
+        tokens: *const TokenizeResult,
+        source: []const u8,
+        token_index: u16,
+    ) EvalError!VariableRef = null,
     string_arena: ?*scan_mod.StringArena = null,
 };
 
@@ -208,9 +204,9 @@ pub fn evaluateExpressionFull(
             .apply_column_ref => |tok_idx| {
                 const name = tokens.getText(tok_idx, source);
                 const col = schema.findColumn(name);
-                const variable_ref = if (eval_ctx.variable_resolver) |resolver|
-                    try resolver.resolve(
-                        resolver.ctx,
+                const variable_ref = if (eval_ctx.resolve_variable) |resolve_variable|
+                    try resolve_variable(
+                        eval_ctx.variable_resolver_ctx orelse return error.UndefinedVariable,
                         tokens,
                         source,
                         tok_idx,
@@ -303,9 +299,9 @@ pub fn evaluateExpressionFull(
             .apply_membership_variable => |info| {
                 if (eval_count < 1) return error.StackUnderflow;
                 const needle = evalPop(&eval_stack, &eval_count);
-                const resolver = eval_ctx.variable_resolver orelse return error.UndefinedVariable;
-                const variable_ref = try resolver.resolve(
-                    resolver.ctx,
+                const resolve_variable = eval_ctx.resolve_variable orelse return error.UndefinedVariable;
+                const variable_ref = try resolve_variable(
+                    eval_ctx.variable_resolver_ctx orelse return error.UndefinedVariable,
                     tokens,
                     source,
                     info.list_token,

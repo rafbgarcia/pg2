@@ -1194,6 +1194,8 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
     var local_eval_ctx = filter_mod.EvalContext{
         .statement_timestamp_micros = eval_ctx.statement_timestamp_micros,
         .parameter_resolver = &parameter_resolver,
+        .variable_resolver_ctx = eval_ctx.variable_resolver_ctx,
+        .resolve_variable = eval_ctx.resolve_variable,
         .string_arena = &string_arena,
     };
 
@@ -1452,6 +1454,8 @@ pub fn executeDeleteWithReturningAndParameters(
     var local_eval_ctx = filter_mod.EvalContext{
         .statement_timestamp_micros = eval_ctx.statement_timestamp_micros,
         .parameter_resolver = &parameter_resolver,
+        .variable_resolver_ctx = eval_ctx.variable_resolver_ctx,
+        .resolve_variable = eval_ctx.resolve_variable,
         .string_arena = &string_arena,
     };
 
