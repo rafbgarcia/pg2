@@ -4,10 +4,139 @@
 Eliminate the need for a traditional background VACUUM process by reclaiming dead storage (tombstoned heap slots, orphaned overflow page chains, stale B+ tree entries) inline with normal transaction processing, using epoch-based or eager strategies that are deterministic, safe under concurrent snapshots, and require no background threads.
 
 ## Progress Update (2026-02-25)
-- Phase 2 slot-reclamation plumbing is in place (queueing, commit/abort queue state, WAL `reclaim_slot`, heap reclaimed-slot reuse path).
+- Phase 2 slot-reclamation plumbing is in place:
+  - heap slot state split into tombstoned vs reclaimed, with deterministic reclaimed-slot reuse;
+  - slot reclaim queue with tx-aware pending/committed lifecycle;
+  - commit/rollback session wiring for slot reclaim queue boundaries;
+  - WAL `reclaim_slot` record + replay application in recovery;
+  - inspect surface for heap reclaim queue/counters.
 - A rollback correctness flaw was identified and resolved by implementing physical heap rollback on abort from undo pre-images before abort maintenance.
 - Commit/abort maintenance (`undo_log.truncate(...)` + `tx_manager.cleanupBefore(...)`) remains enabled at pool boundaries, with rollback no longer depending on retained aborted visibility history.
 - Reactor pinning tests now assert post-cleanup terminal state (`!= .active`) instead of requiring retained `.aborted` state outside the tx-state retention window.
+- Full test suite is green after these changes (`zig build test --summary all` passes on 2026-02-25).
+
+## Status Snapshot (2026-02-25)
+
+### Phase Status
+- **Phase 1 (Design Investigation and Decision):** partial
+  - High-level direction exists and implementation decisions have started landing.
+  - Still missing a formalized, explicit decision record in this doc for strategy tradeoffs + final invariant text.
+- **Phase 2 (Heap Slot Reclamation):** mostly complete
+  - Implemented and covered by tests:
+    - reclaim queue + tx lifecycle hooks
+    - safe reclaim gating by `oldest_active`
+    - reclaimed-slot reuse
+    - WAL logging and replay support for slot reclaim
+    - runtime commit/abort undo maintenance at pool/session boundaries
+  - Remaining to fully close:
+    - explicit, documented proof/tests for “never reclaim visible-to-any-active-snapshot” under targeted long-lived-snapshot scenarios
+    - expanded crash matrix focused on `reclaim_slot` replay semantics
+- **Phase 3 (Overflow Page Chain Reclamation):** partial
+  - Existing overflow reclaim queue and WAL lifecycle are in place.
+  - **Not complete against this workfront:** allocator still effectively monotonic (no persisted reusable free-list allocator contract for overflow pages).
+- **Phase 4 (B+ Tree Dead Entry Cleanup):** partial
+  - Opportunistic dead-entry cleanup exists in uniqueness-check path.
+  - **Not complete against this workfront:** no dedicated cleanup hook from heap slot reclaim path; no opportunistic dead-entry deletion in generic index point/range scan path.
+- **Phase 5 (Reclamation Under Concurrency):** partial
+  - Some server/concurrency surfaces exist; baseline pinning coverage exists.
+  - **Not complete against this workfront:** targeted long-running-snapshot reclaim-blocking stress matrix and reclaim observability (pinned-by-snapshot counters/age) still pending.
+
+### Current Gap-to-Gate Summary
+- **Complete now:** foundational slot reclaim + rollback safety + WAL/replay plumbing for slot reclaim.
+- **Major remaining gates:**
+  - overflow page reuse via persisted free-list allocator;
+  - index dead-entry cleanup tied to reclaim events and scan-time opportunistic cleanup;
+  - phase-5 concurrency/observability matrix for pinned snapshots and reclaim resumption.
+
+## Fresh Session Execution Plan (Ordered, Full-Completion Path)
+
+This section is the handoff contract for a fresh Codex session. Execute in order.
+
+1. **Phase 1 closeout: finalize decision record and invariants**
+   - Write an explicit strategy decision subsection in this document:
+     - selected reclamation strategy and rejected alternatives;
+     - rationale tied to pg2 constraints (determinism, no background threads, bounded memory, WAL recovery);
+     - final safety invariant text (copy from `Non-Negotiable Invariants` below).
+   - Gate: document contains final design decision + invariant text, no placeholders.
+
+2. **Phase 3 completion: overflow reusable free-list allocator**
+   - Replace monotonic overflow allocation behavior with reusable free-list contract.
+   - Ensure free-list state is crash-safe (WAL + replay idempotent).
+   - Route overflow reclaim outputs into reusable allocation path (not just page-type reset).
+   - Gate: repeated overflow-heavy insert/delete cycles demonstrate reuse and bounded growth.
+
+3. **Phase 4 completion: index dead-entry cleanup parity**
+   - Add reclaim-time index cleanup hook for rows becoming reclaimable.
+   - Add opportunistic dead-entry deletion in generic index point/range scan paths (not only uniqueness checks).
+   - Keep behavior MVCC-safe and idempotent under retries/replay.
+   - Gate: dead index entries do not grow unbounded under churn; lookup/range correctness preserved.
+
+4. **Phase 5 completion: long-lived snapshot + observability hardening**
+   - Add targeted stress suite for reclaim blocked by long-lived snapshots, then resumed reclaim after snapshot close.
+   - Add observability fields for pinned-by-snapshot reclaim pressure and progress (queue depth alone is insufficient).
+   - Gate: deterministic tests prove reclaim is blocked only when required and resumes correctly.
+
+5. **Crash/recovery completion matrix**
+   - Add focused crash/replay scenarios for `reclaim_slot`, overflow free-list reuse, and index cleanup paths.
+   - Verify idempotent replay and post-restart consistency of heap/overflow/index surfaces.
+   - Gate: replay-focused matrix passes with deterministic results.
+
+6. **Final full-gate validation**
+   - Run `zig build test --summary all`.
+   - Ensure this workfront’s phases are updated from partial to complete only when all phase gates are met.
+   - Gate: full suite green + all phase gate checkboxes satisfied in this doc.
+
+## Non-Negotiable Invariants (Hard-Stop If Violated)
+
+1. **Snapshot safety:** No reclamation may free data that could be visible to any active snapshot.
+2. **Abort correctness:** Aborted mutations must never become visible, regardless of undo truncation timing.
+3. **WAL recoverability:** Every physical reclamation state transition must be recoverable and replay-idempotent.
+4. **Determinism:** Reclaim behavior must be deterministic under simulation replay (no time-based or nondeterministic scheduling).
+5. **Bounded operation:** Reclaim paths must honor bounded/static allocation contracts (no unbounded growth path introduced silently).
+
+If any design/change makes these ambiguous or unprovable, stop and resolve the design explicitly before coding.
+
+## Required Test Matrix Additions (Explicit)
+
+Add or extend tests to cover all items below before marking full completion:
+
+1. **Long-lived snapshot reclaim blocking**
+   - Snapshot opened before delete/reclaim candidate creation.
+   - Reclaim attempts while snapshot is open must not reclaim visible history.
+   - After snapshot close, reclaim resumes and succeeds.
+
+2. **Overflow reuse under churn**
+   - Large-string insert/delete cycles with overflow chains.
+   - Freed overflow pages are reused by later inserts.
+   - Allocation cursor/file-growth behavior remains bounded relative to churn.
+
+3. **Index dead-entry cleanup coverage**
+   - Reclaim-time cleanup path validates stale entries are removed.
+   - Generic index point scan and range scan opportunistic cleanup path validates stale entries are removed.
+   - No false deletion of live index entries.
+
+4. **Crash/replay idempotency**
+   - Replay tests for `reclaim_slot`, overflow free-list updates, and index cleanup WAL records.
+   - Re-applying replay on same WAL segment yields stable final state.
+
+5. **Concurrency/pinning stress**
+   - Mixed workload with concurrent readers/writers and pinned transactions.
+   - Assertions for no visibility regressions, no leaked resources, and eventual reclaim progress.
+
+## Definition Of Done By Phase (Full, Not Partial)
+
+1. **Phase 1 done when:**
+   - Final strategy and invariants are explicitly documented and reviewed.
+2. **Phase 2 done when:**
+   - Existing slot reclaim + abort rollback guarantees remain green with no open correctness gaps.
+3. **Phase 3 done when:**
+   - Overflow reclaimed pages are actually reusable via persisted allocator contract, with replay proof.
+4. **Phase 4 done when:**
+   - Dead index cleanup is tied to reclaim events and present in generic scan paths, with bounded-growth evidence.
+5. **Phase 5 done when:**
+   - Long-lived snapshot blocking/resume behavior and reclaim-pressure observability are implemented and tested.
+6. **Workfront done when:**
+   - All phase gates above pass and `zig build test --summary all` is green.
 
 ## Why
 - Traditional VACUUM (as in PostgreSQL) is a major source of operational complexity: table bloat, autovacuum tuning, wraparound dangers, and unpredictable I/O spikes. pg2's mission is to eliminate this class of operational burden entirely.
