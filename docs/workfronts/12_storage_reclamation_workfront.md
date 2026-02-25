@@ -95,9 +95,9 @@ Workfront complete. No further execution plan items are open.
 
 If any design/change makes these ambiguous or unprovable, stop and resolve the design explicitly before coding.
 
-## Required Test Matrix Additions (Explicit)
+## Required Test Matrix Coverage (Completed)
 
-Add or extend tests to cover all items below before marking full completion:
+Implemented coverage includes:
 
 1. **Long-lived snapshot reclaim blocking**
    - Snapshot opened before delete/reclaim candidate creation.

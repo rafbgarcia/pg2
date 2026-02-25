@@ -9,7 +9,6 @@ Suggested implementation order.
 
 | Order | Workfront                                                                         | Why This Position                                                                                       |
 | ----- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| 5     | `docs/workfronts/12_storage_reclamation_workfront.md`                             | Reclaims dead heap/overflow/index storage to prevent long-running correctness/perf debt.                |
 | 6     | `docs/workfronts/14_runtime_storage_backend_workfront.md` (active follow-through) | Enforces real file-backed runtime boundaries so memory limits are production-real, not simulation-only. |
 | 7     | `docs/workfronts/06_variables_and_multi_statement_workfront.md`                   | User-facing execution semantics come after reclamation/storage foundations are reliable.                |
 | 8     | `docs/workfronts/07_adaptive_planning_workfront.md`                               | Planner policy hardening after multi-statement semantics are in place and measurable.                   |
