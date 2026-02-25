@@ -97,7 +97,7 @@ pub const RuntimeStorageRoot = struct {
 
         temp_file.truncate(0) catch return error.TempTruncateFailed;
 
-        var runtime_storage: RuntimeStorageRoot = .{
+        const runtime_storage: RuntimeStorageRoot = .{
             .root_dir = root_dir,
             .lock_file = lock_file,
             .data_file = data_file,
@@ -105,11 +105,6 @@ pub const RuntimeStorageRoot = struct {
             .temp_file = temp_file,
             .routing = undefined,
         };
-        runtime_storage.routing = RoutingStorage.init(
-            runtime_storage.data_file.storage(),
-            runtime_storage.wal_file.storage(),
-            runtime_storage.temp_file.storage(),
-        );
         return runtime_storage;
     }
 
@@ -122,6 +117,11 @@ pub const RuntimeStorageRoot = struct {
     }
 
     pub fn storage(self: *RuntimeStorageRoot) Storage {
+        self.routing = RoutingStorage.init(
+            self.data_file.storage(),
+            self.wal_file.storage(),
+            self.temp_file.storage(),
+        );
         return self.routing.storage();
     }
 
@@ -159,16 +159,17 @@ pub const RuntimeStorageRoot = struct {
         var hostname_buf: [std.posix.HOST_NAME_MAX]u8 = undefined;
         const hostname = std.posix.gethostname(&hostname_buf) catch "unknown";
         const started_at_unix_ns: u64 = @intCast(@max(@as(i64, 0), std.time.nanoTimestamp()));
-
-        var writer = lock_file.writer(&.{});
-        try writer.print(
+        var buf: [512]u8 = undefined;
+        const content = try std.fmt.bufPrint(
+            &buf,
             "pid={d}\nhostname={s}\nstarted_at_unix_ns={d}\n",
             .{
-                std.posix.getpid(),
+                std.c.getpid(),
                 hostname,
                 started_at_unix_ns,
             },
         );
+        try lock_file.writeAll(content);
     }
 };
 

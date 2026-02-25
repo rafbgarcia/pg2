@@ -8,7 +8,7 @@
 
 - [x] Phase 1 complete: production file-backed storage exists and is unit-tested.
 - [x] Phase 2 complete: server mode boots on production storage path.
-- [ ] Phase 3 complete: memory/storage accounting boundaries are enforced and observable.
+- [x] Phase 3 complete: memory/storage accounting boundaries are enforced and observable.
 - [ ] Phase 4 complete: crash/restart and durability gates proven under file-backed runtime.
 
 ### Progress Notes
@@ -16,6 +16,10 @@
 - Implemented canonical client command surface for runtime diagnostics:
   `pg2 inspect runtime --format json --server <host:port>` (`--server` required, fail-closed when missing).
 - Implemented server-side JSON schema contract emission (`schema_version = 1`) with memory/storage/logical/ratio/meta buckets.
+- Build lanes split: `zig build test --summary all` excludes stress, and `zig build stress --summary all` runs stress-only gates.
+- Added CI workflow with parallel `test` and `stress` jobs on Zig `0.15.2`.
+- Added deterministic RSS stress gate:
+  `1_000_000` rows or `1 GiB` on-disk (whichever first), 1-second sampling, warm-up exclusion (first 10%), p95 assertion `<= 1.35 * memory_budget`.
 
 ## Objective
 
