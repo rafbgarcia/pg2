@@ -16,14 +16,14 @@ Support request-scoped variables (`let`) and multiple statements in a single req
 - Implemented:
   - Top-level expression statements (`expr_stmt`) and object literals for arbitrary final return payloads.
   - Request-scoped `let` execution for scalar and single-column list materialization.
+  - Spill-backed `let` list materialization for rowsets exceeding in-memory variable list capacity.
+  - Deterministic spill-read and spill-write fault handling in variable predicate paths.
   - Variable resolution in read and mutation expression paths (including `in(field, var_list)`).
   - Deterministic ambiguous identifier fail-closed behavior (column vs variable).
   - Deterministic statement-indexed errors for multi-statement requests.
   - Final-statement-only response contract with expression payload serialization.
   - Feature coverage added under `test/features/variables_and_multi_statement/`.
-- Remaining blocker:
-  - Spill-backed persistence for variable materialization across statements is not yet implemented.
-  - Current implementation is bounded in-memory for variable materialization; this is deterministic, but does not yet satisfy full Phase 5 spill behavior.
+- Status: Complete (all phases gated and passing, including spill-backed variable materialization behavior).
 
 ## Proposed Query Shape
 ```pg2
