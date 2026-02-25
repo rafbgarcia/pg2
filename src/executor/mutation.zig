@@ -1910,29 +1910,44 @@ fn drainIndexReclaimQueueForRow(
             catalog.recordIndexReclaimFailure();
             return error.Corruption;
         };
-        btree.delete(catalog.index_reclaim_queue.keySlice(&entry)) catch |err| switch (err) {
-            error.KeyNotFound => {},
-            else => {
-                catalog.recordIndexReclaimFailure();
-                return index_maintenance_mod.mapBTreeError(err);
-            },
+
+        const key = catalog.index_reclaim_queue.keySlice(&entry);
+        const found_row = btree.find(key) catch |err| {
+            catalog.recordIndexReclaimFailure();
+            return index_maintenance_mod.mapBTreeError(err);
         };
-        syncIndexBTreeState(catalog, entry.model_id, entry.index_id, &btree);
+        if (found_row) |current_row| {
+            if (current_row.page_id == entry.page_id and current_row.slot == entry.slot) {
+                btree.delete(key) catch |err| switch (err) {
+                    error.KeyNotFound => {},
+                    else => {
+                        catalog.recordIndexReclaimFailure();
+                        return index_maintenance_mod.mapBTreeError(err);
+                    },
+                };
+                syncIndexBTreeState(catalog, entry.model_id, entry.index_id, &btree);
+                catalog.recordIndexReclaimSuccess();
+
+                const payload_len = encodeIndexReclaimWalPayload(
+                    payload_buf[0..],
+                    entry.model_id,
+                    entry.index_id,
+                    .{ .page_id = entry.page_id, .slot = entry.slot },
+                    key,
+                ) catch return error.Corruption;
+                _ = wal.append(
+                    tx_id,
+                    .index_reclaim_delete,
+                    entry.page_id,
+                    payload_buf[0..payload_len],
+                ) catch |e| return mapWalAppendError(e);
+                continue;
+            }
+        }
         catalog.recordIndexReclaimSuccess();
 
-        const payload_len = encodeIndexReclaimWalPayload(
-            payload_buf[0..],
-            entry.model_id,
-            entry.index_id,
-            .{ .page_id = entry.page_id, .slot = entry.slot },
-            catalog.index_reclaim_queue.keySlice(&entry),
-        ) catch return error.Corruption;
-        _ = wal.append(
-            tx_id,
-            .index_reclaim_delete,
-            entry.page_id,
-            payload_buf[0..payload_len],
-        ) catch |e| return mapWalAppendError(e);
+        // Stale metadata can race with newer live rows reusing the same key.
+        // In that case, dequeue without deleting to preserve current visibility.
     }
 }
 
