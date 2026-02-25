@@ -27,6 +27,7 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
   - scan module now has opt-in `indexFindWithCleanup` / `indexRangeScanIntoWithCleanup` APIs for opportunistic cleanup while preserving read-only no-side-effect defaults.
 - Phase 5 observability foundation started:
   - inspect now emits deterministic tx counters: `active_count`, `oldest_active_tx_id`, `next_tx_id`, `base_tx_id`.
+  - added deterministic maintenance test for long-lived snapshot blocking + post-close reclaim resume path.
 - Crash/replay matrix expanded:
   - added slot-reclaim replay idempotency coverage;
   - added index-reclaim WAL marker replay coverage.
@@ -66,7 +67,8 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
 - **Phase 5 (Reclamation Under Concurrency):** partial
   - Some server/concurrency surfaces exist; baseline pinning coverage exists.
   - Added deterministic tx inspect counters to expose reclaim watermark pressure without wall-clock metrics.
-  - **Not complete against this workfront:** targeted long-running-snapshot reclaim-blocking/resume stress matrix and explicit pinned-by-snapshot reclaim counters are still pending.
+  - Added targeted snapshot-pinning maintenance coverage for block/resume behavior.
+  - **Not complete against this workfront:** full mixed-concurrency stress matrix and explicit per-resource pinned-by-snapshot pressure counters are still pending.
 
 ### Current Gap-to-Gate Summary
 - **Complete now:** foundational slot reclaim + rollback safety + WAL/replay plumbing for slot reclaim.

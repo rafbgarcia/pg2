@@ -1894,7 +1894,10 @@ fn drainIndexReclaimQueueForRow(
             oldest_active,
             page_id,
             slot,
-        ) catch return error.Corruption) orelse break;
+        ) catch |e| switch (e) {
+            error.QueueEmpty => break,
+            else => return error.Corruption,
+        }) orelse break;
         catalog.recordIndexReclaimDequeue();
 
         var btree = openIndex(
