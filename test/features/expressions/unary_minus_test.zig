@@ -1,10 +1,7 @@
 //! Feature coverage for unary minus operator behavior through server session path.
 const std = @import("std");
 const feature = @import("../test_env_test.zig");
-
-fn expectContains(haystack: []const u8, needle: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, haystack, needle) != null);
-}
+const assertions = @import("../assertions.zig");
 
 test "feature update supports unary minus on representative numeric types" {
     var env: feature.FeatureEnv = undefined;
@@ -91,9 +88,9 @@ test "feature update unary minus fails closed on out-of-range constrained intege
         "CounterOutOfRange |> where(id == 1) |> update(value = -source) {}",
     );
 
-    try expectContains(result, "phase=mutation code=IntegerOutOfRange");
-    try expectContains(result, "path=update.value");
-    try expectContains(result, "message=\"value is out of range (0 to 255)\"");
+    try assertions.expectContains(result, "phase=mutation code=IntegerOutOfRange");
+    try assertions.expectContains(result, "path=update.value");
+    try assertions.expectContains(result, "message=\"value is out of range (0 to 255)\"");
 }
 
 test "feature unary minus propagates null operand for nullable assignment" {

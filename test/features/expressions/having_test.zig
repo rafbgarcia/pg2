@@ -1,10 +1,7 @@
 //! Feature coverage for having expression parity with aggregates.
 const std = @import("std");
 const feature = @import("../test_env_test.zig");
-
-fn expectContains(haystack: []const u8, needle: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, haystack, needle) != null);
-}
+const assertions = @import("../assertions.zig");
 
 test "feature having supports composed aggregate predicates with membership" {
     var env: feature.FeatureEnv = undefined;
@@ -80,7 +77,7 @@ test "feature having fails closed on invalid aggregate operand type" {
     const result = try executor.run(
         "BadAggregate |> group(status) |> having(sum(status) > 0) { status }",
     );
-    try expectContains(result, "message=\"aggregate evaluation failed\"");
+    try assertions.expectContains(result, "message=\"aggregate evaluation failed\"");
 }
 
 test "feature having fails closed for non-boolean predicate outputs" {

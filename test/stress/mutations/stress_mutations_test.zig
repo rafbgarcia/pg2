@@ -1,6 +1,7 @@
 //! Stress mutation scenarios that are too heavy for default feature runs.
 const std = @import("std");
 const feature = @import("../test_env_test.zig");
+const test_shared = @import("test_shared");
 const seed_batch_size: usize = 256;
 
 fn applyUserSchema(executor: *feature.TestExecutor) !void {
@@ -24,22 +25,12 @@ fn insertUsersBatched(
         const batch = @min(batch_size, remaining);
 
         var req_buf: [16 * 1024]u8 = undefined;
-        var stream = std.io.fixedBufferStream(req_buf[0..]);
-        const writer = stream.writer();
-
-        try writer.writeAll("User |> insert(");
-        var i: usize = 0;
-        while (i < batch) : (i += 1) {
-            if (i > 0) try writer.writeAll(", ");
-            const id = start_id + i;
-            try writer.print(
-                "(id = {d}, name = \"user-{d}\", active = true)",
-                .{ id, id },
-            );
-        }
-        try writer.writeAll(") {}");
-
-        const result = try executor.runSeed(stream.getWritten());
+        const request = try test_shared.insert.buildBulkUserInsertRequest(
+            req_buf[0..],
+            start_id,
+            batch,
+        );
+        const result = try executor.runSeed(request);
         var expected_buf: [96]u8 = undefined;
         const expected = try std.fmt.bufPrint(
             expected_buf[0..],

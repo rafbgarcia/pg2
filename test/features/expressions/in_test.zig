@@ -1,10 +1,7 @@
 //! Feature coverage for membership expression semantics (`in` and `!in`).
 const std = @import("std");
 const feature = @import("../test_env_test.zig");
-
-fn expectContains(haystack: []const u8, needle: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, haystack, needle) != null);
-}
+const assertions = @import("../assertions.zig");
 
 test "feature where supports in(value, list) and !in(value, list)" {
     var env: feature.FeatureEnv = undefined;
@@ -229,10 +226,10 @@ test "feature membership fails closed for invalid shape and arity" {
     var result = try executor.run(
         "InvalidMembership |> where(in(status, status_list)) { id }",
     );
-    try expectContains(result, "ERR query:");
+    try assertions.expectContains(result, "ERR query:");
 
     result = try executor.run(
         "InvalidMembership |> where(in(status)) { id }",
     );
-    try expectContains(result, "ERR parse:");
+    try assertions.expectContains(result, "ERR parse:");
 }

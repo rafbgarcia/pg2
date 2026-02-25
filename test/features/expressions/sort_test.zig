@@ -1,10 +1,7 @@
 //! Feature coverage for sort expression behavior through server session path.
 const std = @import("std");
 const feature = @import("../test_env_test.zig");
-
-fn expectContains(haystack: []const u8, needle: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, haystack, needle) != null);
-}
+const assertions = @import("../assertions.zig");
 
 test "feature sort supports arithmetic expression keys with deterministic tie-breaks" {
     var env: feature.FeatureEnv = undefined;
@@ -88,5 +85,5 @@ test "feature sort fails closed when key expression evaluation fails" {
     const result = try executor.run(
         "SortEvalFailure |> sort(value + 1 asc) { id value }",
     );
-    try expectContains(result, "message=\"sort key evaluation failed\"");
+    try assertions.expectContains(result, "message=\"sort key evaluation failed\"");
 }

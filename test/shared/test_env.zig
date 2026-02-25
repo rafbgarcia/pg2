@@ -6,6 +6,7 @@
 //! - Provides a thin request executor over `Session` + `ConnectionPool`.
 const std = @import("std");
 const pg2 = @import("pg2");
+pub const insert = @import("insert_helpers.zig");
 
 const bootstrap_mod = pg2.runtime.bootstrap;
 const catalog_mod = pg2.catalog.meta;

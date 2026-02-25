@@ -1,6 +1,7 @@
 //! Feature coverage for insert behavior through server session path.
 const std = @import("std");
 const pg2 = @import("pg2");
+const shared = @import("test_shared");
 const overflow_mod = pg2.storage.overflow;
 pub const feature = @import("../test_env_test.zig");
 
@@ -63,20 +64,7 @@ pub fn buildWideInsertRequest(buf: []u8, id: usize) ![]const u8 {
 }
 
 pub fn buildBulkUserInsertRequest(buf: []u8, start_id: usize, row_count: usize) ![]const u8 {
-    var stream = std.io.fixedBufferStream(buf);
-    const writer = stream.writer();
-    try writer.writeAll("User |> insert(");
-    var row_index: usize = 0;
-    while (row_index < row_count) : (row_index += 1) {
-        if (row_index > 0) try writer.writeAll(", ");
-        const id = start_id + row_index;
-        try writer.print(
-            "(id = {d}, name = \"user-{d}\", active = true)",
-            .{ id, id },
-        );
-    }
-    try writer.writeAll(") {}");
-    return stream.getWritten();
+    return shared.insert.buildBulkUserInsertRequest(buf, start_id, row_count);
 }
 
 pub fn buildBulkUserWithEmailInsertRequest(buf: []u8, start_id: usize, row_count: usize) ![]const u8 {

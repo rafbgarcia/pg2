@@ -8,6 +8,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const pg2 = @import("pg2");
+const test_shared = @import("test_shared");
 
 const bootstrap_mod = pg2.runtime.bootstrap;
 const storage_root_mod = pg2.runtime.storage_root;
@@ -115,22 +116,12 @@ fn runBatchInsert(
 ) !void {
     var req_buf: [24 * 1024]u8 = undefined;
     var response_buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(req_buf[0..]);
-    const writer = stream.writer();
-
-    try writer.writeAll("User |> insert(");
-    var i: u32 = 0;
-    while (i < count) : (i += 1) {
-        if (i > 0) try writer.writeAll(", ");
-        const id = start_id + i;
-        try writer.print(
-            "(id = {d}, name = \"user-{d}\", active = true)",
-            .{ id, id },
-        );
-    }
-    try writer.writeAll(") {}");
-
-    const written = try session.dispatchRequest(pool, stream.getWritten(), response_buf[0..]);
+    const request = try test_shared.insert.buildBulkUserInsertRequest(
+        req_buf[0..],
+        @intCast(start_id),
+        count,
+    );
+    const written = try session.dispatchRequest(pool, request, response_buf[0..]);
     const response = response_buf[0..written];
     try std.testing.expect(std.mem.startsWith(u8, response, "OK returned_rows=0 inserted_rows="));
 }

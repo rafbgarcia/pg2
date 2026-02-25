@@ -1,10 +1,7 @@
 //! Feature coverage for select/query behavior through server session path.
 const std = @import("std");
 const feature = @import("../test_env_test.zig");
-
-fn expectContains(haystack: []const u8, needle: []const u8) !void {
-    try std.testing.expect(std.mem.indexOf(u8, haystack, needle) != null);
-}
+const assertions = @import("../assertions.zig");
 
 test "feature query returns deterministic rows via session path" {
     var env: feature.FeatureEnv = undefined;
@@ -347,7 +344,7 @@ test "feature computed select fails closed on incompatible comparison types" {
     const result = try executor.run(
         "ComputedSelectTypeMismatch |> sort(id asc) { id bad: status == 1 }",
     );
-    try expectContains(result, "message=\"select computed expression evaluation failed\"");
+    try assertions.expectContains(result, "message=\"select computed expression evaluation failed\"");
 }
 
 test "feature nested child where fails closed for non-boolean predicate outputs" {
