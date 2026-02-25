@@ -97,6 +97,39 @@ test "parse multiple statements links statement list in root order" {
     try testing.expectEqual(NodeTag.pipeline, result.ast.getNode(second_stmt).tag);
 }
 
+test "parse top-level expression statement" {
+    const source = "1 + 2";
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(!result.has_error);
+
+    const root = result.ast.getNode(result.ast.root);
+    try testing.expectEqual(NodeTag.root, root.tag);
+
+    const stmt = result.ast.getNode(root.data.unary);
+    try testing.expectEqual(NodeTag.expr_stmt, stmt.tag);
+    const expr = result.ast.getNode(stmt.data.unary);
+    try testing.expectEqual(NodeTag.expr_binary, expr.tag);
+}
+
+test "parse expression statement followed by schema definition" {
+    const source =
+        \\1 + 2
+        \\User {
+        \\  field(id, i64, notNull, primaryKey)
+        \\}
+    ;
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = parse(&tokens, source);
+    try testing.expect(!result.has_error);
+
+    const root = result.ast.getNode(result.ast.root);
+    const first_stmt = root.data.unary;
+    const second_stmt = result.ast.getNode(first_stmt).next;
+    try testing.expectEqual(NodeTag.expr_stmt, result.ast.getNode(first_stmt).tag);
+    try testing.expectEqual(NodeTag.schema_def, result.ast.getNode(second_stmt).tag);
+}
+
 test "parse mutation insert" {
     const source =
         \\User |> insert(email = "a@b.com", name = "Alice") { id email }

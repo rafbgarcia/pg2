@@ -84,7 +84,18 @@ fn parseStatement(
     const tok = tokens.tokens[start_pos];
     if (tok.token_type == .kw_let) return parseLetBinding(ast, tokens, source, start_pos);
     if (tok.token_type == .model_name) return parseModelStatement(ast, tokens, source, start_pos);
-    return error.UnexpectedToken;
+    return parseExpressionStatement(ast, tokens, source, start_pos);
+}
+
+fn parseExpressionStatement(
+    ast: *Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    start_pos: u16,
+) ParseError!NodeResult {
+    const expr = try expression_mod.parseExpression(ast, tokens, source, start_pos);
+    const stmt = try ast.addNode(.expr_stmt, .{ .unary = expr.node });
+    return .{ .node = stmt, .pos = expr.pos };
 }
 
 fn parseLetBinding(

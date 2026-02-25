@@ -22,6 +22,7 @@ pub const NodeTag = enum(u8) {
     root, // program root; data.unary = first statement, linked by next
     schema_def, // model schema definition
     query, // query starting from a model/source
+    expr_stmt, // top-level expression statement; data.unary = expression root
 
     // Pipeline
     pipeline, // data.binary = source, rhs = first operator (linked by next)
