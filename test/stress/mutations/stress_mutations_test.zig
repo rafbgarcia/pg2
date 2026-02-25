@@ -1,6 +1,7 @@
 //! Stress mutation scenarios that are too heavy for default feature runs.
 const std = @import("std");
 const feature = @import("../test_env_test.zig");
+const seed_batch_size: usize = 256;
 
 fn applyUserSchema(executor: *feature.TestExecutor) !void {
     try executor.applyDefinitions(
@@ -58,7 +59,7 @@ test "stress insert high-volume batched requests remain queryable via session pa
 
     const executor = &env.executor;
     try applyUserSchema(executor);
-    try insertUsersBatched(executor, 512, 64);
+    try insertUsersBatched(executor, 512, seed_batch_size);
 
     var result = try executor.run("User |> where(id == 1) { id name active }");
     try std.testing.expectEqualStrings(
@@ -91,7 +92,7 @@ test "stress update returning delivery failure aborts mutation via session path"
 
     const executor = &env.executor;
     try applyUserSchema(executor);
-    try insertUsersBatched(executor, 4097, 64);
+    try insertUsersBatched(executor, 4097, seed_batch_size);
 
     const overflow_result = try executor.run(
         "User |> where(active == true) |> update(active = false) { id }",
@@ -126,7 +127,7 @@ test "stress delete returning delivery failure aborts mutation via session path"
 
     const executor = &env.executor;
     try applyUserSchema(executor);
-    try insertUsersBatched(executor, 4097, 64);
+    try insertUsersBatched(executor, 4097, seed_batch_size);
 
     const overflow_result = try executor.run(
         "User |> where(active == true) |> delete { id }",
