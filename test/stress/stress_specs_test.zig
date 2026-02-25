@@ -7,5 +7,8 @@
 comptime {
     _ = @import("mutations/stress_mutations_test.zig");
     _ = @import("runtime_rss_gate_test.zig");
-    _ = @import("spill_phase2_gate_test.zig");
+    _ = @import("spill_phase2_gate_collector_contracts_test.zig");
+    _ = @import("spill_phase2_gate_nested_hash_spill_contracts_test.zig");
+    _ = @import("spill_phase2_gate_nested_selection_contracts_test.zig");
+    _ = @import("spill_phase2_gate_scan_contracts_test.zig");
 }
