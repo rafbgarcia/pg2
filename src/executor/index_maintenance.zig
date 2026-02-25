@@ -19,6 +19,7 @@ const row_mod = @import("../storage/row.zig");
 const heap_mod = @import("../storage/heap.zig");
 const undo_mod = @import("../mvcc/undo.zig");
 const tx_mod = @import("../mvcc/transaction.zig");
+const scan_mod = @import("scan.zig");
 
 const BTree = btree_mod.BTree;
 const BTreeError = btree_mod.BTreeError;
@@ -34,6 +35,8 @@ const HeapPage = heap_mod.HeapPage;
 const UndoLog = undo_mod.UndoLog;
 const Snapshot = tx_mod.Snapshot;
 const TxManager = tx_mod.TxManager;
+const StringArena = scan_mod.StringArena;
+const IndexCleanupContext = scan_mod.IndexCleanupContext;
 
 const mutation = @import("mutation.zig");
 const MutationError = mutation.MutationError;
@@ -161,39 +164,32 @@ pub fn indexKeyVisibleInIndex(
 ) MutationError!bool {
     var key_buf: [max_row_buf_size]u8 = undefined;
     const key = index_key_mod.encodeValue(key_value, &key_buf);
-    const row_id_opt = btree.find(key) catch |e| return mapBTreeError(e);
-    const row_id = row_id_opt orelse return false;
-
-    // Without full MVCC context, fall back to: key exists = duplicate.
     if (undo_log == null or snapshot == null or tx_manager == null) {
-        return true;
+        // Without full MVCC context, fall back to: key exists = duplicate.
+        const row_id_opt = btree.find(key) catch |e| return mapBTreeError(e);
+        return row_id_opt != null;
     }
 
-    // Pin the heap page and check MVCC visibility.
-    const page = pool.pin(row_id.page_id) catch |e| return mapPoolError(e);
-    defer pool.unpin(row_id.page_id, false);
-
-    const heap_data_opt: ?[]const u8 = HeapPage.read(page, row_id.slot) catch null;
-    const head = undo_log.?.getHead(row_id.page_id, row_id.slot);
-    const visible: ?[]const u8 = if (head == null)
-        heap_data_opt
-    else
-        undo_log.?.findVisible(
-            row_id.page_id,
-            row_id.slot,
-            snapshot.?,
-            tx_manager.?,
-        ) orelse heap_data_opt;
-
-    if (visible != null) {
-        // Row is visible — genuine duplicate.
-        return true;
-    }
-
-    // Row is invisible (committed delete). Clean up the dead B+ tree entry
-    // so future inserts don't collide with the stale key.
-    deleteIndexKey(catalog, btree, model_id, index_id, key_value) catch {};
-    return false;
+    var string_storage: [scan_mod.max_row_size_bytes]u8 = undefined;
+    var string_arena = StringArena.init(string_storage[0..]);
+    var cleanup_ctx = IndexCleanupContext{
+        .catalog = catalog,
+        .model_id = model_id,
+        .index_id = index_id,
+    };
+    const row_opt = scan_mod.indexFindWithCleanup(
+        catalog,
+        pool,
+        undo_log.?,
+        snapshot.?,
+        tx_manager.?,
+        btree,
+        model_id,
+        key,
+        &string_arena,
+        &cleanup_ctx,
+    ) catch |e| return mapScanError(e);
+    return row_opt != null;
 }
 
 // ---------------------------------------------------------------------------
@@ -313,39 +309,34 @@ pub fn primaryKeyVisibleInIndex(
 ) MutationError!bool {
     var key_buf: [max_row_buf_size]u8 = undefined;
     const key = index_key_mod.encodeValue(pk_value, &key_buf);
-    const row_id_opt = btree.find(key) catch |e| return mapBTreeError(e);
-    const row_id = row_id_opt orelse return false;
-
-    // Without full MVCC context, fall back to: key exists = duplicate.
     if (undo_log == null or snapshot == null or tx_manager == null) {
-        return true;
+        // Without full MVCC context, fall back to: key exists = duplicate.
+        const row_id_opt = btree.find(key) catch |e| return mapBTreeError(e);
+        return row_id_opt != null;
     }
 
-    // Pin the heap page and check MVCC visibility.
-    const page = pool.pin(row_id.page_id) catch |e| return mapPoolError(e);
-    defer pool.unpin(row_id.page_id, false);
-
-    const heap_data_opt: ?[]const u8 = HeapPage.read(page, row_id.slot) catch null;
-    const head = undo_log.?.getHead(row_id.page_id, row_id.slot);
-    const visible: ?[]const u8 = if (head == null)
-        heap_data_opt
-    else
-        undo_log.?.findVisible(
-            row_id.page_id,
-            row_id.slot,
-            snapshot.?,
-            tx_manager.?,
-        ) orelse heap_data_opt;
-
-    if (visible != null) {
-        // Row is visible — genuine duplicate.
-        return true;
-    }
-
-    // Row is invisible (committed delete). Clean up the dead B+ tree entry
-    // so future lookups skip the extra heap check.
-    deletePrimaryKey(catalog, btree, model_id, pk_value) catch {};
-    return false;
+    const pk_index_id = catalog_mod.findPrimaryKeyIndex(catalog, model_id) orelse
+        return error.Corruption;
+    var string_storage: [scan_mod.max_row_size_bytes]u8 = undefined;
+    var string_arena = StringArena.init(string_storage[0..]);
+    var cleanup_ctx = IndexCleanupContext{
+        .catalog = catalog,
+        .model_id = model_id,
+        .index_id = pk_index_id,
+    };
+    const row_opt = scan_mod.indexFindWithCleanup(
+        catalog,
+        pool,
+        undo_log.?,
+        snapshot.?,
+        tx_manager.?,
+        btree,
+        model_id,
+        key,
+        &string_arena,
+        &cleanup_ctx,
+    ) catch |e| return mapScanError(e);
+    return row_opt != null;
 }
 
 fn mapPoolError(err: buffer_pool_mod.BufferPoolError) MutationError {
@@ -357,6 +348,20 @@ fn mapPoolError(err: buffer_pool_mod.BufferPoolError) MutationError {
         error.StorageWrite => error.StorageWrite,
         error.StorageFsync => error.StorageFsync,
         error.WalNotFlushed => error.WalNotFlushed,
+    };
+}
+
+fn mapScanError(err: scan_mod.ScanError) MutationError {
+    return switch (err) {
+        error.AllFramesPinned => error.AllFramesPinned,
+        error.ChecksumMismatch => error.ChecksumMismatch,
+        error.Corruption => error.Corruption,
+        error.StorageRead => error.StorageRead,
+        error.StorageWrite => error.StorageWrite,
+        error.StorageFsync => error.StorageFsync,
+        error.WalNotFlushed => error.WalNotFlushed,
+        error.ResultOverflow => error.BufferTooSmall,
+        error.OutOfMemory => error.OutOfMemory,
     };
 }
 
