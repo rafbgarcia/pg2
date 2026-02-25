@@ -67,8 +67,6 @@ pub fn build(b: *std.Build) void {
     const stress_step = b.step("stress", "Run stress tests");
     stress_step.dependOn(&run_stress_t.step);
 
-    test_step.dependOn(&run_stress_t.step);
-
     // --- Simulation tests ---
     const sim_test_mod = b.createModule(.{
         .root_source_file = b.path("test/internals/simulation/simulator_specs_test.zig"),
