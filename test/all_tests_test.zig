@@ -9,6 +9,7 @@ const pg2 = @import("pg2");
 
 comptime {
     _ = pg2;
+    _ = @import("test_discovery_guard_test.zig");
     _ = @import("features/features_specs_test.zig");
     _ = @import("internals/internals_specs_test.zig");
 }
