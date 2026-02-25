@@ -9,6 +9,7 @@ comptime {
     _ = @import("durability/overflow_reclaim_replay_test.zig");
     _ = @import("durability/overflow_replay_tx_markers_test.zig");
     _ = @import("maintenance/overflow_reclaim_drain_policy_test.zig");
+    _ = @import("maintenance/index_reclaim_surface_test.zig");
     _ = @import("maintenance/overflow_reclaim_surface_test.zig");
     _ = @import("query_protocol/tree_response_test.zig");
     _ = @import("runtime/planner_overflow_test.zig");

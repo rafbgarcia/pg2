@@ -19,6 +19,12 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
   - free-list push/pop WAL records and replay handling added;
   - reclaim path now routes freed overflow pages into reusable allocator state (not monotonic-only growth);
   - churn coverage added to assert reclaimed overflow pages are reused across insert/delete cycles.
+- Phase 4 foundation started:
+  - bounded tx-aware index reclaim metadata queue added (enqueue/commit/abort/dequeue lifecycle);
+  - delete path now captures deterministic reclaim metadata (`model_id/index_id/row_id/encoded key`) and WAL `index_reclaim_enqueue`;
+  - slot-reclaim drain now performs reclaim-time index delete + WAL `index_reclaim_delete`;
+  - inspect surface now exposes `index_reclaim` queue/counter stats;
+  - scan module now has opt-in `indexFindWithCleanup` / `indexRangeScanIntoWithCleanup` APIs for opportunistic cleanup while preserving read-only no-side-effect defaults.
 - Full test suite is green after these changes (`zig build test --summary all` passes on 2026-02-25).
 
 ## Status Snapshot (2026-02-25)
@@ -45,8 +51,13 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
     - reclaim path writes freed pages back into allocator reuse flow;
     - churn test proving reclaimed pages are reused.
 - **Phase 4 (B+ Tree Dead Entry Cleanup):** partial
-  - Opportunistic dead-entry cleanup exists in uniqueness-check path.
-  - **Not complete against this workfront:** no dedicated cleanup hook from heap slot reclaim path; no opportunistic dead-entry deletion in generic index point/range scan path.
+  - Implemented:
+    - reclaim-time cleanup hook from slot-reclaim drain to B+ tree delete;
+    - bounded metadata queue for delete-time key capture;
+    - WAL records for enqueue/delete metadata lifecycle;
+    - inspect counters for index-reclaim queue/throughput;
+    - opt-in generic point/range scan cleanup API surface.
+  - **Not complete against this workfront:** opt-in scan cleanup is not yet wired into a write-context caller path, and crash/replay matrix for index reclaim WAL path still needs explicit assertions.
 - **Phase 5 (Reclamation Under Concurrency):** partial
   - Some server/concurrency surfaces exist; baseline pinning coverage exists.
   - **Not complete against this workfront:** targeted long-running-snapshot reclaim-blocking stress matrix and reclaim observability (pinned-by-snapshot counters/age) still pending.
@@ -54,7 +65,7 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
 ### Current Gap-to-Gate Summary
 - **Complete now:** foundational slot reclaim + rollback safety + WAL/replay plumbing for slot reclaim.
 - **Major remaining gates:**
-  - index dead-entry cleanup tied to reclaim events and scan-time opportunistic cleanup;
+  - wire opt-in generic scan cleanup path into a production write-context caller and prove bounded dead-entry growth under churn;
   - phase-5 concurrency/observability matrix for pinned snapshots and reclaim resumption;
   - replay matrix expansion for index cleanup and additional `reclaim_slot`-focused scenarios.
 

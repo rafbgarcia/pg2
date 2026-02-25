@@ -41,6 +41,8 @@ pub const ReplayStats = struct {
     overflow_reclaim_idempotent_skips: usize = 0,
     overflow_free_list_push_records_seen: usize = 0,
     overflow_free_list_pop_records_seen: usize = 0,
+    index_reclaim_enqueue_records_seen: usize = 0,
+    index_reclaim_delete_records_seen: usize = 0,
     slot_reclaim_records_seen: usize = 0,
     slot_reclaim_applied: usize = 0,
     slot_reclaim_idempotent_skips: usize = 0,
@@ -170,6 +172,14 @@ pub fn replayCommittedOverflowLifecycle(
                     return error.Corruption;
                 stats.overflow_free_list_pop_records_seen += 1;
             },
+            .index_reclaim_enqueue => {
+                _ = try decodeIndexReclaimWalPayload(rec.payload);
+                stats.index_reclaim_enqueue_records_seen += 1;
+            },
+            .index_reclaim_delete => {
+                _ = try decodeIndexReclaimWalPayload(rec.payload);
+                stats.index_reclaim_delete_records_seen += 1;
+            },
             .reclaim_slot => {
                 if (rec.payload.len != 2) return error.Corruption;
                 const slot = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, rec.payload[0..2]).*);
@@ -283,6 +293,12 @@ fn decodeOverflowFreeListPop(payload: []const u8) RecoveryError!OverflowFreeList
         .new_head = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[0..8]).*),
         .next_page_id = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[8..16]).*),
     };
+}
+
+fn decodeIndexReclaimWalPayload(payload: []const u8) RecoveryError!void {
+    if (payload.len < 16) return error.Corruption;
+    const key_len = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, payload[6..8]).*);
+    if (payload.len != 16 + key_len) return error.Corruption;
 }
 
 fn encodeOverflowChainRecordMetaForTest(

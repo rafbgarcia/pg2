@@ -76,6 +76,7 @@ pub fn commitSlotReclaimEntriesForTx(
     max_items: usize,
 ) MutationError!void {
     catalog.slot_reclaim_queue.commitTx(tx_id);
+    catalog.index_reclaim_queue.commitTx(tx_id);
     try drainSlotReclaimQueue(catalog, pool, wal, tx_id, oldest_active, max_items);
 }
 
@@ -84,6 +85,7 @@ pub fn rollbackSlotReclaimEntriesForTx(
     tx_id: TxId,
 ) void {
     catalog.slot_reclaim_queue.abortTx(tx_id);
+    catalog.index_reclaim_queue.abortTx(tx_id);
 }
 
 // Referential integrity delegation
@@ -1532,6 +1534,7 @@ pub fn executeDeleteWithReturningAndParameters(
                 wal,
                 undo_log,
                 tx_id,
+                model_id,
                 schema,
                 row.row_id,
             );
@@ -1582,6 +1585,7 @@ pub fn deleteSingleRow(
     wal: *Wal,
     undo_log: *UndoLog,
     tx_id: TxId,
+    model_id: ModelId,
     schema: *const RowSchema,
     row_id: RowId,
 ) MutationError!void {
@@ -1622,6 +1626,16 @@ pub fn deleteSingleRow(
     for (0..old_overflow_count) |i| {
         try enqueueOverflowChainForReclaim(catalog, wal, tx_id, old_overflow_roots[i]);
     }
+    try enqueueIndexEntriesForReclaim(
+        catalog,
+        wal,
+        tx_id,
+        model_id,
+        row_id,
+        schema,
+        old_data,
+        pool,
+    );
     try enqueueSlotForReclaim(catalog, tx_id, row_id);
 }
 
@@ -1736,6 +1750,78 @@ fn enqueueSlotForReclaim(
     catalog.recordSlotReclaimEnqueue();
 }
 
+fn enqueueIndexEntriesForReclaim(
+    catalog: *Catalog,
+    wal: *Wal,
+    tx_id: TxId,
+    model_id: ModelId,
+    row_id: RowId,
+    schema: *const RowSchema,
+    old_row_data: []const u8,
+    pool: *BufferPool,
+) MutationError!void {
+    std.debug.assert(model_id < catalog.model_count);
+    const model = &catalog.models[model_id];
+
+    var decode_bytes: [max_row_buf_size]u8 = undefined;
+    var string_arena = scan_mod.StringArena.init(decode_bytes[0..]);
+    var old_values: [max_assignments]Value =
+        [_]Value{.{ .null_value = {} }} ** max_assignments;
+    decodeRowWithOverflow(
+        schema,
+        old_row_data,
+        pool,
+        &catalog.overflow_page_allocator,
+        &string_arena,
+        old_values[0..schema.column_count],
+    ) catch |e| return e;
+
+    var key_buf: [max_row_buf_size]u8 = undefined;
+    var payload_buf: [max_row_buf_size + 16]u8 = undefined;
+    for (0..model.index_count) |idx| {
+        const index_id: u16 = @intCast(idx);
+        const index = &model.indexes[index_id];
+        if (!index.is_unique) continue;
+        if (index.column_count != 1) continue;
+        if (index.btree_root_page_id == 0) continue;
+        const key_value = old_values[index.column_ids[0]];
+        if (shouldSkipUniqueIndexKey(key_value)) continue;
+
+        const encoded_key = index_key_mod.encodeValue(key_value, &key_buf);
+        catalog.index_reclaim_queue.enqueue(
+            tx_id,
+            model_id,
+            index_id,
+            row_id.page_id,
+            row_id.slot,
+            encoded_key,
+        ) catch |e| {
+            return switch (e) {
+                error.InvalidEntry => error.Corruption,
+                error.QueueFull => error.OverflowReclaimQueueFull,
+                error.QueueEmpty => error.Corruption,
+                error.DuplicateEntry => error.Corruption,
+                error.KeyTooLarge => error.Corruption,
+            };
+        };
+        catalog.recordIndexReclaimEnqueue();
+
+        const payload_len = encodeIndexReclaimWalPayload(
+            payload_buf[0..],
+            model_id,
+            index_id,
+            row_id,
+            encoded_key,
+        ) catch return error.Corruption;
+        _ = wal.append(
+            tx_id,
+            .index_reclaim_enqueue,
+            row_id.page_id,
+            payload_buf[0..payload_len],
+        ) catch |e| return mapWalAppendError(e);
+    }
+}
+
 fn drainSlotReclaimQueue(
     catalog: *Catalog,
     pool: *BufferPool,
@@ -1780,7 +1866,111 @@ fn drainSlotReclaimQueue(
         pinned.page.header.lsn = lsn;
         pinned.markDirty();
         catalog.recordSlotReclaimSuccess();
+
+        try drainIndexReclaimQueueForRow(
+            catalog,
+            pool,
+            wal,
+            tx_id,
+            oldest_active,
+            entry.page_id,
+            entry.slot,
+        );
     }
+}
+
+fn drainIndexReclaimQueueForRow(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    tx_id: TxId,
+    oldest_active: TxId,
+    page_id: u64,
+    slot: u16,
+) MutationError!void {
+    var payload_buf: [max_row_buf_size + 16]u8 = undefined;
+    while (true) {
+        const entry = (catalog.index_reclaim_queue.dequeueReclaimableForRow(
+            oldest_active,
+            page_id,
+            slot,
+        ) catch return error.Corruption) orelse break;
+        catalog.recordIndexReclaimDequeue();
+
+        var btree = openIndex(
+            catalog,
+            pool,
+            wal,
+            entry.model_id,
+            entry.index_id,
+        ) orelse {
+            catalog.recordIndexReclaimFailure();
+            return error.Corruption;
+        };
+        btree.delete(catalog.index_reclaim_queue.keySlice(&entry)) catch |err| switch (err) {
+            error.KeyNotFound => {},
+            else => {
+                catalog.recordIndexReclaimFailure();
+                return index_maintenance_mod.mapBTreeError(err);
+            },
+        };
+        syncIndexBTreeState(catalog, entry.model_id, entry.index_id, &btree);
+        catalog.recordIndexReclaimSuccess();
+
+        const payload_len = encodeIndexReclaimWalPayload(
+            payload_buf[0..],
+            entry.model_id,
+            entry.index_id,
+            .{ .page_id = entry.page_id, .slot = entry.slot },
+            catalog.index_reclaim_queue.keySlice(&entry),
+        ) catch return error.Corruption;
+        _ = wal.append(
+            tx_id,
+            .index_reclaim_delete,
+            entry.page_id,
+            payload_buf[0..payload_len],
+        ) catch |e| return mapWalAppendError(e);
+    }
+}
+
+const IndexReclaimWalMeta = struct {
+    model_id: u16,
+    index_id: u16,
+    row_id: RowId,
+    key: []const u8,
+};
+
+fn encodeIndexReclaimWalPayload(
+    out: []u8,
+    model_id: u16,
+    index_id: u16,
+    row_id: RowId,
+    key: []const u8,
+) error{BufferTooSmall}!usize {
+    const required = 16 + key.len;
+    if (out.len < required) return error.BufferTooSmall;
+    @memcpy(out[0..2], std.mem.asBytes(&std.mem.nativeToLittle(u16, model_id)));
+    @memcpy(out[2..4], std.mem.asBytes(&std.mem.nativeToLittle(u16, index_id)));
+    @memcpy(out[4..6], std.mem.asBytes(&std.mem.nativeToLittle(u16, row_id.slot)));
+    @memcpy(out[6..8], std.mem.asBytes(&std.mem.nativeToLittle(u16, @as(u16, @intCast(key.len)))));
+    @memcpy(out[8..16], std.mem.asBytes(&std.mem.nativeToLittle(u64, row_id.page_id)));
+    @memcpy(out[16..required], key);
+    return required;
+}
+
+fn decodeIndexReclaimWalPayload(payload: []const u8) MutationError!IndexReclaimWalMeta {
+    if (payload.len < 16) return error.Corruption;
+    const key_len = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, payload[6..8]).*);
+    if (payload.len != 16 + key_len) return error.Corruption;
+    return .{
+        .model_id = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, payload[0..2]).*),
+        .index_id = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, payload[2..4]).*),
+        .row_id = .{
+            .slot = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, payload[4..6]).*),
+            .page_id = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[8..16]).*),
+        },
+        .key = payload[16..],
+    };
 }
 
 fn resolveVisibleVersion(

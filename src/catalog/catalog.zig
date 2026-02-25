@@ -19,6 +19,7 @@ const Value = row_mod.Value;
 const OverflowPageIdAllocator = overflow_mod.PageIdAllocator;
 const OverflowReclaimQueue = overflow_mod.ReclaimQueue;
 const SlotReclaimQueue = reclamation_mod.SlotReclaimQueue;
+const IndexReclaimQueue = reclamation_mod.IndexReclaimQueue;
 const BTree = btree_mod.BTree;
 const BufferPool = buffer_pool_mod.BufferPool;
 const Wal = wal_mod.Wal;
@@ -197,6 +198,21 @@ pub const SlotReclaimStatsSnapshot = struct {
     reclaim_failures_total: u64 = 0,
 };
 
+pub const IndexReclaimStats = struct {
+    enqueued_total: u64 = 0,
+    dequeued_total: u64 = 0,
+    reclaimed_total: u64 = 0,
+    reclaim_failures_total: u64 = 0,
+};
+
+pub const IndexReclaimStatsSnapshot = struct {
+    queue_depth: u32 = 0,
+    enqueued_total: u64 = 0,
+    dequeued_total: u64 = 0,
+    reclaimed_total: u64 = 0,
+    reclaim_failures_total: u64 = 0,
+};
+
 pub const CatalogError = error{
     CatalogSealed,
     TooManyModels,
@@ -221,6 +237,8 @@ pub const Catalog = struct {
     overflow_reclaim_stats: OverflowReclaimStats = .{},
     slot_reclaim_queue: SlotReclaimQueue = .{},
     slot_reclaim_stats: SlotReclaimStats = .{},
+    index_reclaim_queue: IndexReclaimQueue = .{},
+    index_reclaim_stats: IndexReclaimStats = .{},
 
     name_buffer: [max_name_bytes]u8 = undefined,
     name_buffer_len: u32 = 0,
@@ -615,6 +633,34 @@ pub const Catalog = struct {
             .dequeued_total = self.slot_reclaim_stats.dequeued_total,
             .reclaimed_total = self.slot_reclaim_stats.reclaimed_total,
             .reclaim_failures_total = self.slot_reclaim_stats.reclaim_failures_total,
+        };
+    }
+
+    pub fn recordIndexReclaimEnqueue(self: *Catalog) void {
+        checkedAddU64(&self.index_reclaim_stats.enqueued_total, 1);
+    }
+
+    pub fn recordIndexReclaimDequeue(self: *Catalog) void {
+        checkedAddU64(&self.index_reclaim_stats.dequeued_total, 1);
+    }
+
+    pub fn recordIndexReclaimSuccess(self: *Catalog) void {
+        checkedAddU64(&self.index_reclaim_stats.reclaimed_total, 1);
+    }
+
+    pub fn recordIndexReclaimFailure(self: *Catalog) void {
+        checkedAddU64(&self.index_reclaim_stats.reclaim_failures_total, 1);
+    }
+
+    pub fn snapshotIndexReclaimStats(
+        self: *const Catalog,
+    ) IndexReclaimStatsSnapshot {
+        return .{
+            .queue_depth = @intCast(self.index_reclaim_queue.len),
+            .enqueued_total = self.index_reclaim_stats.enqueued_total,
+            .dequeued_total = self.index_reclaim_stats.dequeued_total,
+            .reclaimed_total = self.index_reclaim_stats.reclaimed_total,
+            .reclaim_failures_total = self.index_reclaim_stats.reclaim_failures_total,
         };
     }
 

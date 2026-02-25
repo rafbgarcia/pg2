@@ -14,6 +14,7 @@ const spill_collector_mod = @import("../executor/spill_collector.zig");
 const Catalog = catalog_mod.Catalog;
 const OverflowReclaimStatsSnapshot = catalog_mod.OverflowReclaimStatsSnapshot;
 const SlotReclaimStatsSnapshot = catalog_mod.SlotReclaimStatsSnapshot;
+const IndexReclaimStatsSnapshot = catalog_mod.IndexReclaimStatsSnapshot;
 const PoolStats = pool_mod.PoolStats;
 const Ast = ast_mod.Ast;
 const ResultRow = scan_mod.ResultRow;
@@ -81,6 +82,7 @@ pub fn serializeQueryResult(
                 runtime_stats,
                 catalog.snapshotOverflowReclaimStats(),
                 catalog.snapshotSlotReclaimStats(),
+                catalog.snapshotIndexReclaimStats(),
             );
         }
         return;
@@ -122,6 +124,7 @@ pub fn serializeQueryResult(
             runtime_stats,
             catalog.snapshotOverflowReclaimStats(),
             catalog.snapshotSlotReclaimStats(),
+            catalog.snapshotIndexReclaimStats(),
         );
     }
 }
@@ -139,6 +142,7 @@ fn serializeInspectStats(
     runtime_stats: ?RuntimeInspectStats,
     overflow_stats: OverflowReclaimStatsSnapshot,
     slot_stats: SlotReclaimStatsSnapshot,
+    index_stats: IndexReclaimStatsSnapshot,
 ) error{ResponseTooLarge}!void {
     const pin_invariant_ok =
         pool_stats.pinned <= pool_stats.checked_out and
@@ -210,6 +214,16 @@ fn serializeInspectStats(
             slot_stats.dequeued_total,
             slot_stats.reclaimed_total,
             slot_stats.reclaim_failures_total,
+        },
+    ) catch return error.ResponseTooLarge;
+    writer.print(
+        "INSPECT index_reclaim queue_depth={d} reclaim_enqueued_total={d} reclaim_dequeued_total={d} reclaimed_entries_total={d} reclaim_failures_total={d}\n",
+        .{
+            index_stats.queue_depth,
+            index_stats.enqueued_total,
+            index_stats.dequeued_total,
+            index_stats.reclaimed_total,
+            index_stats.reclaim_failures_total,
         },
     ) catch return error.ResponseTooLarge;
     writer.print(

@@ -171,6 +171,12 @@ pub const StringArena = struct {
     }
 };
 
+pub const IndexCleanupContext = struct {
+    catalog: *Catalog,
+    model_id: ModelId,
+    index_id: u16,
+};
+
 /// Full table scan with MVCC visibility.
 ///
 /// Iterates pages from the model's heap_first_page_id for total_pages.
@@ -357,6 +363,32 @@ pub fn indexFind(
     key: []const u8,
     string_arena: *StringArena,
 ) ScanError!?ResultRow {
+    return indexFindWithCleanup(
+        catalog,
+        pool,
+        undo_log,
+        snapshot,
+        tx_manager,
+        btree,
+        model_id,
+        key,
+        string_arena,
+        null,
+    );
+}
+
+pub fn indexFindWithCleanup(
+    catalog: *const Catalog,
+    pool: *BufferPool,
+    undo_log: *const UndoLog,
+    snapshot: *const Snapshot,
+    tx_manager: *const TxManager,
+    btree: *BTree,
+    model_id: ModelId,
+    key: []const u8,
+    string_arena: *StringArena,
+    cleanup_ctx: ?*IndexCleanupContext,
+) ScanError!?ResultRow {
     std.debug.assert(model_id < catalog.model_count);
     std.debug.assert(key.len > 0);
 
@@ -378,7 +410,12 @@ pub fn indexFind(
         snapshot,
         tx_manager,
         row_data_opt,
-    ) orelse return null;
+    ) orelse {
+        if (cleanup_ctx) |ctx| {
+            try cleanupDeadIndexEntry(ctx, btree, key);
+        }
+        return null;
+    };
 
     var row = ResultRow.init();
     row.row_id = row_id;
@@ -476,6 +513,36 @@ pub fn indexRangeScanInto(
     out_rows: []ResultRow,
     string_arena: *StringArena,
 ) ScanError!ScanIntoResult {
+    return indexRangeScanIntoWithCleanup(
+        catalog,
+        pool,
+        undo_log,
+        snapshot,
+        tx_manager,
+        btree,
+        model_id,
+        lo,
+        hi,
+        out_rows,
+        string_arena,
+        null,
+    );
+}
+
+pub fn indexRangeScanIntoWithCleanup(
+    catalog: *const Catalog,
+    pool: *BufferPool,
+    undo_log: *const UndoLog,
+    snapshot: *const Snapshot,
+    tx_manager: *const TxManager,
+    btree: *BTree,
+    model_id: ModelId,
+    lo: ?[]const u8,
+    hi: ?[]const u8,
+    out_rows: []ResultRow,
+    string_arena: *StringArena,
+    cleanup_ctx: ?*IndexCleanupContext,
+) ScanError!ScanIntoResult {
     std.debug.assert(model_id < catalog.model_count);
 
     const model = &catalog.models[model_id];
@@ -483,6 +550,13 @@ pub fn indexRangeScanInto(
 
     var iter = btree.rangeScan(lo, hi) catch |e| return mapBTreeError(e);
     defer iter.close();
+
+    const max_dead_cleanup_keys = 16;
+    var dead_keys: [max_dead_cleanup_keys]struct {
+        len: u16,
+        key: [max_row_size_bytes]u8,
+    } = undefined;
+    var dead_len: usize = 0;
 
     var row_count: u16 = 0;
     var pages_read: u32 = 0;
@@ -506,7 +580,16 @@ pub fn indexRangeScanInto(
             snapshot,
             tx_manager,
             row_data_opt,
-        ) orelse continue;
+        ) orelse {
+            if (cleanup_ctx != null and dead_len < dead_keys.len and
+                entry.key.len <= max_row_size_bytes)
+            {
+                dead_keys[dead_len].len = @intCast(entry.key.len);
+                @memcpy(dead_keys[dead_len].key[0..entry.key.len], entry.key);
+                dead_len += 1;
+            }
+            continue;
+        };
 
         out_rows[@as(usize, row_count)] = ResultRow.init();
         out_rows[@as(usize, row_count)].row_id = row_id;
@@ -521,7 +604,32 @@ pub fn indexRangeScanInto(
         row_count += 1;
     }
 
+    if (cleanup_ctx) |ctx| {
+        var i: usize = 0;
+        while (i < dead_len) : (i += 1) {
+            const dead_key = dead_keys[i].key[0..dead_keys[i].len];
+            try cleanupDeadIndexEntry(ctx, btree, dead_key);
+        }
+    }
+
     return .{ .row_count = row_count, .pages_read = pages_read };
+}
+
+fn cleanupDeadIndexEntry(
+    ctx: *IndexCleanupContext,
+    btree: *BTree,
+    key: []const u8,
+) ScanError!void {
+    std.debug.assert(ctx.model_id < ctx.catalog.model_count);
+    const model = &ctx.catalog.models[ctx.model_id];
+    std.debug.assert(ctx.index_id < model.index_count);
+
+    btree.delete(key) catch |err| switch (err) {
+        error.KeyNotFound => return,
+        else => return mapBTreeError(err),
+    };
+    model.indexes[ctx.index_id].btree_root_page_id = @intCast(btree.root_page_id);
+    model.indexes[ctx.index_id].btree_next_page_id = @intCast(btree.next_page_id);
 }
 
 
