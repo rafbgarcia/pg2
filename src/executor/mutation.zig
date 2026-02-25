@@ -67,6 +67,25 @@ const drainOverflowReclaimQueue = overflow_chains_mod.drainOverflowReclaimQueue;
 pub const commitOverflowReclaimEntriesForTx = overflow_chains_mod.commitOverflowReclaimEntriesForTx;
 pub const rollbackOverflowReclaimEntriesForTx = overflow_chains_mod.rollbackOverflowReclaimEntriesForTx;
 
+pub fn commitSlotReclaimEntriesForTx(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    tx_id: TxId,
+    oldest_active: TxId,
+    max_items: usize,
+) MutationError!void {
+    catalog.slot_reclaim_queue.commitTx(tx_id);
+    try drainSlotReclaimQueue(catalog, pool, wal, tx_id, oldest_active, max_items);
+}
+
+pub fn rollbackSlotReclaimEntriesForTx(
+    catalog: *Catalog,
+    tx_id: TxId,
+) void {
+    catalog.slot_reclaim_queue.abortTx(tx_id);
+}
+
 // Referential integrity delegation
 const enforceOutgoingReferentialIntegrity = referential_integrity_mod.enforceOutgoingReferentialIntegrity;
 const enforceIncomingDeleteReferentialIntegrity = referential_integrity_mod.enforceIncomingDeleteReferentialIntegrity;
@@ -1603,6 +1622,7 @@ pub fn deleteSingleRow(
     for (0..old_overflow_count) |i| {
         try enqueueOverflowChainForReclaim(catalog, wal, tx_id, old_overflow_roots[i]);
     }
+    try enqueueSlotForReclaim(catalog, tx_id, row_id);
 }
 
 pub fn updateRowWithValues(
@@ -1700,6 +1720,69 @@ fn canUpdateFitInPage(page: *const Page, slot_idx: u16, new_len: u16) bool {
     return @as(u32, free) + @as(u32, fragmented) >= new_len;
 }
 
+fn enqueueSlotForReclaim(
+    catalog: *Catalog,
+    tx_id: TxId,
+    row_id: RowId,
+) MutationError!void {
+    catalog.slot_reclaim_queue.enqueue(tx_id, row_id.page_id, row_id.slot) catch |e| {
+        return switch (e) {
+            error.InvalidEntry => error.Corruption,
+            error.QueueFull => error.OverflowReclaimQueueFull,
+            error.QueueEmpty => error.Corruption,
+            error.DuplicateEntry => error.Corruption,
+        };
+    };
+    catalog.recordSlotReclaimEnqueue();
+}
+
+fn drainSlotReclaimQueue(
+    catalog: *Catalog,
+    pool: *BufferPool,
+    wal: *Wal,
+    tx_id: TxId,
+    oldest_active: TxId,
+    max_items: usize,
+) MutationError!void {
+    var processed: usize = 0;
+    while (processed < max_items and !catalog.slot_reclaim_queue.isEmpty()) : (processed += 1) {
+        const entry = (catalog.slot_reclaim_queue.dequeueReclaimable(oldest_active) catch
+            return error.Corruption) orelse break;
+        catalog.recordSlotReclaimDequeue();
+
+        var pinned = try PinnedMutationPage.pin(pool, entry.page_id);
+        defer pinned.release();
+        if (pinned.page.header.page_type != .heap) {
+            catalog.recordSlotReclaimFailure();
+            return error.Corruption;
+        }
+        const reclaimed = HeapPage.reclaim(pinned.page, entry.slot) catch |reclaim_err| {
+            catalog.recordSlotReclaimFailure();
+            return switch (reclaim_err) {
+                error.InvalidSlot => error.Corruption,
+                error.PageFull => error.Corruption,
+                error.RowTooLarge => error.Corruption,
+            };
+        };
+        if (!reclaimed) continue;
+
+        var payload: [2]u8 = undefined;
+        @memcpy(payload[0..2], std.mem.asBytes(&std.mem.nativeToLittle(u16, entry.slot)));
+        const lsn = wal.append(
+            tx_id,
+            .reclaim_slot,
+            entry.page_id,
+            payload[0..],
+        ) catch |e| {
+            catalog.recordSlotReclaimFailure();
+            return mapWalAppendError(e);
+        };
+        pinned.page.header.lsn = lsn;
+        pinned.markDirty();
+        catalog.recordSlotReclaimSuccess();
+    }
+}
+
 fn resolveVisibleVersion(
     undo_log: *const UndoLog,
     page_id: u64,
@@ -1735,9 +1818,9 @@ fn findPageWithSpace(
         const last_existing: u64 = if (total_pages == 0) first_id else first_id + total_pages - 1;
         if (total_pages > 0 and hint_page >= first_id and hint_page <= last_existing) {
             const page = pool.pin(hint_page) catch |e| return mapPoolError(e);
-            const free = HeapPage.free_space(page);
+            const can_insert = HeapPage.can_insert(page, row_len);
             pool.unpin(hint_page, false);
-            if (free >= row_len + 4) return hint_page;
+            if (can_insert) return hint_page;
         }
     }
 
@@ -1749,11 +1832,9 @@ fn findPageWithSpace(
             const page_id: u64 = @as(u64, first_page_id) + p;
             const page = pool.pin(page_id) catch |e|
                 return mapPoolError(e);
-            const free = HeapPage.free_space(page);
+            const can_insert = HeapPage.can_insert(page, row_len);
             pool.unpin(page_id, false);
-
-            // Need space for slot entry (4 bytes) + row data.
-            if (free >= row_len + 4) return page_id;
+            if (can_insert) return page_id;
         }
     }
 

@@ -114,6 +114,7 @@ pub fn classifyWal(err: wal_mod.WalError) ErrorClass {
         error.InvalidEnvelope => .corruption,
         error.CorruptEnvelope => .corruption,
         error.UnsupportedEnvelopeVersion => .fatal,
+        error.Corruption => .corruption,
     };
 }
 
@@ -140,6 +141,7 @@ pub fn classifySessionBoundary(err: SessionBoundaryError) ErrorClass {
         error.InvalidEnvelope => .corruption,
         error.CorruptEnvelope => .corruption,
         error.UnsupportedEnvelopeVersion => .fatal,
+        error.Corruption => .corruption,
     };
 }
 

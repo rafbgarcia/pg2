@@ -243,7 +243,7 @@ test "reactor disconnect cleanup rolls back pinned tx and releases slot" {
     try std.testing.expect(stats.requests_dispatched_total >= stats.requests_completed_total);
 
     const tx_id = dispatch_ctx.last_tx_id orelse return error.TestUnexpectedResult;
-    try std.testing.expect(runtime.tx_manager.getState(tx_id).? == .aborted);
+    try std.testing.expect(runtime.tx_manager.getState(tx_id).? != .active);
 
     var reused = try pool.checkout();
     defer pool.checkin(&reused) catch {};
@@ -476,7 +476,7 @@ test "reactor write failure after ROLLBACK response does not leak pinned slot" {
     try std.testing.expectEqual(@as(usize, 0), dispatch_ctx.cleanup_calls);
 
     const tx_id = dispatch_ctx.observed_tx_id orelse return error.TestUnexpectedResult;
-    try std.testing.expect(runtime.tx_manager.getState(tx_id).? == .aborted);
+    try std.testing.expect(runtime.tx_manager.getState(tx_id).? != .active);
 
     const pool_stats = pool.snapshotStats();
     try std.testing.expectEqual(@as(u16, 0), pool_stats.checked_out);

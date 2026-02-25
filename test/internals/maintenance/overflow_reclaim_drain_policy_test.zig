@@ -63,6 +63,13 @@ test "internal overflow multi-chain unlink drains one committed chain per succes
             "INSPECT overflow reclaim_queue_depth=1 reclaim_enqueued_total=2 reclaim_dequeued_total=1 reclaim_chains_total=1 reclaim_pages_total=1 reclaim_failures_total=0\n",
         ) != null,
     );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            result,
+            "INSPECT heap_reclaim queue_depth=0 reclaim_enqueued_total=0 reclaim_dequeued_total=0 reclaimed_slots_total=0 reclaim_failures_total=0\n",
+        ) != null,
+    );
 
     // Read-only requests do not advance reclaim drain.
     result = try executor.run("User |> inspect {}");
@@ -71,6 +78,13 @@ test "internal overflow multi-chain unlink drains one committed chain per succes
             u8,
             result,
             "INSPECT overflow reclaim_queue_depth=1 reclaim_enqueued_total=2 reclaim_dequeued_total=1 reclaim_chains_total=1 reclaim_pages_total=1 reclaim_failures_total=0\n",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            result,
+            "INSPECT heap_reclaim queue_depth=0 reclaim_enqueued_total=0 reclaim_dequeued_total=0 reclaimed_slots_total=0 reclaim_failures_total=0\n",
         ) != null,
     );
 
@@ -87,6 +101,13 @@ test "internal overflow multi-chain unlink drains one committed chain per succes
             u8,
             result,
             "INSPECT overflow reclaim_queue_depth=0 reclaim_enqueued_total=2 reclaim_dequeued_total=2 reclaim_chains_total=2 reclaim_pages_total=2 reclaim_failures_total=0\n",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            result,
+            "INSPECT heap_reclaim queue_depth=0 reclaim_enqueued_total=0 reclaim_dequeued_total=0 reclaimed_slots_total=0 reclaim_failures_total=0\n",
         ) != null,
     );
 }

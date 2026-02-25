@@ -40,6 +40,7 @@ pub const RecordType = enum(u8) {
     overflow_chain_relink = 14,
     overflow_chain_unlink = 15,
     overflow_chain_reclaim = 16,
+    reclaim_slot = 17,
 };
 
 /// A single WAL record.

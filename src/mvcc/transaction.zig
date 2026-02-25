@@ -244,6 +244,23 @@ pub const TxManager = struct {
         return self.oldest_active;
     }
 
+    /// Predict the oldest-active watermark immediately after `tx_id` commits.
+    /// Requires `tx_id` to be currently active.
+    pub fn oldestActiveAfterCommit(self: *const TxManager, tx_id: TxId) TxId {
+        const state = self.getState(tx_id) orelse @panic("unknown tx in oldestActiveAfterCommit");
+        if (state != .active) @panic("oldestActiveAfterCommit requires active tx");
+
+        var min_other: TxId = std.math.maxInt(TxId);
+        var i: u16 = 0;
+        while (i < self.active_count) : (i += 1) {
+            const active_tx = self.active_list[i];
+            if (active_tx == tx_id) continue;
+            if (active_tx < min_other) min_other = active_tx;
+        }
+        if (min_other != std.math.maxInt(TxId)) return min_other;
+        return self.next_tx_id;
+    }
+
     pub fn cleanupBefore(self: *TxManager, oldest_needed: TxId) void {
         std.debug.assert(oldest_needed <= self.next_tx_id);
         std.debug.assert(oldest_needed >= self.base_tx_id);
@@ -418,6 +435,17 @@ test "cleanupBefore treats old tx states as committed" {
 
     tm.cleanupBefore(tm.getOldestActive());
     try std.testing.expectEqual(TxState.committed, tm.getState(t1).?);
+}
+
+test "oldestActiveAfterCommit predicts watermark with and without peers" {
+    var tm = try TxManager.init(std.testing.allocator, .{});
+    defer tm.deinit();
+
+    const t1 = try tm.begin();
+    const t2 = try tm.begin();
+    try std.testing.expectEqual(t2, tm.oldestActiveAfterCommit(t1));
+    try tm.commit(t2);
+    try std.testing.expectEqual(tm.next_tx_id, tm.oldestActiveAfterCommit(t1));
 }
 
 test "snapshot rejects undersized active buffer" {

@@ -277,6 +277,10 @@ pub const Session = struct {
     ) void {
         if (!pin_state.active) return;
         const tx_id = pin_state.pool_conn.tx_id;
+        mutation_mod.rollbackSlotReclaimEntriesForTx(
+            self.catalog,
+            tx_id,
+        );
         mutation_mod.rollbackOverflowReclaimEntriesForTx(
             self.catalog,
             tx_id,
@@ -325,6 +329,10 @@ pub const Session = struct {
                 self.catalog,
                 pool_conn.tx_id,
             );
+            mutation_mod.rollbackSlotReclaimEntriesForTx(
+                self.catalog,
+                pool_conn.tx_id,
+            );
             pool.abortCheckin(&pool_conn) catch |abort_err| {
                 std.log.err(
                     "pool abort checkin failed: slot={d} err={s}",
@@ -340,6 +348,10 @@ pub const Session = struct {
                 self.catalog,
                 pool_conn.tx_id,
             );
+            mutation_mod.rollbackSlotReclaimEntriesForTx(
+                self.catalog,
+                pool_conn.tx_id,
+            );
             pool.abortCheckin(&pool_conn) catch |abort_err| {
                 std.log.err(
                     "pool abort checkin failed: slot={d} err={s}",
@@ -349,6 +361,41 @@ pub const Session = struct {
             };
         } else {
             const tx_id = pool_conn.tx_id;
+            const reclaim_oldest_active = self.runtime.tx_manager.oldestActiveAfterCommit(tx_id);
+            mutation_mod.commitSlotReclaimEntriesForTx(
+                self.catalog,
+                &self.runtime.pool,
+                &self.runtime.wal,
+                tx_id,
+                reclaim_oldest_active,
+                1,
+            ) catch |reclaim_err| {
+                mutation_mod.rollbackSlotReclaimEntriesForTx(
+                    self.catalog,
+                    tx_id,
+                );
+                mutation_mod.rollbackOverflowReclaimEntriesForTx(
+                    self.catalog,
+                    tx_id,
+                );
+                pool.abortCheckin(&pool_conn) catch |abort_err| {
+                    std.log.err(
+                        "pool abort checkin failed: slot={d} err={s}",
+                        .{ pool_conn.slot_index, @errorName(abort_err) },
+                    );
+                    @panic("pool abort checkin failed");
+                };
+                var stream = std.io.fixedBufferStream(response_buf);
+                const writer = stream.writer();
+                writer.print(
+                    "ERR class={s} code={s}\n",
+                    .{
+                        @tagName(runtime_errors.classifyMutation(reclaim_err)),
+                        @errorName(reclaim_err),
+                    },
+                ) catch return error.ResponseTooLarge;
+                return .{ .bytes_written = stream.pos };
+            };
             if (response.had_mutation) {
                 mutation_mod.commitOverflowReclaimEntriesForTx(
                     self.catalog,
@@ -357,6 +404,10 @@ pub const Session = struct {
                     tx_id,
                     1,
                 ) catch |reclaim_err| {
+                    mutation_mod.rollbackSlotReclaimEntriesForTx(
+                        self.catalog,
+                        tx_id,
+                    );
                     mutation_mod.rollbackOverflowReclaimEntriesForTx(
                         self.catalog,
                         tx_id,
@@ -418,6 +469,10 @@ pub const Session = struct {
         };
 
         if (response.is_query_error) {
+            mutation_mod.rollbackSlotReclaimEntriesForTx(
+                self.catalog,
+                pin_state.pool_conn.tx_id,
+            );
             mutation_mod.rollbackOverflowReclaimEntriesForTx(
                 self.catalog,
                 pin_state.pool_conn.tx_id,
@@ -492,6 +547,30 @@ pub const Session = struct {
             };
         }
         const tx_id = pin_state.pool_conn.tx_id;
+        const reclaim_oldest_active = self.runtime.tx_manager.oldestActiveAfterCommit(tx_id);
+        mutation_mod.commitSlotReclaimEntriesForTx(
+            self.catalog,
+            &self.runtime.pool,
+            &self.runtime.wal,
+            tx_id,
+            reclaim_oldest_active,
+            std.math.maxInt(usize),
+        ) catch |reclaim_err| {
+            self.cleanupPinnedSession(pool, pin_state);
+            var stream = std.io.fixedBufferStream(response_buf);
+            const writer = stream.writer();
+            writer.print(
+                "ERR class={s} code={s}\n",
+                .{
+                    @tagName(runtime_errors.classifyMutation(reclaim_err)),
+                    @errorName(reclaim_err),
+                },
+            ) catch return error.ResponseTooLarge;
+            return .{
+                .bytes_written = stream.pos,
+                .pin_transition = .ended,
+            };
+        };
         mutation_mod.commitOverflowReclaimEntriesForTx(
             self.catalog,
             &self.runtime.pool,
@@ -1055,7 +1134,14 @@ test "session inspect appends execution and pool stats" {
         std.mem.indexOf(
             u8,
             output,
-            "INSPECT spill temp_pages_allocated=0 temp_pages_reclaimed=0 temp_bytes_written=0 temp_bytes_read=0\n",
+            "INSPECT heap_reclaim queue_depth=0 reclaim_enqueued_total=0 reclaim_dequeued_total=0 reclaimed_slots_total=0 reclaim_failures_total=0\n",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "INSPECT spill spill_triggered=false result_bytes_accumulated=0 temp_pages_allocated=0 temp_pages_reclaimed=0 temp_bytes_written=0 temp_bytes_read=0\n",
         ) != null,
     );
     try std.testing.expect(

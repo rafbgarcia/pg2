@@ -8,6 +8,7 @@
 const std = @import("std");
 const row_mod = @import("../storage/row.zig");
 const overflow_mod = @import("../storage/overflow.zig");
+const reclamation_mod = @import("../storage/reclamation.zig");
 const btree_mod = @import("../storage/btree.zig");
 const buffer_pool_mod = @import("../storage/buffer_pool.zig");
 const wal_mod = @import("../storage/wal.zig");
@@ -17,6 +18,7 @@ const RowSchema = row_mod.RowSchema;
 const Value = row_mod.Value;
 const OverflowPageIdAllocator = overflow_mod.PageIdAllocator;
 const OverflowReclaimQueue = overflow_mod.ReclaimQueue;
+const SlotReclaimQueue = reclamation_mod.SlotReclaimQueue;
 const BTree = btree_mod.BTree;
 const BufferPool = buffer_pool_mod.BufferPool;
 const Wal = wal_mod.Wal;
@@ -180,6 +182,21 @@ pub const OverflowReclaimStatsSnapshot = struct {
     reclaim_failures_total: u64 = 0,
 };
 
+pub const SlotReclaimStats = struct {
+    enqueued_total: u64 = 0,
+    dequeued_total: u64 = 0,
+    reclaimed_total: u64 = 0,
+    reclaim_failures_total: u64 = 0,
+};
+
+pub const SlotReclaimStatsSnapshot = struct {
+    queue_depth: u32 = 0,
+    enqueued_total: u64 = 0,
+    dequeued_total: u64 = 0,
+    reclaimed_total: u64 = 0,
+    reclaim_failures_total: u64 = 0,
+};
+
 pub const CatalogError = error{
     CatalogSealed,
     TooManyModels,
@@ -202,6 +219,8 @@ pub const Catalog = struct {
         OverflowPageIdAllocator.initDefault(),
     overflow_reclaim_queue: OverflowReclaimQueue = .{},
     overflow_reclaim_stats: OverflowReclaimStats = .{},
+    slot_reclaim_queue: SlotReclaimQueue = .{},
+    slot_reclaim_stats: SlotReclaimStats = .{},
 
     name_buffer: [max_name_bytes]u8 = undefined,
     name_buffer_len: u32 = 0,
@@ -569,6 +588,46 @@ pub const Catalog = struct {
             .reclaimed_pages_total = self.overflow_reclaim_stats.reclaimed_pages_total,
             .reclaim_failures_total = self.overflow_reclaim_stats.reclaim_failures_total,
         };
+    }
+
+    pub fn recordSlotReclaimEnqueue(self: *Catalog) void {
+        checkedAddU64(&self.slot_reclaim_stats.enqueued_total, 1);
+    }
+
+    pub fn recordSlotReclaimDequeue(self: *Catalog) void {
+        checkedAddU64(&self.slot_reclaim_stats.dequeued_total, 1);
+    }
+
+    pub fn recordSlotReclaimSuccess(self: *Catalog) void {
+        checkedAddU64(&self.slot_reclaim_stats.reclaimed_total, 1);
+    }
+
+    pub fn recordSlotReclaimFailure(self: *Catalog) void {
+        checkedAddU64(&self.slot_reclaim_stats.reclaim_failures_total, 1);
+    }
+
+    pub fn snapshotSlotReclaimStats(
+        self: *const Catalog,
+    ) SlotReclaimStatsSnapshot {
+        return .{
+            .queue_depth = @intCast(self.slot_reclaim_queue.len),
+            .enqueued_total = self.slot_reclaim_stats.enqueued_total,
+            .dequeued_total = self.slot_reclaim_stats.dequeued_total,
+            .reclaimed_total = self.slot_reclaim_stats.reclaimed_total,
+            .reclaim_failures_total = self.slot_reclaim_stats.reclaim_failures_total,
+        };
+    }
+
+    pub fn findModelByHeapPageId(self: *const Catalog, page_id: u64) ?ModelId {
+        for (0..self.model_count) |mi| {
+            const model_id: ModelId = @intCast(mi);
+            const model = &self.models[model_id];
+            if (model.total_pages == 0) continue;
+            const first = @as(u64, model.heap_first_page_id);
+            const end_exclusive = first + model.total_pages;
+            if (page_id >= first and page_id < end_exclusive) return model_id;
+        }
+        return null;
     }
 
     /// Allocate B+ trees for all unique indexes that do not yet have one.

@@ -13,6 +13,7 @@ const spill_collector_mod = @import("../executor/spill_collector.zig");
 
 const Catalog = catalog_mod.Catalog;
 const OverflowReclaimStatsSnapshot = catalog_mod.OverflowReclaimStatsSnapshot;
+const SlotReclaimStatsSnapshot = catalog_mod.SlotReclaimStatsSnapshot;
 const PoolStats = pool_mod.PoolStats;
 const Ast = ast_mod.Ast;
 const ResultRow = scan_mod.ResultRow;
@@ -79,6 +80,7 @@ pub fn serializeQueryResult(
                 stats,
                 runtime_stats,
                 catalog.snapshotOverflowReclaimStats(),
+                catalog.snapshotSlotReclaimStats(),
             );
         }
         return;
@@ -119,6 +121,7 @@ pub fn serializeQueryResult(
             stats,
             runtime_stats,
             catalog.snapshotOverflowReclaimStats(),
+            catalog.snapshotSlotReclaimStats(),
         );
     }
 }
@@ -135,6 +138,7 @@ fn serializeInspectStats(
     pool_stats: PoolStats,
     runtime_stats: ?RuntimeInspectStats,
     overflow_stats: OverflowReclaimStatsSnapshot,
+    slot_stats: SlotReclaimStatsSnapshot,
 ) error{ResponseTooLarge}!void {
     const pin_invariant_ok =
         pool_stats.pinned <= pool_stats.checked_out and
@@ -196,6 +200,16 @@ fn serializeInspectStats(
             overflow_stats.reclaimed_chains_total,
             overflow_stats.reclaimed_pages_total,
             overflow_stats.reclaim_failures_total,
+        },
+    ) catch return error.ResponseTooLarge;
+    writer.print(
+        "INSPECT heap_reclaim queue_depth={d} reclaim_enqueued_total={d} reclaim_dequeued_total={d} reclaimed_slots_total={d} reclaim_failures_total={d}\n",
+        .{
+            slot_stats.queue_depth,
+            slot_stats.enqueued_total,
+            slot_stats.dequeued_total,
+            slot_stats.reclaimed_total,
+            slot_stats.reclaim_failures_total,
         },
     ) catch return error.ResponseTooLarge;
     writer.print(

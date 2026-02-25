@@ -39,6 +39,9 @@ pub const ReplayStats = struct {
     overflow_reclaim_records_seen: usize = 0,
     overflow_reclaim_applied: usize = 0,
     overflow_reclaim_idempotent_skips: usize = 0,
+    slot_reclaim_records_seen: usize = 0,
+    slot_reclaim_applied: usize = 0,
+    slot_reclaim_idempotent_skips: usize = 0,
 };
 
 pub const RecoveryError = error{
@@ -118,11 +121,47 @@ pub fn replayCommittedOverflowLifecycle(
                     stats.overflow_reclaim_idempotent_skips += 1;
                 }
             },
+            .reclaim_slot => {
+                if (rec.payload.len != 2) return error.Corruption;
+                const slot = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, rec.payload[0..2]).*);
+                stats.slot_reclaim_records_seen += 1;
+                const applied = try applySlotReclaimIdempotent(pool, rec.page_id, slot);
+                if (applied) {
+                    stats.slot_reclaim_applied += 1;
+                } else {
+                    stats.slot_reclaim_idempotent_skips += 1;
+                }
+            },
             else => {},
         }
     }
 
     return stats;
+}
+
+fn applySlotReclaimIdempotent(
+    pool: *BufferPool,
+    page_id: u64,
+    slot: u16,
+) RecoveryError!bool {
+    const heap_mod = @import("heap.zig");
+    const HeapPage = heap_mod.HeapPage;
+
+    const page = try pool.pin(page_id);
+    var dirty = false;
+    defer pool.unpin(page_id, dirty);
+    if (page.header.page_type != .heap) return error.Corruption;
+
+    const reclaimed = HeapPage.reclaim(page, slot) catch |err| switch (err) {
+        error.InvalidSlot => return error.Corruption,
+        error.PageFull => return error.Corruption,
+        error.RowTooLarge => return error.Corruption,
+    };
+    if (reclaimed) {
+        dirty = true;
+        return true;
+    }
+    return false;
 }
 
 fn classifyTxReplay(

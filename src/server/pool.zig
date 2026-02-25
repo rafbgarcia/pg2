@@ -10,11 +10,13 @@ const bootstrap_mod = @import("../runtime/bootstrap.zig");
 const tx_mod = @import("../mvcc/transaction.zig");
 const disk_mod = @import("../simulator/disk.zig");
 const wal_mod = @import("../storage/wal.zig");
+const heap_mod = @import("../storage/heap.zig");
 
 const BootstrappedRuntime = bootstrap_mod.BootstrappedRuntime;
 const QueryBuffers = bootstrap_mod.QueryBuffers;
 const Snapshot = tx_mod.Snapshot;
 const TxId = tx_mod.TxId;
+const HeapPage = heap_mod.HeapPage;
 
 pub const PoolError = tx_mod.TxManagerError ||
     bootstrap_mod.QueryBufferError ||
@@ -24,6 +26,7 @@ pub const PoolError = tx_mod.TxManagerError ||
         QueueTimeout,
         InvalidPoolConn,
         PoolConnPinned,
+        Corruption,
     };
 
 pub const OverloadPolicy = enum {
@@ -100,6 +103,9 @@ pub const ConnectionPool = struct {
         _ = try self.runtime.wal.flushIfNeeded();
         conn.snapshot.deinit();
         try self.runtime.tx_manager.commit(conn.tx_id);
+        const oldest_active = self.runtime.tx_manager.getOldestActive();
+        self.runtime.undo_log.truncate(oldest_active);
+        self.runtime.tx_manager.cleanupBefore(oldest_active);
         try self.runtime.releaseQueryBuffers(conn.slot_index);
         std.debug.assert(self.checked_out_count > 0);
         self.checked_out_count -= 1;
@@ -111,10 +117,14 @@ pub const ConnectionPool = struct {
         if (!conn.checked_out) return error.InvalidPoolConn;
         if (conn.pinned) return error.PoolConnPinned;
 
+        try self.rollbackHeapUndoForTx(conn.tx_id);
         _ = try self.runtime.wal.abortTx(conn.tx_id);
         try self.runtime.wal.flush();
         conn.snapshot.deinit();
         try self.runtime.tx_manager.abort(conn.tx_id);
+        const oldest_active = self.runtime.tx_manager.getOldestActive();
+        self.runtime.undo_log.truncate(oldest_active);
+        self.runtime.tx_manager.cleanupBefore(oldest_active);
         try self.runtime.releaseQueryBuffers(conn.slot_index);
         std.debug.assert(self.checked_out_count > 0);
         self.checked_out_count -= 1;
@@ -198,6 +208,43 @@ pub const ConnectionPool = struct {
             .pinned = false,
             .checked_out = true,
         };
+    }
+
+    fn rollbackHeapUndoForTx(self: *ConnectionPool, tx_id: TxId) PoolError!void {
+        const undo_log = &self.runtime.undo_log;
+        if (undo_log.count == 0) return;
+
+        const base = undo_log.base_index;
+        var idx = base + undo_log.count;
+        while (idx > base) {
+            idx -= 1;
+            const entry = undo_log.get(idx) orelse continue;
+            if (entry.tx_id != tx_id) continue;
+
+            const page = self.runtime.pool.pin(entry.page_id) catch |pin_err| {
+                return switch (pin_err) {
+                    error.AllFramesPinned => error.PoolExhausted,
+                    error.OutOfMemory => error.PoolExhausted,
+                    error.ChecksumMismatch => error.Corruption,
+                    error.StorageRead => error.WalReadError,
+                    error.StorageWrite => error.WalWriteError,
+                    error.StorageFsync => error.WalFsyncError,
+                    error.WalNotFlushed => error.WalWriteError,
+                };
+            };
+            defer self.runtime.pool.unpin(entry.page_id, true);
+            if (page.header.page_type != .heap) return error.Corruption;
+
+            const start: usize = @intCast(entry.data_offset);
+            const old_data = undo_log.data_buffer[start .. start + entry.data_length];
+            HeapPage.restore(page, entry.slot, old_data) catch |restore_err| {
+                return switch (restore_err) {
+                    error.InvalidSlot => error.Corruption,
+                    error.PageFull => error.Corruption,
+                    error.RowTooLarge => error.Corruption,
+                };
+            };
+        }
     }
 };
 

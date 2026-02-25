@@ -315,6 +315,39 @@ pub const HeapPage = struct {
         std.debug.assert(Slot.read(&page.content, slot_idx).len == Slot.deleted_len);
     }
 
+    /// Restore a slot to a live row image using an undo pre-image.
+    ///
+    /// For live slots, this delegates to `update`.
+    /// For tombstoned/reclaimed slots, this allocates row bytes and rewrites
+    /// the slot as live.
+    pub fn restore(page: *Page, slot_idx: u16, data: []const u8) HeapError!void {
+        std.debug.assert(page.header.page_type == .heap);
+        var header = SlottedHeader.read(&page.content);
+        if (slot_idx >= header.slot_count) return error.InvalidSlot;
+        if (data.len > std.math.maxInt(u16)) return error.RowTooLarge;
+
+        var slot = Slot.read(&page.content, slot_idx);
+        if (slot.len != Slot.deleted_len) {
+            return update(page, slot_idx, data);
+        }
+
+        const row_len: u16 = @intCast(data.len);
+        if (header.free_end - header.free_start < row_len) {
+            _ = maybe_compact_for_required_space(page, row_len);
+            header = SlottedHeader.read(&page.content);
+            if (header.free_end - header.free_start < row_len) return error.PageFull;
+        }
+
+        header.free_end -= row_len;
+        const row_offset = header.free_end;
+        @memcpy(page.content[row_offset..][0..row_len], data);
+
+        slot.offset = row_offset;
+        slot.len = row_len;
+        Slot.write_at(&page.content, slot_idx, slot);
+        header.write(&page.content);
+    }
+
     /// Reclaim a tombstoned slot for reuse by future inserts.
     /// Returns true when reclamation changed slot state, false when the slot
     /// was already reclaimed.
@@ -357,6 +390,27 @@ pub const HeapPage = struct {
         std.debug.assert(header.free_end <= content_size);
         if (header.free_end <= header.free_start) return 0;
         return header.free_end - header.free_start;
+    }
+
+    /// Minimum contiguous bytes required for a new insert, accounting for
+    /// reclaimed slot reuse.
+    pub fn required_insert_space(page: *const Page, row_len: u16) u16 {
+        std.debug.assert(page.header.page_type == .heap);
+        const header = SlottedHeader.read(&page.content);
+        return if (find_reclaimed_slot(page, header) != null)
+            row_len
+        else
+            Slot.size + row_len;
+    }
+
+    /// True when an insert of `row_len` bytes can succeed, considering both
+    /// current contiguous free space and compactable fragmentation.
+    pub fn can_insert(page: *const Page, row_len: u16) bool {
+        const required = required_insert_space(page, row_len);
+        const free = free_space(page);
+        if (free >= required) return true;
+        const fragmented = fragmented_bytes(page);
+        return @as(u32, free) + @as(u32, fragmented) >= required;
     }
 
     /// Returns reclaimable bytes currently stranded as internal fragmentation.
@@ -733,6 +787,29 @@ test "free space decreases after insert" {
 
     // Should decrease by slot size (4) + data length (9).
     try std.testing.expectEqual(before - after, Slot.size + 9);
+}
+
+test "required insert space omits slot bytes for reclaimed slot" {
+    var page = Page.init(0, .free);
+    HeapPage.init(&page);
+
+    const slot = try HeapPage.insert(&page, "abc");
+    try HeapPage.delete(&page, slot);
+    try std.testing.expect(try HeapPage.reclaim(&page, slot));
+
+    try std.testing.expectEqual(@as(u16, 6), HeapPage.required_insert_space(&page, 6));
+}
+
+test "restore revives deleted row in same slot" {
+    var page = Page.init(0, .free);
+    HeapPage.init(&page);
+
+    const slot = try HeapPage.insert(&page, "abc");
+    try HeapPage.delete(&page, slot);
+    try HeapPage.restore(&page, slot, "restored");
+
+    const restored = try HeapPage.read(&page, slot);
+    try std.testing.expectEqualStrings("restored", restored);
 }
 
 test "insert and read with buffer pool" {

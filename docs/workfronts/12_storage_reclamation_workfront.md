@@ -3,6 +3,12 @@
 ## Objective
 Eliminate the need for a traditional background VACUUM process by reclaiming dead storage (tombstoned heap slots, orphaned overflow page chains, stale B+ tree entries) inline with normal transaction processing, using epoch-based or eager strategies that are deterministic, safe under concurrent snapshots, and require no background threads.
 
+## Progress Update (2026-02-25)
+- Phase 2 slot-reclamation plumbing is in place (queueing, commit/abort queue state, WAL `reclaim_slot`, heap reclaimed-slot reuse path).
+- A rollback correctness flaw was identified and resolved by implementing physical heap rollback on abort from undo pre-images before abort maintenance.
+- Commit/abort maintenance (`undo_log.truncate(...)` + `tx_manager.cleanupBefore(...)`) remains enabled at pool boundaries, with rollback no longer depending on retained aborted visibility history.
+- Reactor pinning tests now assert post-cleanup terminal state (`!= .active`) instead of requiring retained `.aborted` state outside the tx-state retention window.
+
 ## Why
 - Traditional VACUUM (as in PostgreSQL) is a major source of operational complexity: table bloat, autovacuum tuning, wraparound dangers, and unpredictable I/O spikes. pg2's mission is to eliminate this class of operational burden entirely.
 - pg2 currently tombstones deleted heap slots (`Slot.deleted_len = 0` in `heap.zig`) but never reclaims them. Over time, tables accumulate dead slots that waste space and degrade scan performance.
