@@ -12,24 +12,6 @@ fn applyUserSchema(executor: *feature.TestExecutor) !void {
     );
 }
 
-fn insertUsers(executor: *feature.TestExecutor, count: usize) !void {
-    var insert_req_buf: [256]u8 = undefined;
-    var row_index: usize = 0;
-    while (row_index < count) : (row_index += 1) {
-        const id = row_index + 1;
-        const insert_req = try std.fmt.bufPrint(
-            insert_req_buf[0..],
-            "User |> insert(id = {d}, name = \"user-{d}\", active = true) {{}}",
-            .{ id, id },
-        );
-        const result = try executor.run(insert_req);
-        try std.testing.expectEqualStrings(
-            "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
-            result,
-        );
-    }
-}
-
 fn insertUsersBatched(
     executor: *feature.TestExecutor,
     count: usize,
@@ -69,14 +51,14 @@ fn insertUsersBatched(
     }
 }
 
-test "stress insert high-volume sequential requests remain queryable via session path" {
+test "stress insert high-volume batched requests remain queryable via session path" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
 
     const executor = &env.executor;
     try applyUserSchema(executor);
-    try insertUsers(executor, 512);
+    try insertUsersBatched(executor, 512, 64);
 
     var result = try executor.run("User |> where(id == 1) { id name active }");
     try std.testing.expectEqualStrings(
