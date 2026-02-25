@@ -9,7 +9,7 @@ Suggested implementation order.
 
 | Order | Workfront                                                                         | Why This Position                                                                                       |
 | ----- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| 6     | `docs/workfronts/14_runtime_storage_backend_workfront.md` (active follow-through) | Enforces real file-backed runtime boundaries so memory limits are production-real, not simulation-only. |
+| 6     | `docs/workfronts/14_runtime_storage_backend_workfront.md` (complete) | Enforces real file-backed runtime boundaries so memory limits are production-real, not simulation-only. |
 | 7     | `docs/workfronts/06_variables_and_multi_statement_workfront.md`                   | User-facing execution semantics come after reclamation/storage foundations are reliable.                |
 | 8     | `docs/workfronts/07_adaptive_planning_workfront.md`                               | Planner policy hardening after multi-statement semantics are in place and measurable.                   |
 | 9     | `docs/workfronts/04_advisor_observability_workfront.md`                           | Advisor quality depends on stable metrics emitted by execution/planning/runtime paths above.            |

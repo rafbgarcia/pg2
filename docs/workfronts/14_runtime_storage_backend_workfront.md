@@ -2,14 +2,14 @@
 
 ## Status
 
-`active follow-through` (not complete).
+`complete`.
 
 ### Checklist
 
 - [x] Phase 1 complete: production file-backed storage exists and is unit-tested.
 - [x] Phase 2 complete: server mode boots on production storage path.
 - [x] Phase 3 complete: memory/storage accounting boundaries are enforced and observable.
-- [ ] Phase 4 complete: crash/restart and durability gates proven under file-backed runtime.
+- [x] Phase 4 complete: crash/restart and durability gates proven under file-backed runtime.
 
 ### Progress Notes
 
@@ -20,6 +20,8 @@
 - Added CI workflow with parallel `test` and `stress` jobs on Zig `0.15.2`.
 - Added deterministic RSS stress gate:
   `1_000_000` rows or `1 GiB` on-disk (whichever first), 1-second sampling, warm-up exclusion (first 10%), p95 assertion `<= 1.35 * memory_budget`.
+- Added file-backed restart durability tests for Phase 4:
+  flushed committed WAL survives restart, unflushed committed WAL remains invisible after restart, WAL write/fsync/metadata boundary failures fail closed, and `temp.pg2` resets across restart.
 
 ## Objective
 
