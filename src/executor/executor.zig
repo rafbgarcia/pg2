@@ -7450,7 +7450,7 @@ test "execute group supports sort by count star" {
     try testing.expectEqual(false, result.rows[1].values[2].bool);
 }
 
-test "execute group supports where on count star" {
+test "execute group supports having on count star" {
     var env: ExecTestEnv = undefined;
     try env.init();
     defer env.deinit();
@@ -7471,7 +7471,7 @@ test "execute group supports where on count star" {
         defer r.deinit();
     }
 
-    const src = "User |> group(active) |> where(count(*) > 1)";
+    const src = "User |> group(active) |> having(count(*) > 1)";
     const tok = tokenizer_mod.tokenize(src);
     const p = parser_mod.parse(&tok, src);
     var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
@@ -7482,7 +7482,7 @@ test "execute group supports where on count star" {
     try testing.expectEqual(true, result.rows[0].values[2].bool);
 }
 
-test "execute group supports sum avg min max aggregates" {
+test "execute group supports sum avg min max aggregates via having and sort" {
     var env: ExecTestEnv = undefined;
     try env.init();
     defer env.deinit();
@@ -7504,7 +7504,7 @@ test "execute group supports sum avg min max aggregates" {
     }
 
     const src =
-        "User |> group(active) |> where(max(id) > 1 && min(id) >= 1) |> sort(sum(id) asc, avg(id) asc)";
+        "User |> group(active) |> having(max(id) > 1 && min(id) >= 1) |> sort(sum(id) asc, avg(id) asc)";
     const tok = tokenizer_mod.tokenize(src);
     const p = parser_mod.parse(&tok, src);
     var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
@@ -7516,7 +7516,7 @@ test "execute group supports sum avg min max aggregates" {
     try testing.expectEqual(false, result.rows[1].values[2].bool);
 }
 
-test "execute group sum enforces numeric input types" {
+test "execute group sum enforces numeric input types in having" {
     var env: ExecTestEnv = undefined;
     try env.init();
     defer env.deinit();
@@ -7536,7 +7536,7 @@ test "execute group sum enforces numeric input types" {
         defer r.deinit();
     }
 
-    const src = "User |> group(active) |> where(sum(name) > 0)";
+    const src = "User |> group(active) |> having(sum(name) > 0)";
     const tok = tokenizer_mod.tokenize(src);
     const p = parser_mod.parse(&tok, src);
     var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));

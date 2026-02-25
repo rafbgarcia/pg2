@@ -173,7 +173,7 @@ pub const SpillingResultCollector = struct {
                 // Retry on the fresh page. A single row that fit in
                 // spillRowSize must fit in an empty page.
                 const retry = try writer.appendRow(row);
-                std.debug.assert(retry);
+                if (!retry) return error.RowTooLargeForSpill;
             }
         }
 

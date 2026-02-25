@@ -351,6 +351,7 @@ fn evaluateSortKeyValue(
     string_arena: *scan_mod.StringArena,
 ) filter_mod.EvalError!Value {
     var exec_eval = evalContextForExec(ctx, string_arena);
+    exec_eval.bind();
     return switch (key.kind) {
         .column => row.values[key.column_index],
         .expression => if (group_runtime.active)

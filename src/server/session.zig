@@ -1210,9 +1210,20 @@ test "session rejects CRUD pipeline without explicit returning block" {
         response_buf[0..],
     );
     try std.testing.expect(result.is_query_error);
-    try std.testing.expectEqualStrings(
-        "ERR query: returning block required for CRUD statements; use {} for no returned rows\n",
-        response_buf[0..result.bytes_written],
+    const output = response_buf[0..result.bytes_written];
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "ERR query: message=\"returning block required for CRUD statements; use {} for no returned rows\"",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "phase=semantic code=MissingReturningBlock",
+        ) != null,
     );
 }
 
@@ -1237,7 +1248,7 @@ test "session inspect appends execution and pool stats" {
 
     var session = Session.init(&runtime, &catalog);
     var pool = ConnectionPool.init(&runtime);
-    var response_buf: [1024]u8 = undefined;
+    var response_buf: [4096]u8 = undefined;
 
     var conn = try pool.checkout();
     const result = try session.handleRequest(

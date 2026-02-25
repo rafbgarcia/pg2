@@ -553,7 +553,7 @@ fn generateSortedRuns(
                 // Retry on fresh page.
                 const retry = writer.appendRow(&row_buf[i]) catch
                     return error.SpillError;
-                std.debug.assert(retry);
+                if (!retry) return error.SpillError;
             }
         }
         // Flush remaining rows.
@@ -833,6 +833,31 @@ fn reconfigureCollectorForSortedOutput(
 const testing = std.testing;
 const disk_mod = @import("../simulator/disk.zig");
 
+const TestSortBuffers = struct {
+    result_rows: []ResultRow,
+    scratch_a: []ResultRow,
+    scratch_b: []ResultRow,
+
+    fn init() !TestSortBuffers {
+        const result_rows = try testing.allocator.alloc(ResultRow, scan_mod.scan_batch_size);
+        errdefer testing.allocator.free(result_rows);
+        const scratch_a = try testing.allocator.alloc(ResultRow, scan_mod.scan_batch_size);
+        errdefer testing.allocator.free(scratch_a);
+        const scratch_b = try testing.allocator.alloc(ResultRow, scan_mod.scan_batch_size);
+        return .{
+            .result_rows = result_rows,
+            .scratch_a = scratch_a,
+            .scratch_b = scratch_b,
+        };
+    }
+
+    fn deinit(self: *TestSortBuffers) void {
+        testing.allocator.free(self.scratch_b);
+        testing.allocator.free(self.scratch_a);
+        testing.allocator.free(self.result_rows);
+    }
+};
+
 fn makeRow(values: []const Value) ResultRow {
     var row = ResultRow.init();
     row.column_count = @intCast(values.len);
@@ -913,10 +938,9 @@ test "single batch sort — all rows fit in one run" {
     var total_page_id_count: u32 = 0;
 
     // We need working buffers for sorting.
-    var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var scratch_a: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var result = QueryResult.init(&result_rows);
+    var bufs = try TestSortBuffers.init();
+    defer bufs.deinit();
+    var result = QueryResult.init(bufs.result_rows);
 
     // Build a minimal ExecContext with just what generateSortedRuns needs.
     // compareRowsBySortKeys with column sort keys only needs schema.
@@ -954,9 +978,9 @@ test "single batch sort — all rows fit in one run" {
         .statement_timestamp_micros = null,
         .parameter_bindings = &.{},
         .allocator = testing.allocator,
-        .result_rows = &result_rows,
-        .scratch_rows_a = &scratch_a,
-        .scratch_rows_b = &scratch_b,
+        .result_rows = bufs.result_rows,
+        .scratch_rows_a = bufs.scratch_a,
+        .scratch_rows_b = bufs.scratch_b,
         .string_arena_bytes = &arena_buf,
         .nested_rows = undefined,
         .nested_decode_arena_bytes = undefined,
@@ -987,7 +1011,7 @@ test "single batch sort — all rows fit in one run" {
     // Read run back into buffer and verify sorted order.
     string_arena.reset();
     try readRunIntoBuffer(
-        &result_rows,
+        bufs.result_rows,
         &runs[0],
         all_page_ids[0..total_page_id_count],
         &collector.temp_mgr,
@@ -996,7 +1020,7 @@ test "single batch sort — all rows fit in one run" {
 
     const expected = [_]i64{ 1, 2, 3, 4, 5, 6, 7, 8 };
     for (expected, 0..) |exp, i| {
-        try testing.expectEqual(exp, result_rows[i].values[0].i64);
+        try testing.expectEqual(exp, bufs.result_rows[i].values[0].i64);
     }
 }
 
@@ -1016,11 +1040,9 @@ test "stability — equal keys preserve insertion order" {
         collector.appendRow(&row) catch unreachable;
     }
     try testing.expect(collector.spillTriggered());
-
-    var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var scratch_a: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var result = QueryResult.init(&result_rows);
+    var bufs = try TestSortBuffers.init();
+    defer bufs.deinit();
+    var result = QueryResult.init(bufs.result_rows);
     var arena_buf = testArenaBuffer();
     var string_arena = StringArena.init(&arena_buf);
 
@@ -1049,9 +1071,9 @@ test "stability — equal keys preserve insertion order" {
         .statement_timestamp_micros = null,
         .parameter_bindings = &.{},
         .allocator = testing.allocator,
-        .result_rows = &result_rows,
-        .scratch_rows_a = &scratch_a,
-        .scratch_rows_b = &scratch_b,
+        .result_rows = bufs.result_rows,
+        .scratch_rows_a = bufs.scratch_a,
+        .scratch_rows_b = bufs.scratch_b,
         .string_arena_bytes = &arena_buf,
         .nested_rows = undefined,
         .nested_decode_arena_bytes = undefined,
@@ -1082,7 +1104,7 @@ test "stability — equal keys preserve insertion order" {
 
     string_arena.reset();
     try readRunIntoBuffer(
-        &result_rows,
+        bufs.result_rows,
         &runs_arr[0],
         all_page_ids[0..total_page_id_count],
         &collector.temp_mgr,
@@ -1092,7 +1114,7 @@ test "stability — equal keys preserve insertion order" {
     // Insertion order preserved: secondary values should be 10, 20, 30, 40.
     const expected_secondary = [_]i64{ 10, 20, 30, 40 };
     for (expected_secondary, 0..) |exp, i| {
-        try testing.expectEqual(exp, result_rows[i].values[1].i64);
+        try testing.expectEqual(exp, bufs.result_rows[i].values[1].i64);
     }
 }
 
@@ -1103,11 +1125,9 @@ test "descending sort order" {
     var hot: [2]ResultRow = undefined;
     const values = [_]i64{ 3, 1, 4, 1, 5, 9, 2, 6 };
     var collector = setupCollectorWithRows(&disk, &hot, &values, 4 * 1024 * 1024);
-
-    var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var scratch_a: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var result = QueryResult.init(&result_rows);
+    var bufs = try TestSortBuffers.init();
+    defer bufs.deinit();
+    var result = QueryResult.init(bufs.result_rows);
     var arena_buf = testArenaBuffer();
     var string_arena = StringArena.init(&arena_buf);
 
@@ -1135,9 +1155,9 @@ test "descending sort order" {
         .statement_timestamp_micros = null,
         .parameter_bindings = &.{},
         .allocator = testing.allocator,
-        .result_rows = &result_rows,
-        .scratch_rows_a = &scratch_a,
-        .scratch_rows_b = &scratch_b,
+        .result_rows = bufs.result_rows,
+        .scratch_rows_a = bufs.scratch_a,
+        .scratch_rows_b = bufs.scratch_b,
         .string_arena_bytes = &arena_buf,
         .nested_rows = undefined,
         .nested_decode_arena_bytes = undefined,
@@ -1168,7 +1188,7 @@ test "descending sort order" {
 
     string_arena.reset();
     try readRunIntoBuffer(
-        &result_rows,
+        bufs.result_rows,
         &runs_arr[0],
         all_page_ids[0..total_page_id_count],
         &collector.temp_mgr,
@@ -1177,7 +1197,7 @@ test "descending sort order" {
 
     const expected = [_]i64{ 9, 6, 5, 4, 3, 2, 1, 1 };
     for (expected, 0..) |exp, i| {
-        try testing.expectEqual(exp, result_rows[i].values[0].i64);
+        try testing.expectEqual(exp, bufs.result_rows[i].values[0].i64);
     }
 }
 
@@ -1189,10 +1209,8 @@ test "two-run merge" {
     var hot: [2]ResultRow = undefined;
     const mgr = TempStorageManager.initDefault(0, disk.storage()) catch unreachable;
     var collector = SpillingResultCollector.init(&hot, mgr, 4 * 1024 * 1024);
-
-    var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var scratch_a: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
+    var bufs = try TestSortBuffers.init();
+    defer bufs.deinit();
     var arena_buf = testArenaBuffer();
     var string_arena = StringArena.init(&arena_buf);
 
@@ -1220,9 +1238,9 @@ test "two-run merge" {
         .statement_timestamp_micros = null,
         .parameter_bindings = &.{},
         .allocator = testing.allocator,
-        .result_rows = &result_rows,
-        .scratch_rows_a = &scratch_a,
-        .scratch_rows_b = &scratch_b,
+        .result_rows = bufs.result_rows,
+        .scratch_rows_a = bufs.scratch_a,
+        .scratch_rows_b = bufs.scratch_b,
         .string_arena_bytes = &arena_buf,
         .nested_rows = undefined,
         .nested_decode_arena_bytes = undefined,
@@ -1276,7 +1294,7 @@ test "two-run merge" {
         .{ .page_id_start = 1, .page_count = 1, .row_count = 5 },
     };
 
-    var result = QueryResult.init(&result_rows);
+    var result = QueryResult.init(bufs.result_rows);
     string_arena.reset();
 
     try kWayMerge(
@@ -1298,7 +1316,7 @@ test "two-run merge" {
     // Verify sorted order: 1..10.
     var expected: i64 = 1;
     for (0..10) |idx| {
-        try testing.expectEqual(expected, result_rows[idx].values[0].i64);
+        try testing.expectEqual(expected, bufs.result_rows[idx].values[0].i64);
         expected += 1;
     }
 }
@@ -1311,10 +1329,8 @@ test "two-run merge with stability across runs" {
     const mgr = TempStorageManager.initDefault(0, disk.storage()) catch unreachable;
     var collector = SpillingResultCollector.init(&hot, mgr, 4 * 1024 * 1024);
     // Just need the collector for its temp_mgr.
-
-    var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var scratch_a: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
+    var bufs = try TestSortBuffers.init();
+    defer bufs.deinit();
     var arena_buf = testArenaBuffer();
     var string_arena = StringArena.init(&arena_buf);
 
@@ -1344,9 +1360,9 @@ test "two-run merge with stability across runs" {
         .statement_timestamp_micros = null,
         .parameter_bindings = &.{},
         .allocator = testing.allocator,
-        .result_rows = &result_rows,
-        .scratch_rows_a = &scratch_a,
-        .scratch_rows_b = &scratch_b,
+        .result_rows = bufs.result_rows,
+        .scratch_rows_a = bufs.scratch_a,
+        .scratch_rows_b = bufs.scratch_b,
         .string_arena_bytes = &arena_buf,
         .nested_rows = undefined,
         .nested_decode_arena_bytes = undefined,
@@ -1388,7 +1404,7 @@ test "two-run merge with stability across runs" {
         .{ .page_id_start = 1, .page_count = 1, .row_count = 2 },
     };
 
-    var result = QueryResult.init(&result_rows);
+    var result = QueryResult.init(bufs.result_rows);
     string_arena.reset();
     try kWayMerge(
         &ctx,
@@ -1404,10 +1420,10 @@ test "two-run merge with stability across runs" {
 
     try testing.expectEqual(@as(u16, 4), result.row_count);
     // Stability: run 0's (1,100) before run 1's (1,300).
-    try testing.expectEqual(@as(i64, 100), result_rows[0].values[1].i64);
-    try testing.expectEqual(@as(i64, 300), result_rows[1].values[1].i64);
-    try testing.expectEqual(@as(i64, 200), result_rows[2].values[1].i64);
-    try testing.expectEqual(@as(i64, 400), result_rows[3].values[1].i64);
+    try testing.expectEqual(@as(i64, 100), bufs.result_rows[0].values[1].i64);
+    try testing.expectEqual(@as(i64, 300), bufs.result_rows[1].values[1].i64);
+    try testing.expectEqual(@as(i64, 200), bufs.result_rows[2].values[1].i64);
+    try testing.expectEqual(@as(i64, 400), bufs.result_rows[3].values[1].i64);
 }
 
 test "null values sort correctly" {
@@ -1432,11 +1448,9 @@ test "null values sort correctly" {
     collector.appendRow(&row5) catch unreachable;
 
     try testing.expect(collector.spillTriggered());
-
-    var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var scratch_a: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var result = QueryResult.init(&result_rows);
+    var bufs = try TestSortBuffers.init();
+    defer bufs.deinit();
+    var result = QueryResult.init(bufs.result_rows);
     var arena_buf = testArenaBuffer();
     var string_arena = StringArena.init(&arena_buf);
 
@@ -1464,9 +1478,9 @@ test "null values sort correctly" {
         .statement_timestamp_micros = null,
         .parameter_bindings = &.{},
         .allocator = testing.allocator,
-        .result_rows = &result_rows,
-        .scratch_rows_a = &scratch_a,
-        .scratch_rows_b = &scratch_b,
+        .result_rows = bufs.result_rows,
+        .scratch_rows_a = bufs.scratch_a,
+        .scratch_rows_b = bufs.scratch_b,
         .string_arena_bytes = &arena_buf,
         .nested_rows = undefined,
         .nested_decode_arena_bytes = undefined,
@@ -1497,7 +1511,7 @@ test "null values sort correctly" {
 
     string_arena.reset();
     try readRunIntoBuffer(
-        &result_rows,
+        bufs.result_rows,
         &runs_arr[0],
         all_page_ids[0..total_page_id_count],
         &collector.temp_mgr,
@@ -1509,11 +1523,11 @@ test "null values sort correctly" {
 
     // Nulls should sort consistently (pg2's compareValues puts nulls at end).
     // Verify all non-null values come first in ascending order.
-    try testing.expectEqual(@as(i64, 1), result_rows[0].values[0].i64);
-    try testing.expectEqual(@as(i64, 2), result_rows[1].values[0].i64);
-    try testing.expectEqual(@as(i64, 3), result_rows[2].values[0].i64);
-    try testing.expect(result_rows[3].values[0] == .null_value);
-    try testing.expect(result_rows[4].values[0] == .null_value);
+    try testing.expectEqual(@as(i64, 1), bufs.result_rows[0].values[0].i64);
+    try testing.expectEqual(@as(i64, 2), bufs.result_rows[1].values[0].i64);
+    try testing.expectEqual(@as(i64, 3), bufs.result_rows[2].values[0].i64);
+    try testing.expect(bufs.result_rows[3].values[0] == .null_value);
+    try testing.expect(bufs.result_rows[4].values[0] == .null_value);
 }
 
 test "deterministic output — two passes produce identical results" {
@@ -1528,11 +1542,9 @@ test "deterministic output — two passes produce identical results" {
         var hot: [2]ResultRow = undefined;
         const values = [_]i64{ 7, 2, 9, 4, 1, 8, 3, 6, 5, 10 };
         var collector = setupCollectorWithRows(&disk, &hot, &values, 4 * 1024 * 1024);
-
-        var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
-        var scratch_a: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
-        var result = QueryResult.init(&result_rows);
+    var bufs = try TestSortBuffers.init();
+    defer bufs.deinit();
+        var result = QueryResult.init(bufs.result_rows);
         var arena_buf = testArenaBuffer();
         var string_arena = StringArena.init(&arena_buf);
 
@@ -1560,9 +1572,9 @@ test "deterministic output — two passes produce identical results" {
             .statement_timestamp_micros = null,
             .parameter_bindings = &.{},
             .allocator = testing.allocator,
-            .result_rows = &result_rows,
-            .scratch_rows_a = &scratch_a,
-            .scratch_rows_b = &scratch_b,
+            .result_rows = bufs.result_rows,
+            .scratch_rows_a = bufs.scratch_a,
+            .scratch_rows_b = bufs.scratch_b,
             .string_arena_bytes = &arena_buf,
         .nested_rows = undefined,
         .nested_decode_arena_bytes = undefined,
@@ -1593,7 +1605,7 @@ test "deterministic output — two passes produce identical results" {
 
         string_arena.reset();
         readRunIntoBuffer(
-            &result_rows,
+            bufs.result_rows,
             &runs_arr[0],
             all_page_ids[0..total_page_id_count],
             &collector.temp_mgr,
@@ -1601,7 +1613,7 @@ test "deterministic output — two passes produce identical results" {
         ) catch unreachable;
 
         const target = if (pass == 0) &results1 else &results2;
-        @memcpy(target[0..10], result_rows[0..10]);
+        @memcpy(target[0..10], bufs.result_rows[0..10]);
     }
 
     // Compare row by row.
@@ -1618,11 +1630,9 @@ test "string column sort" {
     const int_vals = [_]i64{ 3, 1, 2 };
     const str_vals = [_][]const u8{ "charlie", "alpha", "bravo" };
     var collector = setupCollectorWithStringRows(&disk, &hot, &int_vals, &str_vals, 4 * 1024 * 1024);
-
-    var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var scratch_a: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
-    var result = QueryResult.init(&result_rows);
+    var bufs = try TestSortBuffers.init();
+    defer bufs.deinit();
+    var result = QueryResult.init(bufs.result_rows);
     var arena_buf = testArenaBuffer();
     var string_arena = StringArena.init(&arena_buf);
 
@@ -1652,9 +1662,9 @@ test "string column sort" {
         .statement_timestamp_micros = null,
         .parameter_bindings = &.{},
         .allocator = testing.allocator,
-        .result_rows = &result_rows,
-        .scratch_rows_a = &scratch_a,
-        .scratch_rows_b = &scratch_b,
+        .result_rows = bufs.result_rows,
+        .scratch_rows_a = bufs.scratch_a,
+        .scratch_rows_b = bufs.scratch_b,
         .string_arena_bytes = &arena_buf,
         .nested_rows = undefined,
         .nested_decode_arena_bytes = undefined,
@@ -1685,7 +1695,7 @@ test "string column sort" {
 
     string_arena.reset();
     try readRunIntoBuffer(
-        &result_rows,
+        bufs.result_rows,
         &runs_arr[0],
         all_page_ids[0..total_page_id_count],
         &collector.temp_mgr,
@@ -1693,9 +1703,9 @@ test "string column sort" {
     );
 
     // Sorted by string: alpha, bravo, charlie.
-    try testing.expectEqualStrings("alpha", result_rows[0].values[1].string);
-    try testing.expectEqualStrings("bravo", result_rows[1].values[1].string);
-    try testing.expectEqualStrings("charlie", result_rows[2].values[1].string);
+    try testing.expectEqualStrings("alpha", bufs.result_rows[0].values[1].string);
+    try testing.expectEqualStrings("bravo", bufs.result_rows[1].values[1].string);
+    try testing.expectEqualStrings("charlie", bufs.result_rows[2].values[1].string);
 }
 
 test "reconfigure collector for sorted output" {

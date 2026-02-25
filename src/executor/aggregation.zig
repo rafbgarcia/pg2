@@ -427,6 +427,7 @@ pub fn accumulateGroupAggregates(
         if (descriptor.kind == .count_star) continue;
 
         var exec_eval = evalContextForExec(ctx, string_arena);
+        exec_eval.bind();
         const arg_value = filter_mod.evaluateExpressionFull(
             ctx.ast,
             ctx.tokens,

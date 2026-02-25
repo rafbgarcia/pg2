@@ -160,6 +160,7 @@ pub fn applyFlatColumnProjection(
                 },
                 .expression => {
                     var exec_eval = evalContextForExec(ctx, string_arena);
+                    exec_eval.bind();
                     const value = filter_mod.evaluateExpressionFull(
                         ctx.ast,
                         ctx.tokens,
