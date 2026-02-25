@@ -60,20 +60,40 @@ pub fn build(b: *std.Build) void {
     const run_t = b.addRunArtifact(t);
     test_step.dependOn(&run_t.step);
 
-    // --- Unit lane rooted at src/* inline tests ---
+    // --- Unit lane rooted at test/unit/* ---
     const unit_tests_mod = b.createModule(.{
-        .root_source_file = b.path("src/pg2.zig"),
+        .root_source_file = b.path("test/unit/unit_specs_test.zig"),
         .target = target,
         .optimize = optimize,
+        .imports = &.{
+            .{ .name = "pg2", .module = pg2_mod },
+        },
     });
     const unit_t = b.addTest(.{
         .root_module = unit_tests_mod,
     });
-    const unit_step = b.step("unit", "Compile src/* inline unit tests");
+    const unit_step = b.step("unit", "Compile unit lane tests (test/unit)");
     unit_step.dependOn(&unit_t.step);
     const run_unit_t = b.addRunArtifact(unit_t);
-    const unit_run_step = b.step("unit-run", "Run src/* inline unit tests");
+
+    // --- Legacy inline unit tests rooted at src/* ---
+    const unit_legacy_tests_mod = b.createModule(.{
+        .root_source_file = b.path("src/pg2.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const unit_legacy_t = b.addTest(.{
+        .root_module = unit_legacy_tests_mod,
+    });
+    const unit_legacy_step = b.step("unit-legacy", "Compile legacy src/* inline unit tests");
+    unit_legacy_step.dependOn(&unit_legacy_t.step);
+    const run_unit_legacy_t = b.addRunArtifact(unit_legacy_t);
+    const unit_legacy_run_step = b.step("unit-legacy-run", "Run legacy src/* inline unit tests");
+    unit_legacy_run_step.dependOn(&run_unit_legacy_t.step);
+
+    const unit_run_step = b.step("unit-run", "Run unit lane and legacy src/* inline tests");
     unit_run_step.dependOn(&run_unit_t.step);
+    unit_run_step.dependOn(&run_unit_legacy_t.step);
 
     // --- Stress tests ---
     const stress_tests_mod = b.createModule(.{
