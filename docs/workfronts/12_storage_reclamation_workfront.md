@@ -27,6 +27,9 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
   - scan module now has opt-in `indexFindWithCleanup` / `indexRangeScanIntoWithCleanup` APIs for opportunistic cleanup while preserving read-only no-side-effect defaults.
 - Phase 5 observability foundation started:
   - inspect now emits deterministic tx counters: `active_count`, `oldest_active_tx_id`, `next_tx_id`, `base_tx_id`.
+- Crash/replay matrix expanded:
+  - added slot-reclaim replay idempotency coverage;
+  - added index-reclaim WAL marker replay coverage.
 - Full test suite is green after these changes (`zig build test --summary all` passes on 2026-02-25).
 
 ## Status Snapshot (2026-02-25)
@@ -70,7 +73,7 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
 - **Major remaining gates:**
   - wire opt-in generic scan cleanup path into a production write-context caller and prove bounded dead-entry growth under churn;
   - phase-5 concurrency/observability matrix for pinned snapshots and reclaim resumption;
-  - replay matrix expansion for index cleanup and additional `reclaim_slot`-focused scenarios.
+  - expand replay matrix from marker/count coverage to full index-delete post-restart correctness assertions.
 
 ## Fresh Session Execution Plan (Ordered, Full-Completion Path)
 

@@ -321,6 +321,24 @@ fn encodeOverflowRelinkRecordMetaForTest(
     @memcpy(out[8..16], std.mem.asBytes(&std.mem.nativeToLittle(u64, new_first_page_id)));
 }
 
+fn encodeIndexReclaimWalPayloadForTest(
+    out: []u8,
+    model_id: u16,
+    index_id: u16,
+    page_id: u64,
+    slot: u16,
+    key: []const u8,
+) usize {
+    std.debug.assert(out.len >= 16 + key.len);
+    @memcpy(out[0..2], std.mem.asBytes(&std.mem.nativeToLittle(u16, model_id)));
+    @memcpy(out[2..4], std.mem.asBytes(&std.mem.nativeToLittle(u16, index_id)));
+    @memcpy(out[4..6], std.mem.asBytes(&std.mem.nativeToLittle(u16, slot)));
+    @memcpy(out[6..8], std.mem.asBytes(&std.mem.nativeToLittle(u16, @as(u16, @intCast(key.len)))));
+    @memcpy(out[8..16], std.mem.asBytes(&std.mem.nativeToLittle(u64, page_id)));
+    @memcpy(out[16 .. 16 + key.len], key);
+    return 16 + key.len;
+}
+
 fn applyOverflowReclaimIdempotent(
     pool: *BufferPool,
     overflow_allocator: *const OverflowPageIdAllocator,
@@ -756,4 +774,105 @@ test "replayCommittedOverflowLifecycle fails closed when tx markers are missing 
             payload[0..],
         ),
     );
+}
+
+test "replayCommittedOverflowLifecycle applies reclaim_slot idempotently" {
+    const disk_mod = @import("../simulator/disk.zig");
+    const heap_mod = @import("heap.zig");
+
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 8);
+    defer pool.deinit();
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+    var allocator = try OverflowPageIdAllocator.initWithBounds(30_000, 8);
+
+    const heap_page_id: u64 = 500;
+    {
+        const page = try pool.pin(heap_page_id);
+        heap_mod.HeapPage.init(page);
+        var row_buf: [32]u8 = undefined;
+        @memset(row_buf[0..8], 1);
+        const slot = try heap_mod.HeapPage.insert(page, row_buf[0..8]);
+        try std.testing.expectEqual(@as(u16, 0), slot);
+        _ = try heap_mod.HeapPage.delete(page, slot);
+        pool.unpin(heap_page_id, true);
+    }
+
+    const tx_id: u64 = 700;
+    _ = try wal.beginTx(tx_id);
+    var payload: [2]u8 = undefined;
+    @memcpy(payload[0..2], std.mem.asBytes(&std.mem.nativeToLittle(u16, 0)));
+    _ = try wal.append(tx_id, .reclaim_slot, heap_page_id, payload[0..]);
+    _ = try wal.commitTx(tx_id);
+    try wal.flush();
+
+    var records_a: [64]Record = undefined;
+    var payload_a: [16 * 1024]u8 = undefined;
+    const first = try replayCommittedOverflowLifecycle(
+        &pool,
+        &wal,
+        &allocator,
+        records_a[0..],
+        payload_a[0..],
+    );
+    try std.testing.expectEqual(@as(usize, 1), first.slot_reclaim_records_seen);
+    try std.testing.expectEqual(@as(usize, 1), first.slot_reclaim_applied);
+    try std.testing.expectEqual(@as(usize, 0), first.slot_reclaim_idempotent_skips);
+
+    var records_b: [64]Record = undefined;
+    var payload_b: [16 * 1024]u8 = undefined;
+    const second = try replayCommittedOverflowLifecycle(
+        &pool,
+        &wal,
+        &allocator,
+        records_b[0..],
+        payload_b[0..],
+    );
+    try std.testing.expectEqual(@as(usize, 1), second.slot_reclaim_records_seen);
+    try std.testing.expectEqual(@as(usize, 0), second.slot_reclaim_applied);
+    try std.testing.expectEqual(@as(usize, 1), second.slot_reclaim_idempotent_skips);
+}
+
+test "replayCommittedOverflowLifecycle counts index reclaim WAL markers" {
+    const disk_mod = @import("../simulator/disk.zig");
+
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    var pool = try BufferPool.init(std.testing.allocator, disk.storage(), 8);
+    defer pool.deinit();
+    var wal = Wal.init(std.testing.allocator, disk.storage());
+    defer wal.deinit();
+    var allocator = try OverflowPageIdAllocator.initWithBounds(31_000, 8);
+
+    const tx_id: u64 = 701;
+    _ = try wal.beginTx(tx_id);
+    var payload_buf: [64]u8 = undefined;
+    const payload_len = encodeIndexReclaimWalPayloadForTest(
+        payload_buf[0..],
+        1,
+        2,
+        500,
+        3,
+        "abc",
+    );
+    _ = try wal.append(tx_id, .index_reclaim_enqueue, 500, payload_buf[0..payload_len]);
+    _ = try wal.append(tx_id, .index_reclaim_delete, 500, payload_buf[0..payload_len]);
+    _ = try wal.commitTx(tx_id);
+    try wal.flush();
+
+    var records: [64]Record = undefined;
+    var payload: [16 * 1024]u8 = undefined;
+    const stats = try replayCommittedOverflowLifecycle(
+        &pool,
+        &wal,
+        &allocator,
+        records[0..],
+        payload[0..],
+    );
+    try std.testing.expectEqual(@as(usize, 1), stats.index_reclaim_enqueue_records_seen);
+    try std.testing.expectEqual(@as(usize, 1), stats.index_reclaim_delete_records_seen);
 }
