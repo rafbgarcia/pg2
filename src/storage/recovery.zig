@@ -441,7 +441,7 @@ test "replayCommittedOverflowLifecycle reclaims chain and is idempotent" {
         pool.unpin(100, true);
     }
 
-    var tm = @import("../mvcc/transaction.zig").TxManager.init(std.testing.allocator);
+    var tm = try @import("../mvcc/transaction.zig").TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
     var undo_log = try @import("../mvcc/undo.zig").UndoLog.init(std.testing.allocator, 1024, 64 * 1024);
     defer undo_log.deinit();

@@ -914,6 +914,7 @@ test "single batch sort — all rows fit in one run" {
 
     // We need working buffers for sorting.
     var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
+    var scratch_a: [scan_mod.scan_batch_size]ResultRow = undefined;
     var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
     var result = QueryResult.init(&result_rows);
 
@@ -932,14 +933,11 @@ test "single batch sort — all rows fit in one run" {
     };
 
     // Create minimal schema with one i64 column.
-    var schema = std.mem.zeroes(RowSchema);
-    schema.column_count = 1;
-    schema.columns[0] = .{
-        .name = [_]u8{0} ** 64,
-        .column_type = .i64,
-        .is_nullable = false,
+    var schema: RowSchema = .{
+        .columns = undefined,
+        .name_buffer = undefined,
     };
-    @memcpy(schema.columns[0].name[0..3], "val");
+    _ = try schema.addColumn("val", .i64, false);
 
     // Minimal ExecContext — only fields used by compareRowsBySortKeys.
     const ctx = ExecContext{
@@ -957,9 +955,12 @@ test "single batch sort — all rows fit in one run" {
         .parameter_bindings = &.{},
         .allocator = testing.allocator,
         .result_rows = &result_rows,
-        .scratch_rows_a = undefined,
+        .scratch_rows_a = &scratch_a,
         .scratch_rows_b = &scratch_b,
         .string_arena_bytes = &arena_buf,
+        .nested_rows = undefined,
+        .nested_decode_arena_bytes = undefined,
+        .nested_match_arena_bytes = undefined,
         .storage = disk.storage(),
         .query_slot_index = 0,
         .collector = &collector,
@@ -1017,6 +1018,7 @@ test "stability — equal keys preserve insertion order" {
     try testing.expect(collector.spillTriggered());
 
     var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
+    var scratch_a: [scan_mod.scan_batch_size]ResultRow = undefined;
     var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
     var result = QueryResult.init(&result_rows);
     var arena_buf = testArenaBuffer();
@@ -1026,12 +1028,12 @@ test "stability — equal keys preserve insertion order" {
         .{ .kind = .column, .descending = false, .column_index = 0 },
     };
 
-    var schema = std.mem.zeroes(RowSchema);
-    schema.column_count = 2;
-    schema.columns[0] = .{ .name = [_]u8{0} ** 64, .column_type = .i64, .is_nullable = false };
-    @memcpy(schema.columns[0].name[0..1], "a");
-    schema.columns[1] = .{ .name = [_]u8{0} ** 64, .column_type = .i64, .is_nullable = false };
-    @memcpy(schema.columns[1].name[0..1], "b");
+    var schema: RowSchema = .{
+        .columns = undefined,
+        .name_buffer = undefined,
+    };
+    _ = try schema.addColumn("a", .i64, false);
+    _ = try schema.addColumn("b", .i64, false);
 
     const ctx = ExecContext{
         .catalog = undefined,
@@ -1048,9 +1050,12 @@ test "stability — equal keys preserve insertion order" {
         .parameter_bindings = &.{},
         .allocator = testing.allocator,
         .result_rows = &result_rows,
-        .scratch_rows_a = undefined,
+        .scratch_rows_a = &scratch_a,
         .scratch_rows_b = &scratch_b,
         .string_arena_bytes = &arena_buf,
+        .nested_rows = undefined,
+        .nested_decode_arena_bytes = undefined,
+        .nested_match_arena_bytes = undefined,
         .storage = disk.storage(),
         .query_slot_index = 0,
         .collector = &collector,
@@ -1100,6 +1105,7 @@ test "descending sort order" {
     var collector = setupCollectorWithRows(&disk, &hot, &values, 4 * 1024 * 1024);
 
     var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
+    var scratch_a: [scan_mod.scan_batch_size]ResultRow = undefined;
     var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
     var result = QueryResult.init(&result_rows);
     var arena_buf = testArenaBuffer();
@@ -1109,10 +1115,11 @@ test "descending sort order" {
         .{ .kind = .column, .descending = true, .column_index = 0 },
     };
 
-    var schema = std.mem.zeroes(RowSchema);
-    schema.column_count = 1;
-    schema.columns[0] = .{ .name = [_]u8{0} ** 64, .column_type = .i64, .is_nullable = false };
-    @memcpy(schema.columns[0].name[0..3], "val");
+    var schema: RowSchema = .{
+        .columns = undefined,
+        .name_buffer = undefined,
+    };
+    _ = try schema.addColumn("val", .i64, false);
 
     const ctx = ExecContext{
         .catalog = undefined,
@@ -1129,9 +1136,12 @@ test "descending sort order" {
         .parameter_bindings = &.{},
         .allocator = testing.allocator,
         .result_rows = &result_rows,
-        .scratch_rows_a = undefined,
+        .scratch_rows_a = &scratch_a,
         .scratch_rows_b = &scratch_b,
         .string_arena_bytes = &arena_buf,
+        .nested_rows = undefined,
+        .nested_decode_arena_bytes = undefined,
+        .nested_match_arena_bytes = undefined,
         .storage = disk.storage(),
         .query_slot_index = 0,
         .collector = &collector,
@@ -1181,6 +1191,7 @@ test "two-run merge" {
     var collector = SpillingResultCollector.init(&hot, mgr, 4 * 1024 * 1024);
 
     var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
+    var scratch_a: [scan_mod.scan_batch_size]ResultRow = undefined;
     var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
     var arena_buf = testArenaBuffer();
     var string_arena = StringArena.init(&arena_buf);
@@ -1189,10 +1200,11 @@ test "two-run merge" {
         .{ .kind = .column, .descending = false, .column_index = 0 },
     };
 
-    var schema = std.mem.zeroes(RowSchema);
-    schema.column_count = 1;
-    schema.columns[0] = .{ .name = [_]u8{0} ** 64, .column_type = .i64, .is_nullable = false };
-    @memcpy(schema.columns[0].name[0..3], "val");
+    var schema: RowSchema = .{
+        .columns = undefined,
+        .name_buffer = undefined,
+    };
+    _ = try schema.addColumn("val", .i64, false);
 
     const ctx = ExecContext{
         .catalog = undefined,
@@ -1209,9 +1221,12 @@ test "two-run merge" {
         .parameter_bindings = &.{},
         .allocator = testing.allocator,
         .result_rows = &result_rows,
-        .scratch_rows_a = undefined,
+        .scratch_rows_a = &scratch_a,
         .scratch_rows_b = &scratch_b,
         .string_arena_bytes = &arena_buf,
+        .nested_rows = undefined,
+        .nested_decode_arena_bytes = undefined,
+        .nested_match_arena_bytes = undefined,
         .storage = disk.storage(),
         .query_slot_index = 0,
         .collector = &collector,
@@ -1298,6 +1313,7 @@ test "two-run merge with stability across runs" {
     // Just need the collector for its temp_mgr.
 
     var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
+    var scratch_a: [scan_mod.scan_batch_size]ResultRow = undefined;
     var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
     var arena_buf = testArenaBuffer();
     var string_arena = StringArena.init(&arena_buf);
@@ -1307,12 +1323,12 @@ test "two-run merge with stability across runs" {
         .{ .kind = .column, .descending = false, .column_index = 0 },
     };
 
-    var schema = std.mem.zeroes(RowSchema);
-    schema.column_count = 2;
-    schema.columns[0] = .{ .name = [_]u8{0} ** 64, .column_type = .i64, .is_nullable = false };
-    @memcpy(schema.columns[0].name[0..1], "k");
-    schema.columns[1] = .{ .name = [_]u8{0} ** 64, .column_type = .i64, .is_nullable = false };
-    @memcpy(schema.columns[1].name[0..1], "v");
+    var schema: RowSchema = .{
+        .columns = undefined,
+        .name_buffer = undefined,
+    };
+    _ = try schema.addColumn("k", .i64, false);
+    _ = try schema.addColumn("v", .i64, false);
 
     const ctx = ExecContext{
         .catalog = undefined,
@@ -1329,9 +1345,12 @@ test "two-run merge with stability across runs" {
         .parameter_bindings = &.{},
         .allocator = testing.allocator,
         .result_rows = &result_rows,
-        .scratch_rows_a = undefined,
+        .scratch_rows_a = &scratch_a,
         .scratch_rows_b = &scratch_b,
         .string_arena_bytes = &arena_buf,
+        .nested_rows = undefined,
+        .nested_decode_arena_bytes = undefined,
+        .nested_match_arena_bytes = undefined,
         .storage = disk.storage(),
         .query_slot_index = 0,
         .collector = &collector,
@@ -1415,6 +1434,7 @@ test "null values sort correctly" {
     try testing.expect(collector.spillTriggered());
 
     var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
+    var scratch_a: [scan_mod.scan_batch_size]ResultRow = undefined;
     var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
     var result = QueryResult.init(&result_rows);
     var arena_buf = testArenaBuffer();
@@ -1424,10 +1444,11 @@ test "null values sort correctly" {
         .{ .kind = .column, .descending = false, .column_index = 0 },
     };
 
-    var schema = std.mem.zeroes(RowSchema);
-    schema.column_count = 1;
-    schema.columns[0] = .{ .name = [_]u8{0} ** 64, .column_type = .i64, .is_nullable = true };
-    @memcpy(schema.columns[0].name[0..3], "val");
+    var schema: RowSchema = .{
+        .columns = undefined,
+        .name_buffer = undefined,
+    };
+    _ = try schema.addColumn("val", .i64, true);
 
     const ctx = ExecContext{
         .catalog = undefined,
@@ -1444,9 +1465,12 @@ test "null values sort correctly" {
         .parameter_bindings = &.{},
         .allocator = testing.allocator,
         .result_rows = &result_rows,
-        .scratch_rows_a = undefined,
+        .scratch_rows_a = &scratch_a,
         .scratch_rows_b = &scratch_b,
         .string_arena_bytes = &arena_buf,
+        .nested_rows = undefined,
+        .nested_decode_arena_bytes = undefined,
+        .nested_match_arena_bytes = undefined,
         .storage = disk.storage(),
         .query_slot_index = 0,
         .collector = &collector,
@@ -1506,7 +1530,8 @@ test "deterministic output — two passes produce identical results" {
         var collector = setupCollectorWithRows(&disk, &hot, &values, 4 * 1024 * 1024);
 
         var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
-        var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
+        var scratch_a: [scan_mod.scan_batch_size]ResultRow = undefined;
+    var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
         var result = QueryResult.init(&result_rows);
         var arena_buf = testArenaBuffer();
         var string_arena = StringArena.init(&arena_buf);
@@ -1515,10 +1540,11 @@ test "deterministic output — two passes produce identical results" {
             .{ .kind = .column, .descending = false, .column_index = 0 },
         };
 
-        var schema = std.mem.zeroes(RowSchema);
-        schema.column_count = 1;
-        schema.columns[0] = .{ .name = [_]u8{0} ** 64, .column_type = .i64, .is_nullable = false };
-        @memcpy(schema.columns[0].name[0..3], "val");
+        var schema: RowSchema = .{
+            .columns = undefined,
+            .name_buffer = undefined,
+        };
+        _ = try schema.addColumn("val", .i64, false);
 
         const ctx = ExecContext{
             .catalog = undefined,
@@ -1535,9 +1561,12 @@ test "deterministic output — two passes produce identical results" {
             .parameter_bindings = &.{},
             .allocator = testing.allocator,
             .result_rows = &result_rows,
-            .scratch_rows_a = undefined,
+            .scratch_rows_a = &scratch_a,
             .scratch_rows_b = &scratch_b,
             .string_arena_bytes = &arena_buf,
+        .nested_rows = undefined,
+        .nested_decode_arena_bytes = undefined,
+        .nested_match_arena_bytes = undefined,
             .storage = disk.storage(),
             .query_slot_index = 0,
             .collector = &collector,
@@ -1591,6 +1620,7 @@ test "string column sort" {
     var collector = setupCollectorWithStringRows(&disk, &hot, &int_vals, &str_vals, 4 * 1024 * 1024);
 
     var result_rows: [scan_mod.scan_batch_size]ResultRow = undefined;
+    var scratch_a: [scan_mod.scan_batch_size]ResultRow = undefined;
     var scratch_b: [scan_mod.scan_batch_size]ResultRow = undefined;
     var result = QueryResult.init(&result_rows);
     var arena_buf = testArenaBuffer();
@@ -1601,12 +1631,12 @@ test "string column sort" {
         .{ .kind = .column, .descending = false, .column_index = 1 },
     };
 
-    var schema = std.mem.zeroes(RowSchema);
-    schema.column_count = 2;
-    schema.columns[0] = .{ .name = [_]u8{0} ** 64, .column_type = .i64, .is_nullable = false };
-    @memcpy(schema.columns[0].name[0..2], "id");
-    schema.columns[1] = .{ .name = [_]u8{0} ** 64, .column_type = .string, .is_nullable = false };
-    @memcpy(schema.columns[1].name[0..4], "name");
+    var schema: RowSchema = .{
+        .columns = undefined,
+        .name_buffer = undefined,
+    };
+    _ = try schema.addColumn("id", .i64, false);
+    _ = try schema.addColumn("name", .string, false);
 
     const ctx = ExecContext{
         .catalog = undefined,
@@ -1623,9 +1653,12 @@ test "string column sort" {
         .parameter_bindings = &.{},
         .allocator = testing.allocator,
         .result_rows = &result_rows,
-        .scratch_rows_a = undefined,
+        .scratch_rows_a = &scratch_a,
         .scratch_rows_b = &scratch_b,
         .string_arena_bytes = &arena_buf,
+        .nested_rows = undefined,
+        .nested_decode_arena_bytes = undefined,
+        .nested_match_arena_bytes = undefined,
         .storage = disk.storage(),
         .query_slot_index = 0,
         .collector = &collector,

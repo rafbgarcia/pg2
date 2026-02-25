@@ -60,6 +60,21 @@ pub fn build(b: *std.Build) void {
     const run_t = b.addRunArtifact(t);
     test_step.dependOn(&run_t.step);
 
+    // --- Unit lane rooted at src/* inline tests ---
+    const unit_tests_mod = b.createModule(.{
+        .root_source_file = b.path("src/pg2.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const unit_t = b.addTest(.{
+        .root_module = unit_tests_mod,
+    });
+    const unit_step = b.step("unit", "Compile src/* inline unit tests");
+    unit_step.dependOn(&unit_t.step);
+    const run_unit_t = b.addRunArtifact(unit_t);
+    const unit_run_step = b.step("unit-run", "Run src/* inline unit tests");
+    unit_run_step.dependOn(&run_unit_t.step);
+
     // --- Stress tests ---
     const stress_tests_mod = b.createModule(.{
         .root_source_file = b.path("test/stress/stress_specs_test.zig"),

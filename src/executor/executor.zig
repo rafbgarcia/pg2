@@ -593,6 +593,8 @@ fn executeLetBindingStatement(
     }
 
     var exec_eval = evalContextForExec(ctx, string_arena);
+
+    exec_eval.bind();
     const scalar = filter_mod.evaluateExpressionFull(
         ctx.ast,
         ctx.tokens,
@@ -710,6 +712,7 @@ fn serializeExpressionPayload(
         },
         else => {
             var exec_eval = evalContextForExec(ctx, string_arena);
+            exec_eval.bind();
             const value = try filter_mod.evaluateExpressionFull(
                 ctx.ast,
                 ctx.tokens,
@@ -1550,6 +1553,7 @@ fn applyCollectorProjection(
                 },
                 .expression => {
                     var exec_eval = evalContextForExec(ctx, string_arena);
+                    exec_eval.bind();
                     const value = filter_mod.evaluateExpressionFull(
                         ctx.ast,
                         ctx.tokens,
@@ -2086,6 +2090,8 @@ fn evaluateCollectorCountExpr(
     if (expr == null_node) return null;
 
     var exec_eval = evalContextForExec(ctx, string_arena);
+
+    exec_eval.bind();
     const value = filter_mod.evaluateExpressionFull(
         ctx.ast,
         ctx.tokens,
@@ -2222,6 +2228,8 @@ fn rewriteCollectorForPostOps(
                     if (predicate == null_node) continue;
 
                     var exec_eval = evalContextForExec(ctx, string_arena);
+
+                    exec_eval.bind();
                     const matches = filter_mod.evaluatePredicateFull(
                         ctx.ast,
                         ctx.tokens,
@@ -4892,6 +4900,7 @@ fn applyWhereFilter(
 
     const original_count = result.row_count;
     var exec_eval = evalContextForExec(ctx, string_arena);
+    exec_eval.bind();
     var write_idx: u16 = 0;
     var read_idx: u16 = 0;
     while (read_idx < result.row_count) : (read_idx += 1) {
@@ -5092,19 +5101,24 @@ fn setPredicateClockUnavailableError(result: *QueryResult, scope: []const u8) vo
 pub const ExecEvalContext = struct {
     parameter_resolver: filter_mod.ParameterResolver,
     eval_ctx: filter_mod.EvalContext,
+
+    pub fn bind(self: *ExecEvalContext) void {
+        self.eval_ctx.parameter_resolver = &self.parameter_resolver;
+    }
 };
 
 pub fn evalContextForExec(
     ctx: *const ExecContext,
     string_arena: ?*scan_mod.StringArena,
 ) ExecEvalContext {
-    var result: ExecEvalContext = .{
+    return .{
         .parameter_resolver = .{
             .ctx = ctx,
             .resolve = resolveParameterBinding,
         },
         .eval_ctx = .{
             .statement_timestamp_micros = ctx.statement_timestamp_micros,
+            .parameter_resolver = null,
             .variable_resolver_ctx = ctx,
             .resolve_variable = resolveVariableBinding,
             .resolve_spilled_membership_ctx = ctx,
@@ -5112,8 +5126,6 @@ pub fn evalContextForExec(
             .string_arena = string_arena,
         },
     };
-    result.eval_ctx.parameter_resolver = &result.parameter_resolver;
-    return result;
 }
 
 fn parameterResolverForContext(
@@ -5248,6 +5260,8 @@ fn applyLimit(
     if (expr == null_node) return;
 
     var exec_eval = evalContextForExec(ctx, string_arena);
+
+    exec_eval.bind();
     const val = filter_mod.evaluateExpressionFull(
         ctx.ast,
         ctx.tokens,
@@ -5280,6 +5294,8 @@ fn applyOffset(
     if (expr == null_node) return;
 
     var exec_eval = evalContextForExec(ctx, string_arena);
+
+    exec_eval.bind();
     const val = filter_mod.evaluateExpressionFull(
         ctx.ast,
         ctx.tokens,
@@ -5340,6 +5356,7 @@ fn executeMutation(
     const has_projection = hasNonEmptySelectionSet(ctx.ast, pipeline_node);
     var diagnostic = mutation_mod.MutationDiagnostic{};
     var exec_eval = evalContextForExec(ctx, string_arena);
+    exec_eval.bind();
 
     switch (mut_op.kind) {
         .insert_op => {
@@ -5572,6 +5589,7 @@ fn materializeRowsMatchingPredicate(
     if (predicate_node != null_node) {
         const schema = &model.row_schema;
         var exec_eval = evalContextForExec(ctx, string_arena);
+        exec_eval.bind();
         const original_count = out.row_count;
         var write_idx: u16 = 0;
         var read_idx: u16 = 0;
@@ -5919,7 +5937,7 @@ const ExecTestEnv = struct {
             16,
         );
         self.wal = Wal.init(testing.allocator, self.disk.storage());
-        self.tm = TxManager.init(testing.allocator);
+        self.tm = try TxManager.init(testing.allocator, .{});
         self.undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
         self.result_rows = try testing.allocator.alloc(
             ResultRow,

@@ -324,7 +324,7 @@ test "different rows have independent chains" {
 }
 
 test "findVisible returns correct version" {
-    var tm = tx_mod.TxManager.init(std.testing.allocator);
+    var tm = try tx_mod.TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
     var log = try UndoLog.init(std.testing.allocator, 64, 4096);
     defer log.deinit();
@@ -346,7 +346,7 @@ test "findVisible returns correct version" {
 }
 
 test "findVisible returns null when current version is visible" {
-    var tm = tx_mod.TxManager.init(std.testing.allocator);
+    var tm = try tx_mod.TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
     var log = try UndoLog.init(std.testing.allocator, 64, 4096);
     defer log.deinit();
@@ -364,7 +364,7 @@ test "findVisible returns null when current version is visible" {
 }
 
 test "findVisible walks chain for deep history" {
-    var tm = tx_mod.TxManager.init(std.testing.allocator);
+    var tm = try tx_mod.TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
     var log = try UndoLog.init(std.testing.allocator, 64, 4096);
     defer log.deinit();
@@ -390,7 +390,7 @@ test "findVisible walks chain for deep history" {
 }
 
 test "findVisible skips aborted head and returns latest committed version" {
-    var tm = tx_mod.TxManager.init(std.testing.allocator);
+    var tm = try tx_mod.TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
     var log = try UndoLog.init(std.testing.allocator, 64, 4096);
     defer log.deinit();
@@ -413,7 +413,7 @@ test "findVisible skips aborted head and returns latest committed version" {
 }
 
 test "findVisible skips active head and returns latest committed version" {
-    var tm = tx_mod.TxManager.init(std.testing.allocator);
+    var tm = try tx_mod.TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
     var log = try UndoLog.init(std.testing.allocator, 64, 4096);
     defer log.deinit();

@@ -233,7 +233,7 @@ test "RuntimeStorageRoot creates fixed files and writable storage route" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const original_dir = try std.fs.cwd().openDir(".", .{});
+    var original_dir = try std.fs.cwd().openDir(".", .{});
     defer original_dir.close();
     try std.posix.fchdir(tmp.dir.fd);
     defer std.posix.fchdir(original_dir.fd) catch {};
@@ -259,7 +259,7 @@ test "RuntimeStorageRoot blocks a second writer while lock is held" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const original_dir = try std.fs.cwd().openDir(".", .{});
+    var original_dir = try std.fs.cwd().openDir(".", .{});
     defer original_dir.close();
     try std.posix.fchdir(tmp.dir.fd);
     defer std.posix.fchdir(original_dir.fd) catch {};
@@ -278,7 +278,7 @@ test "RuntimeStorageRoot startup truncates temp.pg2" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const original_dir = try std.fs.cwd().openDir(".", .{});
+    var original_dir = try std.fs.cwd().openDir(".", .{});
     defer original_dir.close();
     try std.posix.fchdir(tmp.dir.fd);
     defer std.posix.fchdir(original_dir.fd) catch {};
@@ -307,7 +307,7 @@ test "RuntimeStorageRoot stale lock file does not block startup" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const original_dir = try std.fs.cwd().openDir(".", .{});
+    var original_dir = try std.fs.cwd().openDir(".", .{});
     defer original_dir.close();
     try std.posix.fchdir(tmp.dir.fd);
     defer std.posix.fchdir(original_dir.fd) catch {};
@@ -326,7 +326,7 @@ test "inspectLockMetadata parses lock file fields" {
     var tmp = std.testing.tmpDir(.{});
     defer tmp.cleanup();
 
-    const original_dir = try std.fs.cwd().openDir(".", .{});
+    var original_dir = try std.fs.cwd().openDir(".", .{});
     defer original_dir.close();
     try std.posix.fchdir(tmp.dir.fd);
     defer std.posix.fchdir(original_dir.fd) catch {};

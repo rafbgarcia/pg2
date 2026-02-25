@@ -748,7 +748,7 @@ test "empty scan returns zero rows" {
     defer disk.deinit();
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
     defer pool.deinit();
-    var tm = TxManager.init(testing.allocator);
+    var tm = try TxManager.init(testing.allocator, .{});
     defer tm.deinit();
     var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
     defer undo_log.deinit();
@@ -781,7 +781,7 @@ test "scan with rows inserted via HeapPage" {
     defer disk.deinit();
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
     defer pool.deinit();
-    var tm = TxManager.init(testing.allocator);
+    var tm = try TxManager.init(testing.allocator, .{});
     defer tm.deinit();
     var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
     defer undo_log.deinit();
@@ -840,7 +840,7 @@ test "tableScanInto respects caller row capacity" {
     defer disk.deinit();
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
     defer pool.deinit();
-    var tm = TxManager.init(testing.allocator);
+    var tm = try TxManager.init(testing.allocator, .{});
     defer tm.deinit();
     var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
     defer undo_log.deinit();
@@ -894,7 +894,7 @@ test "scan skips deleted slots" {
     defer disk.deinit();
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
     defer pool.deinit();
-    var tm = TxManager.init(testing.allocator);
+    var tm = try TxManager.init(testing.allocator, .{});
     defer tm.deinit();
     var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
     defer undo_log.deinit();
@@ -946,7 +946,7 @@ test "scan pages_read tracks correctly" {
     defer disk.deinit();
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
     defer pool.deinit();
-    var tm = TxManager.init(testing.allocator);
+    var tm = try TxManager.init(testing.allocator, .{});
     defer tm.deinit();
     var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
     defer undo_log.deinit();
@@ -990,7 +990,7 @@ test "cursor scan yields all rows across multiple chunks" {
     defer disk.deinit();
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
     defer pool.deinit();
-    var tm = TxManager.init(testing.allocator);
+    var tm = try TxManager.init(testing.allocator, .{});
     defer tm.deinit();
     var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
     defer undo_log.deinit();
@@ -1059,7 +1059,7 @@ test "cursor with null preserves stop-at-full behavior" {
     defer disk.deinit();
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
     defer pool.deinit();
-    var tm = TxManager.init(testing.allocator);
+    var tm = try TxManager.init(testing.allocator, .{});
     defer tm.deinit();
     var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
     defer undo_log.deinit();
@@ -1113,7 +1113,7 @@ test "cursor scan across page boundaries" {
     defer disk.deinit();
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
     defer pool.deinit();
-    var tm = TxManager.init(testing.allocator);
+    var tm = try TxManager.init(testing.allocator, .{});
     defer tm.deinit();
     var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
     defer undo_log.deinit();
@@ -1191,7 +1191,7 @@ test "cursor on empty table sets done immediately" {
     defer disk.deinit();
     var pool = try BufferPool.init(testing.allocator, disk.storage(), 8);
     defer pool.deinit();
-    var tm = TxManager.init(testing.allocator);
+    var tm = try TxManager.init(testing.allocator, .{});
     defer tm.deinit();
     var undo_log = try UndoLog.init(testing.allocator, 1024, 64 * 1024);
     defer undo_log.deinit();

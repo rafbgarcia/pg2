@@ -15,6 +15,10 @@ Ensure the new concurrency/self-tune/spill/advisor behavior is validated across 
 ### Gate
 - Every active test used for release confidence must be discoverable from a `test/<lane>` suite root.
 
+## Migration Progress (2026-02-25)
+- `zig build unit` now compiles the legacy inline `src/*` test surface from `src/pg2.zig`.
+- `zig build unit-run` is available for execution burn-down while migration continues.
+
 ## Phase 1: Memory Profile Matrix
 ### Profiles
 1. `tiny_fail` (expected startup fail)

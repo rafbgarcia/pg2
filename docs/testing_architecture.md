@@ -9,6 +9,9 @@ The objective is strict separation by contract level first, then runtime cost.
 - Scope: local component logic and invariants.
 - Dependency rule: no session-path integration unless explicitly required by contract.
 - Runtime target: fastest lane.
+- Build targets:
+  - `zig build unit` (compile gate for legacy inline `src/*` tests).
+  - `zig build unit-run` (executes legacy inline `src/*` tests; non-gating during migration).
 
 2. `features`
 - Scope: user-facing behavior contracts (1:1 supported product features).
@@ -39,6 +42,8 @@ The objective is strict separation by contract level first, then runtime cost.
 ## Build Targets
 
 - `zig build test`: fast lane (`features`, `internals`) plus deterministic simulation gate.
+- `zig build unit`: compile legacy inline `src/*` test surface.
+- `zig build unit-run`: run legacy inline `src/*` tests while migration is in progress.
 - `zig build sim`: simulation lane only.
 - `zig build stress`: heavy stress lane only.
 
