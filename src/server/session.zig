@@ -7,6 +7,7 @@
 //! - Emits deterministic wire-format responses for tests and clients.
 const std = @import("std");
 const bootstrap_mod = @import("../runtime/bootstrap.zig");
+const runtime_storage_root_mod = @import("../runtime/storage_root.zig");
 const request_mod = @import("../runtime/request.zig");
 const pool_mod = @import("pool.zig");
 const diagnostics_mod = @import("diagnostics.zig");
@@ -15,11 +16,15 @@ const tokenizer_mod = @import("../parser/tokenizer.zig");
 const ast_mod = @import("../parser/ast.zig");
 const serialization_mod = @import("serialization.zig");
 const mutation_mod = @import("../executor/mutation.zig");
+const spill_collector_mod = @import("../executor/spill_collector.zig");
+const scan_mod = @import("../executor/scan.zig");
 const transport_mod = @import("transport.zig");
 const runtime_errors = @import("../runtime/error_taxonomy.zig");
+const tx_mod = @import("../mvcc/transaction.zig");
 const row_mod = @import("../storage/row.zig");
 const catalog_mod = @import("../catalog/catalog.zig");
 const heap_mod = @import("../storage/heap.zig");
+const io_mod = @import("../storage/io.zig");
 const disk_mod = @import("../simulator/disk.zig");
 
 const BootstrappedRuntime = bootstrap_mod.BootstrappedRuntime;
@@ -35,6 +40,7 @@ const Connection = transport_mod.Connection;
 const serializeQueryResult = serialization_mod.serializeQueryResult;
 const RuntimeInspectStats = diagnostics_mod.RuntimeInspectStats;
 const TxInspectStats = diagnostics_mod.TxInspectStats;
+const RuntimeStorageRoot = runtime_storage_root_mod.RuntimeStorageRoot;
 
 pub const SessionError = request_mod.RequestError || error{ResponseTooLarge};
 pub const ServeError = SessionError ||
@@ -77,13 +83,26 @@ const TxControl = enum(u8) {
 pub const Session = struct {
     runtime: *BootstrappedRuntime,
     catalog: *Catalog,
+    storage_root: ?*RuntimeStorageRoot,
 
     pub fn init(
         runtime: *BootstrappedRuntime,
         catalog: *Catalog,
     ) Session {
+        return initWithStorageRoot(runtime, catalog, null);
+    }
+
+    pub fn initWithStorageRoot(
+        runtime: *BootstrappedRuntime,
+        catalog: *Catalog,
+        storage_root: ?*RuntimeStorageRoot,
+    ) Session {
         std.debug.assert(runtime.static_allocator.isSealed());
-        return .{ .runtime = runtime, .catalog = catalog };
+        return .{
+            .runtime = runtime,
+            .catalog = catalog,
+            .storage_root = storage_root,
+        };
     }
 
     pub fn handleRequest(
@@ -234,6 +253,18 @@ pub const Session = struct {
         runtime_inspect_stats: ?RuntimeInspectStats,
         response_buf: []u8,
     ) SessionError!DispatchResult {
+        if (std.mem.eql(u8, request, "inspect runtime --format json")) {
+            const bytes_written = try self.serializeRuntimeInspectJson(
+                pool,
+                runtime_inspect_stats,
+                response_buf,
+            );
+            return .{
+                .bytes_written = bytes_written,
+                .pin_transition = .none,
+            };
+        }
+
         const control = classifyTxControl(request);
         switch (control) {
             .none => {},
@@ -719,7 +750,127 @@ pub const Session = struct {
         }
         return served_connections;
     }
+
+    fn serializeRuntimeInspectJson(
+        self: *Session,
+        pool: *const ConnectionPool,
+        runtime_inspect_stats: ?RuntimeInspectStats,
+        response_buf: []u8,
+    ) SessionError!usize {
+        const pool_stats = pool.snapshotStats();
+        const budget_bytes = self.runtime.static_allocator.bytesUsed() +
+            self.runtime.static_allocator.bytesRemaining();
+        const memory_bootstrap_bytes = self.runtime.static_allocator.bytesUsed();
+        const buffer_pool_bytes = self.runtime.pool.frames.len * io_mod.page_size;
+        const wal_buffer_bytes = self.runtime.wal.buffer.len;
+        const slot_arenas_bytes =
+            @sizeOf(bool) * self.runtime.query_slot_in_use.len +
+            @sizeOf(scan_mod.ResultRow) * self.runtime.query_result_rows.len +
+            @sizeOf(scan_mod.ResultRow) * self.runtime.query_scratch_rows_a.len +
+            @sizeOf(scan_mod.ResultRow) * self.runtime.query_scratch_rows_b.len +
+            @sizeOf(scan_mod.ResultRow) * self.runtime.query_nested_rows.len +
+            self.runtime.query_string_arenas.len +
+            self.runtime.query_nested_decode_arenas.len +
+            self.runtime.query_nested_match_arenas.len +
+            @sizeOf(tx_mod.TxId) * self.runtime.query_snapshot_active_ids.len +
+            @sizeOf(spill_collector_mod.SpillingResultCollector) * self.runtime.query_collectors.len;
+        const memory_total_bytes = memory_bootstrap_bytes;
+
+        const runtime_stats = runtime_inspect_stats orelse RuntimeInspectStats{};
+        const storage_usage = if (self.storage_root) |root| root.snapshotUsage() catch null else null;
+        const data_pg2_bytes = if (storage_usage) |usage| usage.data_pg2_bytes else 0;
+        const wal_pg2_bytes = if (storage_usage) |usage| usage.wal_pg2_bytes else 0;
+        const temp_pg2_bytes = if (storage_usage) |usage| usage.temp_pg2_bytes else 0;
+        const data_pages = if (storage_usage) |usage| usage.data_pages else 0;
+        const wal_pages = if (storage_usage) |usage| usage.wal_pages else 0;
+        const temp_pages = if (storage_usage) |usage| usage.temp_pages else 0;
+        const storage_total_bytes = data_pg2_bytes + wal_pg2_bytes + temp_pg2_bytes;
+        const logical_total_pages = data_pages + wal_pages + temp_pages;
+        const sampled_at_unix_ns: u64 = @intCast(@max(@as(i64, 0), std.time.nanoTimestamp()));
+        const rss_bytes = readProcessRssBytes() orelse 0;
+        const rss_over_budget = if (budget_bytes == 0)
+            0.0
+        else
+            @as(f64, @floatFromInt(rss_bytes)) /
+                @as(f64, @floatFromInt(budget_bytes));
+        const memory_total_over_budget = if (budget_bytes == 0)
+            0.0
+        else
+            @as(f64, @floatFromInt(memory_total_bytes)) /
+                @as(f64, @floatFromInt(budget_bytes));
+
+        const payload = .{
+            .schema_version = @as(u32, 1),
+            .memory_bytes = .{
+                .bootstrap = memory_bootstrap_bytes,
+                .buffer_pool = buffer_pool_bytes,
+                .wal_buffer = wal_buffer_bytes,
+                .slot_arenas = slot_arenas_bytes,
+                .total = memory_total_bytes,
+                .budget = budget_bytes,
+            },
+            .storage_bytes = .{
+                .data_pg2 = data_pg2_bytes,
+                .wal_pg2 = wal_pg2_bytes,
+                .temp_pg2 = temp_pg2_bytes,
+                .total = storage_total_bytes,
+            },
+            .logical_pages = .{
+                .data = data_pages,
+                .wal = wal_pages,
+                .temp = temp_pages,
+                .total = logical_total_pages,
+            },
+            .ratios = .{
+                .rss_over_budget = rss_over_budget,
+                .memory_total_over_budget = memory_total_over_budget,
+            },
+            .meta = .{
+                .sampled_at_unix_ns = sampled_at_unix_ns,
+            },
+            .runtime = .{
+                .queue_depth = runtime_stats.queue_depth,
+                .workers_busy = runtime_stats.workers_busy,
+                .pool_pinned = runtime_stats.pool_pinned,
+                .requests_enqueued_total = runtime_stats.requests_enqueued_total,
+                .requests_dispatched_total = runtime_stats.requests_dispatched_total,
+                .requests_completed_total = runtime_stats.requests_completed_total,
+                .queue_full_total = runtime_stats.queue_full_total,
+                .queue_timeout_total = runtime_stats.queue_timeout_total,
+                .max_queue_wait_ticks = runtime_stats.max_queue_wait_ticks,
+                .max_pin_wait_ticks = runtime_stats.max_pin_wait_ticks,
+                .max_pin_duration_ticks = runtime_stats.max_pin_duration_ticks,
+            },
+            .pool = .{
+                .size = pool_stats.pool_size,
+                .checked_out = pool_stats.checked_out,
+                .pinned = pool_stats.pinned,
+                .exhausted_total = pool_stats.pool_exhausted_total,
+            },
+        };
+        var stream = std.io.fixedBufferStream(response_buf);
+        stream.writer().print("{f}\n", .{std.json.fmt(payload, .{})}) catch
+            return error.ResponseTooLarge;
+        return stream.pos;
+    }
 };
+
+fn readProcessRssBytes() ?u64 {
+    var file = std.fs.openFileAbsolute("/proc/self/status", .{}) catch return null;
+    defer file.close();
+    var buf: [4096]u8 = undefined;
+    const len = file.readAll(&buf) catch return null;
+    const content = buf[0..len];
+    const marker = "VmRSS:";
+    const start = std.mem.indexOf(u8, content, marker) orelse return null;
+    var cursor = start + marker.len;
+    while (cursor < content.len and (content[cursor] == ' ' or content[cursor] == '\t')) : (cursor += 1) {}
+    var end = cursor;
+    while (end < content.len and std.ascii.isDigit(content[end])) : (end += 1) {}
+    if (end == cursor) return null;
+    const value_kib = std.fmt.parseInt(u64, content[cursor..end], 10) catch return null;
+    return value_kib * 1024;
+}
 
 fn writeResponseRetry(
     connection: Connection,
@@ -1230,6 +1381,98 @@ test "session inspect appends runtime diagnostics when provided" {
         return error.TestUnexpectedResult;
     try std.testing.expectEqual(@as(u64, 7), max_pin_wait_ticks);
     try std.testing.expectEqual(@as(u64, 13), max_pin_duration_ticks);
+}
+
+test "session inspect runtime json emits schema_version 1 contract keys and invariants" {
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    const backing_memory = try std.testing.allocator.alloc(
+        u8,
+        256 * 1024 * 1024,
+    );
+    defer std.testing.allocator.free(backing_memory);
+
+    var runtime = try BootstrappedRuntime.init(
+        backing_memory,
+        disk.storage(),
+        .{ .max_query_slots = 1 },
+    );
+    defer runtime.deinit();
+
+    var catalog = Catalog{};
+    var session = Session.init(&runtime, &catalog);
+    var pool = ConnectionPool.init(&runtime);
+    var pin_state = SessionPinState{};
+    var response_buf: [4096]u8 = undefined;
+
+    const result = try session.dispatchRequestForSession(
+        &pool,
+        &pin_state,
+        "inspect runtime --format json",
+        RuntimeInspectStats{
+            .queue_depth = 1,
+            .workers_busy = 1,
+            .pool_pinned = 0,
+            .requests_enqueued_total = 3,
+            .requests_dispatched_total = 3,
+            .requests_completed_total = 2,
+            .queue_full_total = 0,
+            .queue_timeout_total = 0,
+            .max_queue_wait_ticks = 5,
+            .max_pin_wait_ticks = 2,
+            .max_pin_duration_ticks = 4,
+        },
+        response_buf[0..],
+    );
+    try std.testing.expectEqual(PinTransition.none, result.pin_transition);
+
+    const json_output = response_buf[0..result.bytes_written];
+    var parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json_output, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    try std.testing.expect(root == .object);
+    const schema_version = root.object.get("schema_version") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(schema_version == .integer);
+    try std.testing.expectEqual(@as(i64, 1), schema_version.integer);
+
+    const memory_bytes = root.object.get("memory_bytes") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(memory_bytes == .object);
+    try std.testing.expect(memory_bytes.object.get("bootstrap") != null);
+    try std.testing.expect(memory_bytes.object.get("buffer_pool") != null);
+    try std.testing.expect(memory_bytes.object.get("wal_buffer") != null);
+    try std.testing.expect(memory_bytes.object.get("slot_arenas") != null);
+    const memory_total = memory_bytes.object.get("total") orelse return error.TestUnexpectedResult;
+    const memory_budget = memory_bytes.object.get("budget") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(memory_total == .integer);
+    try std.testing.expect(memory_budget == .integer);
+    try std.testing.expect(memory_total.integer <= memory_budget.integer);
+
+    const storage_bytes = root.object.get("storage_bytes") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(storage_bytes == .object);
+    try std.testing.expect(storage_bytes.object.get("data_pg2") != null);
+    try std.testing.expect(storage_bytes.object.get("wal_pg2") != null);
+    try std.testing.expect(storage_bytes.object.get("temp_pg2") != null);
+    try std.testing.expect(storage_bytes.object.get("total") != null);
+
+    const logical_pages = root.object.get("logical_pages") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(logical_pages == .object);
+    try std.testing.expect(logical_pages.object.get("data") != null);
+    try std.testing.expect(logical_pages.object.get("wal") != null);
+    try std.testing.expect(logical_pages.object.get("temp") != null);
+    try std.testing.expect(logical_pages.object.get("total") != null);
+
+    const ratios = root.object.get("ratios") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(ratios == .object);
+    try std.testing.expect(ratios.object.get("rss_over_budget") != null);
+    try std.testing.expect(ratios.object.get("memory_total_over_budget") != null);
+
+    const meta = root.object.get("meta") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(meta == .object);
+    const sampled = meta.object.get("sampled_at_unix_ns") orelse return error.TestUnexpectedResult;
+    try std.testing.expect(sampled == .integer);
+    try std.testing.expect(sampled.integer > 0);
 }
 
 test "session accept loop routes multiple connections through handleRequest" {

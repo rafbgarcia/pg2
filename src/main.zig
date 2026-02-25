@@ -39,6 +39,10 @@ pub fn main() !void {
         try handleLockCommand(stdout, argv.items[1..]);
         return;
     }
+    if (argv.items.len > 0 and std.mem.eql(u8, argv.items[0], "inspect")) {
+        try handleInspectCommand(stdout, argv.items[1..]);
+        return;
+    }
 
     var memory_bytes: usize = runtime_config.default_memory_bytes;
     var listen_addr: ?[]const u8 = null;
@@ -78,6 +82,7 @@ pub fn main() !void {
                 \\Usage:
                 \\  pg2 [--memory <bytes|MiB|GiB>] [--listen <host:port>] [--storage <dir>]
                 \\  pg2 lock inspect [--storage <dir>]
+                \\  pg2 inspect runtime --format json --server <host:port>
                 \\  --memory       Startup memory budget (default: 512MiB)
                 \\  --listen       Start server accept loop (Linux-only target)
                 \\  --storage      Runtime storage root (default: .pg2)
@@ -234,7 +239,11 @@ pub fn main() !void {
         };
 
         var catalog = catalog_mod.Catalog{};
-        var session = session_mod.Session.init(&runtime, &catalog);
+        var session = session_mod.Session.initWithStorageRoot(
+            &runtime,
+            &catalog,
+            &storage_root,
+        );
         var pool = pool_mod.ConnectionPool.initWithConfig(&runtime, .{
             .overload_policy = .queue,
         });
@@ -386,4 +395,97 @@ fn handleLockCommand(stdout: std.fs.File, args: []const []const u8) !void {
         return;
     };
     try stdout.writeAll(out);
+}
+
+fn handleInspectCommand(stdout: std.fs.File, args: []const []const u8) !void {
+    if (args.len == 0 or !std.mem.eql(u8, args[0], "runtime")) {
+        try stdout.writeAll("unknown inspect command\n");
+        return;
+    }
+
+    var format_json = false;
+    var server_addr: ?[]const u8 = null;
+    var index: usize = 1;
+    while (index < args.len) : (index += 1) {
+        const arg = args[index];
+        if (std.mem.eql(u8, arg, "--format")) {
+            index += 1;
+            if (index >= args.len) {
+                try stdout.writeAll("missing value for --format\n");
+                return;
+            }
+            format_json = std.mem.eql(u8, args[index], "json");
+            if (!format_json) {
+                try stdout.writeAll("inspect runtime failed: unsupported --format (use json)\n");
+                return;
+            }
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--server")) {
+            index += 1;
+            if (index >= args.len) {
+                try stdout.writeAll("missing value for --server\n");
+                return;
+            }
+            server_addr = args[index];
+            continue;
+        }
+        if (std.mem.eql(u8, arg, "--help")) {
+            try stdout.writeAll(
+                "Usage: pg2 inspect runtime --format json --server <host:port>\n",
+            );
+            return;
+        }
+        try stdout.writeAll("unknown argument\n");
+        return;
+    }
+
+    if (!format_json) {
+        try stdout.writeAll("inspect runtime failed: --format json is required\n");
+        return;
+    }
+    const endpoint = server_addr orelse {
+        try stdout.writeAll("inspect runtime failed: missing required --server <host:port>\n");
+        return;
+    };
+
+    const address = std.net.Address.parseIpAndPort(endpoint) catch {
+        try stdout.writeAll("inspect runtime failed: invalid --server address (expected host:port)\n");
+        return;
+    };
+    var stream = std.net.tcpConnectToAddress(address) catch {
+        try stdout.writeAll("inspect runtime failed: could not connect to server\n");
+        return;
+    };
+    defer stream.close();
+
+    stream.writeAll("inspect runtime --format json\n") catch {
+        try stdout.writeAll("inspect runtime failed: request write failed\n");
+        return;
+    };
+
+    var response_buf: [8192]u8 = undefined;
+    var response_len: usize = 0;
+    var byte: [1]u8 = undefined;
+    while (response_len < response_buf.len) {
+        const n = stream.read(byte[0..]) catch {
+            try stdout.writeAll("inspect runtime failed: response read failed\n");
+            return;
+        };
+        if (n == 0) break;
+        response_buf[response_len] = byte[0];
+        response_len += 1;
+        if (byte[0] == '\n') break;
+    }
+    if (response_len == 0) {
+        try stdout.writeAll("inspect runtime failed: empty response\n");
+        return;
+    }
+
+    const response = response_buf[0..response_len];
+    if (std.mem.startsWith(u8, response, "ERR ")) {
+        try stdout.writeAll("inspect runtime failed: server returned error\n");
+        return;
+    }
+    try stdout.writeAll(response);
 }

@@ -11,6 +11,12 @@
 - [ ] Phase 3 complete: memory/storage accounting boundaries are enforced and observable.
 - [ ] Phase 4 complete: crash/restart and durability gates proven under file-backed runtime.
 
+### Progress Notes
+
+- Implemented canonical client command surface for runtime diagnostics:
+  `pg2 inspect runtime --format json --server <host:port>` (`--server` required, fail-closed when missing).
+- Implemented server-side JSON schema contract emission (`schema_version = 1`) with memory/storage/logical/ratio/meta buckets.
+
 ## Objective
 
 Run server mode on real file-backed storage (not `SimulatedDisk`) so runtime memory is bounded by configured budgets and is not proportional to dataset size.
@@ -80,6 +86,18 @@ Implement this behind a single `Storage` adapter (`RoutingStorage`) that routes 
    - WAL page base `1_000_000`.
    - Temp region start `20_000_000`.
 7. No format-compatibility promises are required for this workfront (greenfield rule).
+8. Inspect runtime client contract for Phase 3 is locked:
+   - Command is client-side against a running server: `pg2 inspect runtime --format json --server <host:port>`.
+   - `--server` is required (no default endpoint in this workfront).
+   - Missing `--server` fails closed with explicit error.
+
+### 3) Routing Page-ID Translation Lock
+
+- Routing remains by global page-id bands, but each backing file uses local page ids:
+  - `data.pg2`: `local_page_id = global_page_id`
+  - `wal.pg2`: `local_page_id = global_page_id - 999_999`
+  - `temp.pg2`: `local_page_id = global_page_id - 20_000_000`
+- This avoids sparse giant offsets in WAL/temp files and preserves per-domain byte accounting semantics.
 
 ## Operational Contracts (Must Be Explicit)
 

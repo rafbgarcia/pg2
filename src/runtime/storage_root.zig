@@ -46,6 +46,15 @@ pub const LockMetadata = struct {
     }
 };
 
+pub const StorageUsage = struct {
+    data_pg2_bytes: u64,
+    wal_pg2_bytes: u64,
+    temp_pg2_bytes: u64,
+    data_pages: u64,
+    wal_pages: u64,
+    temp_pages: u64,
+};
+
 pub const RuntimeStorageRoot = struct {
     root_dir: std.fs.Dir,
     lock_file: std.fs.File,
@@ -114,6 +123,20 @@ pub const RuntimeStorageRoot = struct {
 
     pub fn storage(self: *RuntimeStorageRoot) Storage {
         return self.routing.storage();
+    }
+
+    pub fn snapshotUsage(self: *RuntimeStorageRoot) !StorageUsage {
+        const data_pg2_bytes = try self.data_file.sizeBytes();
+        const wal_pg2_bytes = try self.wal_file.sizeBytes();
+        const temp_pg2_bytes = try self.temp_file.sizeBytes();
+        return .{
+            .data_pg2_bytes = data_pg2_bytes,
+            .wal_pg2_bytes = wal_pg2_bytes,
+            .temp_pg2_bytes = temp_pg2_bytes,
+            .data_pages = data_pg2_bytes / io_mod.page_size,
+            .wal_pages = wal_pg2_bytes / io_mod.page_size,
+            .temp_pages = temp_pg2_bytes / io_mod.page_size,
+        };
     }
 
     pub fn inspectLockMetadata(storage_root: []const u8) InspectError!LockMetadata {
