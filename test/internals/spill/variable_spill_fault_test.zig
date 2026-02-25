@@ -1,7 +1,7 @@
 //! Internal fault-injection coverage for request-variable spill materialization.
 const std = @import("std");
 const pg2 = @import("pg2");
-const internal = @import("../../features/test_env_test.zig");
+const internal = @import("../../harness/internal_env.zig");
 const mutation_mod = pg2.executor.mutation;
 
 test "internal variable spill write fault fails closed deterministically" {

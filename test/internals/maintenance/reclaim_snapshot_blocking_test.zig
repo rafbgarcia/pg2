@@ -1,7 +1,7 @@
 //! Snapshot-pinning reclaim behavior checks.
 const std = @import("std");
 const pg2 = @import("pg2");
-const internal = @import("../../features/test_env_test.zig");
+const internal = @import("../../harness/internal_env.zig");
 
 test "internal long-lived snapshot blocks slot reclaim until snapshot closes" {
     var env: internal.FeatureEnv = undefined;

@@ -1,6 +1,6 @@
 //! Internal coverage for multi-column integer assignment in a single mutation.
 const std = @import("std");
-const feature = @import("../features/test_env_test.zig");
+const feature = @import("../harness/internal_env.zig");
 
 test "internal integer matrix insert accepts mixed boundary values in one statement" {
     var env: feature.FeatureEnv = undefined;

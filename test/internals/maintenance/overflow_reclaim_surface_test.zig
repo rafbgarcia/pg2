@@ -7,7 +7,7 @@ const std = @import("std");
 const pg2 = @import("pg2");
 const overflow_mod = pg2.storage.overflow;
 const wal_mod = pg2.storage.wal;
-const internal = @import("../../features/test_env_test.zig");
+const internal = @import("../../harness/internal_env.zig");
 
 test "internal overflow delete drains reclaim queue deterministically" {
     var env: internal.FeatureEnv = undefined;

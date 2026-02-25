@@ -11,7 +11,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const test_shared_mod = b.createModule(.{
-        .root_source_file = b.path("test/shared/test_env.zig"),
+        .root_source_file = b.path("test/harness/feature_env.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
@@ -42,8 +42,8 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run pg2");
     run_step.dependOn(&run_cmd.step);
 
-    // --- Unit + feature tests ---
-    const test_step = b.step("test", "Run unit and feature tests");
+    // --- Fast test lane (features + internals + sim) ---
+    const test_step = b.step("test", "Run fast lane tests (features, internals, sim)");
 
     const all_tests_mod = b.createModule(.{
         .root_source_file = b.path("test/all_tests_test.zig"),
@@ -79,7 +79,7 @@ pub fn build(b: *std.Build) void {
 
     // --- Simulation tests ---
     const sim_test_mod = b.createModule(.{
-        .root_source_file = b.path("test/internals/simulation/simulator_specs_test.zig"),
+        .root_source_file = b.path("test/sim/sim_specs_test.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{

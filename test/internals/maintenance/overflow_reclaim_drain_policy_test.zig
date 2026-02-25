@@ -6,7 +6,7 @@
 const std = @import("std");
 const pg2 = @import("pg2");
 const overflow_mod = pg2.storage.overflow;
-const internal = @import("../../features/test_env_test.zig");
+const internal = @import("../../harness/internal_env.zig");
 
 test "internal overflow multi-chain unlink drains one committed chain per successful write commit boundary" {
     var env: internal.FeatureEnv = undefined;

@@ -277,6 +277,7 @@ pub fn executeInsertWithDiagnostic(
     first_assignment_node: NodeIndex,
     diagnostic: ?*MutationDiagnostic,
 ) MutationError!RowId {
+    const empty_eval_ctx = filter_mod.EvalContext{};
     return executeInsertWithDiagnosticAndParameters(
         catalog,
         pool,
@@ -289,7 +290,7 @@ pub fn executeInsertWithDiagnostic(
         first_assignment_node,
         &.{},
         diagnostic,
-        null,
+        &empty_eval_ctx,
         null,
         null,
         null,

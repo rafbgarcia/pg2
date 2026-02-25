@@ -5,7 +5,7 @@
 //! still return correct nested results (degrade/spill first, no truncation).
 const std = @import("std");
 
-const internal = @import("../../features/test_env_test.zig");
+const internal = @import("../../harness/internal_env.zig");
 
 fn runNestedSpillAggregateHavingScenario(
     out_buf: []u8,

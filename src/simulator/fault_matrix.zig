@@ -117,7 +117,7 @@ fn runPageBitflipChecksum(seed: u64) !ScenarioOutcome {
     defer pool.deinit();
 
     const page_id = 10 + rand.uintLessThan(u64, 16);
-    const fill = rand.i32(u8);
+    const fill = rand.int(u8);
     const bitflip_offset = rand.uintLessThan(usize, 64);
     const mask: u8 = @as(u8, 1) << @as(u3, @intCast(rand.uintLessThan(u8, 7)));
 
@@ -901,7 +901,7 @@ fn runRollbackVisibilityEdge(seed: u64) !ScenarioOutcome {
     var prng = std.Random.DefaultPrng.init(seed);
     const rand = prng.random();
 
-    var tm = TxManager.init(std.testing.allocator);
+    var tm = try TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
     var undo_log = try UndoLog.init(std.testing.allocator, 128, 8 * 1024);
     defer undo_log.deinit();
@@ -1002,7 +1002,7 @@ fn runWalUndoCrashVisibilityConsistency(seed: u64) !ScenarioOutcome {
         defer wal.deinit();
         pool.wal = &wal;
 
-        var tm = TxManager.init(std.testing.allocator);
+        var tm = try TxManager.init(std.testing.allocator, .{});
         defer tm.deinit();
         var undo_log = try UndoLog.init(std.testing.allocator, 128, 8 * 1024);
         defer undo_log.deinit();
@@ -1119,7 +1119,7 @@ fn runWriteWriteInterleavingVisibility(seed: u64) !ScenarioOutcome {
     var prng = std.Random.DefaultPrng.init(seed);
     const rand = prng.random();
 
-    var tm = TxManager.init(std.testing.allocator);
+    var tm = try TxManager.init(std.testing.allocator, .{});
     defer tm.deinit();
     var undo_log = try UndoLog.init(std.testing.allocator, 128, 8 * 1024);
     defer undo_log.deinit();
@@ -1202,6 +1202,86 @@ const ci_short_seed_budget: usize = 28;
 const ci_long_seed_budget: usize = 14;
 const ci_short_seed_set = buildSeedSet(ci_short_seed_budget, 0xC1F00D55);
 const ci_long_seed_set = buildSeedSet(ci_long_seed_budget, 0xC1F00D66);
+
+/// Deterministic replay gate for short fault schedules.
+pub fn assertCiShortDeterminism() !void {
+    std.debug.assert(ci_short_seed_set.len == ci_short_seed_budget);
+    try expectReplayDeterministicAcrossSeeds(
+        "wal_partial_write_recovery",
+        ci_short_seed_set[0..],
+        runWalPartialWriteRecovery,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "page_bitflip_checksum",
+        ci_short_seed_set[0..],
+        runPageBitflipChecksum,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "wal_fsync_then_page_flush_gate",
+        ci_short_seed_set[0..],
+        runWalFsyncThenPageFlushGate,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "wal_multi_fault_interleaving",
+        ci_short_seed_set[0..],
+        runWalMultiFaultInterleaving,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "combined_wal_and_page_corruption",
+        ci_short_seed_set[0..],
+        runCombinedWalAndPageCorruption,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "buffer_pool_io_fault_interleaving",
+        ci_short_seed_set[0..],
+        runBufferPoolIoFaultInterleaving,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "btree_split_flush_crash_interleaving",
+        ci_short_seed_set[0..],
+        runBTreeSplitFlushCrashInterleaving,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "btree_split_protocol_crash_matrix",
+        ci_short_seed_set[0..],
+        runBTreeSplitProtocolCrashMatrix,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "rollback_visibility_edge",
+        ci_short_seed_set[0..],
+        runRollbackVisibilityEdge,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "wal_undo_crash_visibility_consistency",
+        ci_short_seed_set[0..],
+        runWalUndoCrashVisibilityConsistency,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "write_write_interleaving_visibility",
+        ci_short_seed_set[0..],
+        runWriteWriteInterleavingVisibility,
+    );
+}
+
+/// Deterministic replay gate for longer fault schedules.
+pub fn assertCiLongDeterminism() !void {
+    std.debug.assert(ci_long_seed_set.len == ci_long_seed_budget);
+    try expectReplayDeterministicAcrossSeeds(
+        "wal_repeated_crash_recovery_cycles",
+        ci_long_seed_set[0..],
+        runWalRepeatedCrashRecoveryCycles,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "long_wal_page_interleaving",
+        ci_long_seed_set[0..],
+        runLongWalPageInterleaving,
+    );
+    try expectReplayDeterministicAcrossSeeds(
+        "extended_wal_buffer_pool_cycles",
+        ci_long_seed_set[0..],
+        runExtendedWalBufferPoolCycles,
+    );
+}
 
 test "seeded schedule: WAL partial write recovery is replay-deterministic across seed set" {
     for (seed_set) |seed| {
@@ -1316,79 +1396,9 @@ test "seeded schedule: btree split protocol crash matrix is replay-deterministic
 }
 
 test "ci seed sweep: extended deterministic replay coverage for short schedules" {
-    std.debug.assert(ci_short_seed_set.len == ci_short_seed_budget);
-    try expectReplayDeterministicAcrossSeeds(
-        "wal_partial_write_recovery",
-        ci_short_seed_set[0..],
-        runWalPartialWriteRecovery,
-    );
-    try expectReplayDeterministicAcrossSeeds(
-        "page_bitflip_checksum",
-        ci_short_seed_set[0..],
-        runPageBitflipChecksum,
-    );
-    try expectReplayDeterministicAcrossSeeds(
-        "wal_fsync_then_page_flush_gate",
-        ci_short_seed_set[0..],
-        runWalFsyncThenPageFlushGate,
-    );
-    try expectReplayDeterministicAcrossSeeds(
-        "wal_multi_fault_interleaving",
-        ci_short_seed_set[0..],
-        runWalMultiFaultInterleaving,
-    );
-    try expectReplayDeterministicAcrossSeeds(
-        "combined_wal_and_page_corruption",
-        ci_short_seed_set[0..],
-        runCombinedWalAndPageCorruption,
-    );
-    try expectReplayDeterministicAcrossSeeds(
-        "buffer_pool_io_fault_interleaving",
-        ci_short_seed_set[0..],
-        runBufferPoolIoFaultInterleaving,
-    );
-    try expectReplayDeterministicAcrossSeeds(
-        "btree_split_flush_crash_interleaving",
-        ci_short_seed_set[0..],
-        runBTreeSplitFlushCrashInterleaving,
-    );
-    try expectReplayDeterministicAcrossSeeds(
-        "btree_split_protocol_crash_matrix",
-        ci_short_seed_set[0..],
-        runBTreeSplitProtocolCrashMatrix,
-    );
-    try expectReplayDeterministicAcrossSeeds(
-        "rollback_visibility_edge",
-        ci_short_seed_set[0..],
-        runRollbackVisibilityEdge,
-    );
-    try expectReplayDeterministicAcrossSeeds(
-        "wal_undo_crash_visibility_consistency",
-        ci_short_seed_set[0..],
-        runWalUndoCrashVisibilityConsistency,
-    );
-    try expectReplayDeterministicAcrossSeeds(
-        "write_write_interleaving_visibility",
-        ci_short_seed_set[0..],
-        runWriteWriteInterleavingVisibility,
-    );
+    try assertCiShortDeterminism();
 }
 
 test "ci seed sweep: bounded deterministic replay coverage for long schedules" {
-    std.debug.assert(ci_long_seed_set.len == ci_long_seed_budget);
-    try expectReplayDeterministicAcrossSeeds(
-        "wal_repeated_crash_recovery_cycles",
-        ci_long_seed_set[0..],
-        runWalRepeatedCrashRecoveryCycles,
-    );
-    try expectReplayDeterministicAcrossSeeds(
-        "long_wal_page_interleaving",
-        ci_long_seed_set[0..],
-        runLongWalPageInterleaving,
-    );
-    try expectReplayDeterministicAcrossSeeds(
-        "extended_wal_buffer_pool_cycles",
-        ci_long_seed_set[0..],
-        runExtendedWalBufferPoolCycles,
-    );
+    try assertCiLongDeterminism();
 }

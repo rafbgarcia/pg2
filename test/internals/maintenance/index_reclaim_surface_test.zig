@@ -1,6 +1,6 @@
 //! Internal checks for reclaim-time index cleanup wiring.
 const std = @import("std");
-const internal = @import("../../features/test_env_test.zig");
+const internal = @import("../../harness/internal_env.zig");
 
 test "internal delete enqueues index reclaim metadata and reports inspect counters" {
     var env: internal.FeatureEnv = undefined;

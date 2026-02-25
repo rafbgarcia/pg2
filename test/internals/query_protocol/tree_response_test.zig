@@ -1,6 +1,6 @@
 //! Internal coverage for tree-shaped query protocol serialization.
 const std = @import("std");
-const feature = @import("../../features/test_env_test.zig");
+const feature = @import("../../harness/internal_env.zig");
 
 test "internal query protocol emits shape once and grouped root rows" {
     var env: feature.FeatureEnv = undefined;

@@ -3,6 +3,18 @@
 ## Objective
 Ensure the new concurrency/self-tune/spill/advisor behavior is validated across deterministic memory and load profiles.
 
+## Foundation Status (2026-02-25)
+- Lane split established under `test/{features,internals,sim,stress}` with explicit harness ownership in `test/harness`.
+- Suite generation and discovery enforcement remain script-driven and deterministic.
+- Internal tests are required to import `test/harness/internal_env.zig` instead of feature wrapper paths.
+
+## Next Structural Gate
+### Scope
+- Migrate legacy inline `src/*` tests into explicit `test/unit` lane or wire an explicit `unit` build target with passing ownership.
+
+### Gate
+- Every active test used for release confidence must be discoverable from a `test/<lane>` suite root.
+
 ## Phase 1: Memory Profile Matrix
 ### Profiles
 1. `tiny_fail` (expected startup fail)

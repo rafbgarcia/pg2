@@ -10,7 +10,7 @@ const overflow_mod = pg2.storage.overflow;
 const page_mod = pg2.storage.page;
 const recovery_mod = pg2.storage.recovery;
 const wal_mod = pg2.storage.wal;
-const internal = @import("../../features/test_env_test.zig");
+const internal = @import("../../harness/internal_env.zig");
 
 test "internal overflow reclaim WAL replay restores page state after crash and is idempotent" {
     var env: internal.FeatureEnv = undefined;

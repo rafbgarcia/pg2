@@ -210,7 +210,7 @@ fn runFkRestrictCrashRestart(seed: u64) !ScenarioOutcome {
         var wal = Wal.init(std.testing.allocator, disk.storage());
         defer wal.deinit();
         pool.wal = &wal;
-        var tm = TxManager.init(std.testing.allocator);
+        var tm = try TxManager.init(std.testing.allocator, .{});
         defer tm.deinit();
         var undo_log = try UndoLog.init(std.testing.allocator, 1024, 64 * 1024);
         defer undo_log.deinit();
@@ -268,7 +268,7 @@ fn runFkRestrictCrashRestart(seed: u64) !ScenarioOutcome {
         defer wal.deinit();
         try wal.recover();
         pool.wal = &wal;
-        var tm = TxManager.init(std.testing.allocator);
+        var tm = try TxManager.init(std.testing.allocator, .{});
         defer tm.deinit();
         var undo_log = try UndoLog.init(std.testing.allocator, 1024, 64 * 1024);
         defer undo_log.deinit();
@@ -356,7 +356,7 @@ fn runFkCascadeCrashRestart(seed: u64) !ScenarioOutcome {
         var wal = Wal.init(std.testing.allocator, disk.storage());
         defer wal.deinit();
         pool.wal = &wal;
-        var tm = TxManager.init(std.testing.allocator);
+        var tm = try TxManager.init(std.testing.allocator, .{});
         defer tm.deinit();
         var undo_log = try UndoLog.init(std.testing.allocator, 1024, 64 * 1024);
         defer undo_log.deinit();
@@ -415,7 +415,7 @@ fn runFkCascadeCrashRestart(seed: u64) !ScenarioOutcome {
         defer wal.deinit();
         try wal.recover();
         pool.wal = &wal;
-        var tm = TxManager.init(std.testing.allocator);
+        var tm = try TxManager.init(std.testing.allocator, .{});
         defer tm.deinit();
         var undo_log = try UndoLog.init(std.testing.allocator, 1024, 64 * 1024);
         defer undo_log.deinit();
@@ -488,7 +488,7 @@ fn runFkUpdateSetNullCrashRestart(seed: u64) !ScenarioOutcome {
         var wal = Wal.init(std.testing.allocator, disk.storage());
         defer wal.deinit();
         pool.wal = &wal;
-        var tm = TxManager.init(std.testing.allocator);
+        var tm = try TxManager.init(std.testing.allocator, .{});
         defer tm.deinit();
         var undo_log = try UndoLog.init(std.testing.allocator, 1024, 64 * 1024);
         defer undo_log.deinit();
@@ -547,7 +547,7 @@ fn runFkUpdateSetNullCrashRestart(seed: u64) !ScenarioOutcome {
         defer wal.deinit();
         try wal.recover();
         pool.wal = &wal;
-        var tm = TxManager.init(std.testing.allocator);
+        var tm = try TxManager.init(std.testing.allocator, .{});
         defer tm.deinit();
         var undo_log = try UndoLog.init(std.testing.allocator, 1024, 64 * 1024);
         defer undo_log.deinit();
@@ -614,6 +614,27 @@ const seed_set = [_]u64{
     0xABAD1DEA,
     0x51515151,
 };
+
+/// Deterministic replay gate for foreign-key crash/restart schedules.
+pub fn assertSeedSetDeterminism() !void {
+    for (seed_set) |seed| {
+        const first = try runFkRestrictCrashRestart(seed);
+        const second = try runFkRestrictCrashRestart(seed);
+        try std.testing.expectEqual(first.signature, second.signature);
+    }
+
+    for (seed_set) |seed| {
+        const first = try runFkCascadeCrashRestart(seed);
+        const second = try runFkCascadeCrashRestart(seed);
+        try std.testing.expectEqual(first.signature, second.signature);
+    }
+
+    for (seed_set) |seed| {
+        const first = try runFkUpdateSetNullCrashRestart(seed);
+        const second = try runFkUpdateSetNullCrashRestart(seed);
+        try std.testing.expectEqual(first.signature, second.signature);
+    }
+}
 
 test "seeded schedule: FK restrict delete remains rejected across crash and restart deterministically" {
     for (seed_set) |seed| {

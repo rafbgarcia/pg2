@@ -1,7 +1,7 @@
 //! Crash/restart correctness checks for index reclaim WAL paths.
 const std = @import("std");
 const pg2 = @import("pg2");
-const internal = @import("../../features/test_env_test.zig");
+const internal = @import("../../harness/internal_env.zig");
 
 const buffer_pool_mod = pg2.storage.buffer_pool;
 const recovery_mod = pg2.storage.recovery;

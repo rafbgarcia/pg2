@@ -1,7 +1,7 @@
 //! Mixed reclaim workload coverage under pinned snapshots and interleaved reads.
 const std = @import("std");
 const pg2 = @import("pg2");
-const internal = @import("../../features/test_env_test.zig");
+const internal = @import("../../harness/internal_env.zig");
 
 const mutation_mod = pg2.executor.mutation;
 

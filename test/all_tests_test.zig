@@ -1,4 +1,4 @@
-//! Unified test root for unit, feature, and internals suites.
+//! Unified fast-lane test root for feature and internal suites.
 //!
 //! Responsibilities in this file:
 //! - Imports pg2 module graph so inline unit tests are discovered.

@@ -169,7 +169,7 @@ test "temp region exhaustion returns RegionExhausted" {
 }
 
 test "inspect includes spill stats at zero when no spilling occurs" {
-    const internal = @import("../../features/test_env_test.zig");
+    const internal = @import("../../harness/internal_env.zig");
 
     var env: internal.FeatureEnv = undefined;
     try env.init();
@@ -194,7 +194,7 @@ test "inspect includes spill stats at zero when no spilling occurs" {
 }
 
 test "inspect reports non-zero spill telemetry when spill is triggered" {
-    const internal = @import("../../features/test_env_test.zig");
+    const internal = @import("../../harness/internal_env.zig");
 
     // Use a tiny work-memory budget so that a few rows exceed it and trigger spill.
     var env: internal.FeatureEnv = undefined;
