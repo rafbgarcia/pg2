@@ -64,13 +64,17 @@ Implement this behind a single `Storage` adapter (`RoutingStorage`) that routes 
    - `temp.pg2`
    - `LOCK`
 4. Single-writer rule:
-   - Server startup creates `LOCK` with exclusive create.
-   - If `LOCK` already exists, startup fails closed with explicit message.
-   - No automatic stale-lock recovery in this workfront.
+   - Server startup opens/creates `LOCK` and acquires an OS-level exclusive file lock that stays held for process lifetime.
+   - If lock acquisition fails, startup fails closed with explicit message (`another writer is active for this storage root`).
+   - `LOCK` stores diagnostic metadata only (`pid`, `hostname`, `started_at_unix_ns`); ownership is determined by OS lock, not file existence.
+   - No PID-only stale-lock takeover logic is allowed.
+   - Portability lock: use `fcntl(F_SETLK/F_SETLKW)` byte-range exclusive lock on the `LOCK` file (cross-platform behavior target for macOS/Linux in Zig std.os bindings).
+   - Lock lifetime contract: lock is considered held while process keeps the lock fd open; lock release occurs on orderly shutdown close and on process death by OS fd cleanup.
 5. Page-id routing bands are fixed for this workfront:
    - `0..999_998` -> `data.pg2`
    - `999_999..19_999_999` -> `wal.pg2`
    - `20_000_000+` -> `temp.pg2`
+   - These bands are internal engine constants and are not user-configurable.
 6. Existing constants remain authoritative:
    - WAL metadata page id `999_999`.
    - WAL page base `1_000_000`.
@@ -79,7 +83,7 @@ Implement this behind a single `Storage` adapter (`RoutingStorage`) that routes 
 
 ## Operational Contracts (Must Be Explicit)
 
-1. Storage root contains a lock file; second writer process fails closed on startup.
+1. Storage root contains `LOCK`; second writer process fails closed when OS exclusive lock cannot be acquired.
 2. Startup creates missing files atomically; existing files open without truncation.
 3. `read(page_id)` on never-written page returns zero page.
 4. Writes are page-sized and page-aligned by abstraction contract.
@@ -87,7 +91,7 @@ Implement this behind a single `Storage` adapter (`RoutingStorage`) that routes 
 6. Data file fsync is not per-row commit; this workfront introduces no background checkpoint thread and keeps existing explicit flush paths only.
 7. `temp.pg2` is non-durable across restart; startup truncates temp domain.
 8. Any open/read/write/fsync failure maps to explicit storage boundary error and aborts request path.
-9. Startup order is fixed: acquire lock -> open/create files -> wire storage -> bootstrap runtime -> accept requests.
+9. Startup order is fixed: open/create `LOCK` -> acquire OS lock -> open/create data files -> wire storage -> bootstrap runtime -> accept requests.
 10. Shutdown order is fixed: stop accepting requests -> flush runtime state -> close files -> release lock.
 
 ## Phase 1: File-Backed Storage Core
@@ -119,6 +123,7 @@ Implement this behind a single `Storage` adapter (`RoutingStorage`) that routes 
 
 - Replace server-mode `SimulatedDisk` bootstrap path with file-backed storage.
 - Add storage root CLI/config (for example `--storage <dir>`) and document defaults.
+- Add lock diagnostics command for operators (`pg2 lock inspect --storage <dir>`) so ownership metadata is visible without manual file parsing.
 - Keep test harnesses/fault matrix on `SimulatedDisk` unless explicitly testing file backend.
 
 ### Gate
@@ -129,7 +134,8 @@ Implement this behind a single `Storage` adapter (`RoutingStorage`) that routes 
 - `--storage` path behavior is covered:
   - explicit directory works,
   - default `.pg2` path works,
-  - pre-existing `LOCK` fails startup.
+  - concurrent second writer fails startup while first holder is alive,
+  - stale `LOCK` file without held OS lock does not block startup.
 
 ## Phase 3: Memory Accounting and Guardrails
 
@@ -144,13 +150,30 @@ Implement this behind a single `Storage` adapter (`RoutingStorage`) that routes 
   - memory-resident bytes by major runtime bucket.
   - `data.pg2`, `wal.pg2`, `temp.pg2` byte sizes.
   - logical page counts by domain.
+- Lock inspect/diagnostic schema for machine consumption (`schema_version = 1`) with required fields:
+  - `memory_bytes`: `bootstrap`, `buffer_pool`, `wal_buffer`, `slot_arenas`, `total`, `budget`.
+  - `storage_bytes`: `data_pg2`, `wal_pg2`, `temp_pg2`, `total`.
+  - `logical_pages`: `data`, `wal`, `temp`, `total`.
+  - `ratios`: `rss_over_budget`, `memory_total_over_budget`.
+  - `meta`: `sampled_at_unix_ns`.
+- Canonical diagnostics surface for this workfront: `pg2 inspect runtime --format json` (machine contract source of truth).
+- Optional human-readable formatting may exist, but gate tests must only validate JSON contract keys/invariants.
 
 ### Gate
 
 - Under sustained insert workload, RSS remains <= `1.35 * --memory` after warm-up.
+- RSS verification method is fixed:
+  - workload inserts until at least `1_000_000` rows or `1 GiB` on-disk data (whichever happens first),
+  - warm-up window excluded from decision (first 10% of runtime),
+  - RSS sampled every second during steady state,
+  - pass criterion uses steady-state p95: `p95(rss_samples) <= 1.35 * --memory`.
+- RSS sampler source for gate automation:
+  - macOS: `ps -o rss= -p <pid>` (KiB units),
+  - Linux: `/proc/<pid>/status` `VmRSS` field (kB units).
+- Sampling conversion contract: normalize both sources to bytes before p95 computation.
 - Dataset growth increases on-disk bytes but does not scale runtime heap proportionally.
 - Inspect/diagnostic output clearly separates memory and storage growth vectors.
-- Gate workload minimum: at least 1,000,000 inserted rows or 1 GiB on-disk data (whichever occurs first).
+- Gate tests assert `schema_version = 1` diagnostics keys/invariants instead of formatted text output.
 
 ## Phase 4: Crash/Recovery Proof for File Backend
 
@@ -161,6 +184,10 @@ Implement this behind a single `Storage` adapter (`RoutingStorage`) that routes 
   - unflushed WAL does not appear committed after restart.
   - temp domain is reset on restart.
 - Verify WAL replay works with file-backed storage adapter and does not regress simulation semantics.
+- Use deterministic crash injection around durability boundaries via storage fault hooks:
+  - inject failures at `wal.write`, `wal.fsync`, and WAL metadata/envelope persistence boundaries,
+  - run boundary matrix by deterministic operation index,
+  - restart after each injected crash and assert durability/visibility invariants.
 
 ### Gate
 
@@ -171,6 +198,7 @@ Implement this behind a single `Storage` adapter (`RoutingStorage`) that routes 
   - committed-before-fsync-policy boundary survives,
   - not-durable-before-fsync-policy boundary is not visible as committed,
   - `temp.pg2` is truncated/reset on restart.
+- Crash matrix must be deterministic (seeded, no wall-clock timing races).
 
 ## Dependencies and Cross-Workfront Notes
 
