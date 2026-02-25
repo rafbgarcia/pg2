@@ -10,6 +10,14 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    const test_shared_mod = b.createModule(.{
+        .root_source_file = b.path("test/shared/test_env.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "pg2", .module = pg2_mod },
+        },
+    });
 
     // --- Main executable ---
     const exe_mod = b.createModule(.{
@@ -43,6 +51,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "pg2", .module = pg2_mod },
+            .{ .name = "test_shared", .module = test_shared_mod },
         },
     });
     const t = b.addTest(.{
@@ -58,6 +67,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .imports = &.{
             .{ .name = "pg2", .module = pg2_mod },
+            .{ .name = "test_shared", .module = test_shared_mod },
         },
     });
     const stress_t = b.addTest(.{

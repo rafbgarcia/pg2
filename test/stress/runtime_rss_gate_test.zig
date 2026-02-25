@@ -16,7 +16,6 @@ const schema_loader_mod = pg2.catalog.schema_loader;
 const parser_mod = pg2.parser.parse;
 const tokenizer_mod = pg2.parser.tokenizer;
 const heap_mod = pg2.storage.heap;
-const btree_mod = pg2.storage.btree;
 const session_mod = pg2.server.session;
 const pool_mod = pg2.server.pool;
 
@@ -72,25 +71,40 @@ fn applySchemaAndInit(runtime: *BootstrappedRuntime, catalog: *Catalog) !void {
         runtime.pool.unpin(page_id, true);
     }
 
+    // Keep schema/index setup semantics aligned with shared test harness:
+    // add missing PK metadata if needed, then initialize all unique indexes.
     model_id = 0;
     while (model_id < catalog.model_count) : (model_id += 1) {
         const pk_col = catalog_mod.findPrimaryKeyColumnId(catalog, model_id) orelse continue;
-        const btree_start_page: u32 = 10_000 + @as(u32, model_id) * 1000;
-        const btree = btree_mod.BTree.init(
-            &runtime.pool,
-            &runtime.wal,
-            @as(u64, btree_start_page),
-        ) catch continue;
+        const model = &catalog.models[model_id];
 
-        const idx_id = catalog.addIndex(
-            model_id,
-            "pk",
-            &[_]catalog_mod.ColumnId{pk_col},
-            true,
-        ) catch continue;
-        catalog.models[model_id].indexes[idx_id].btree_root_page_id = btree_start_page;
-        catalog.models[model_id].indexes[idx_id].btree_next_page_id = @intCast(btree.next_page_id);
+        var has_pk_index = false;
+        var ii: u16 = 0;
+        while (ii < model.index_count) : (ii += 1) {
+            if (model.indexes[ii].is_unique and
+                model.indexes[ii].column_count == 1 and
+                model.indexes[ii].column_ids[0] == pk_col)
+            {
+                has_pk_index = true;
+                break;
+            }
+        }
+        if (!has_pk_index) {
+            _ = catalog.addIndex(
+                model_id,
+                "pk",
+                &[_]catalog_mod.ColumnId{pk_col},
+                true,
+            ) catch continue;
+        }
     }
+
+    var next_index_page_id: u32 = 10_000;
+    try catalog.initializeIndexTrees(
+        &runtime.pool,
+        &runtime.wal,
+        &next_index_page_id,
+    );
 }
 
 fn runBatchInsert(
