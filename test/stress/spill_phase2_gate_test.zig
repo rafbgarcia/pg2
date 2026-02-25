@@ -339,10 +339,11 @@ test "select all on table with more than 4096 rows returns complete results" {
 }
 
 test "query exceeding string arena completes via arena safety valve" {
-    // 1 MB arena: a single scan batch of 4096 rows × 250-byte strings fills
-    // ~97.7% of the arena, leaving < 10% free. The safety valve force-flushes
-    // the collector's hot batch and resets the arena before the second chunk,
-    // preventing an OutOfMemory failure during string materialization.
+    // 1 MB per-slot query arena is split by RequestState: 75% statement strings,
+    // 25% variable arena. With 180-byte strings, one scan chunk (4096 rows)
+    // consumes ~94% of the statement arena, leaving < 10% free. The safety
+    // valve force-flushes the collector's hot batch and resets the arena before
+    // the second chunk, preventing OutOfMemory during string materialization.
     var env: FeatureEnv = undefined;
     try env.initWithConfig(.{
         .max_query_slots = 1,
@@ -359,9 +360,9 @@ test "query exceeding string arena completes via arena safety valve" {
         \\}
     );
 
-    const padding = "A" ** 250;
+    const padding = "A" ** 180;
 
-    // Insert 4097 rows (2 scan chunks) with 250-byte strings.
+    // Insert 4097 rows (2 scan chunks) with 180-byte strings.
     // Mark the first 4 rows with flag=true, rest with flag=false.
     try insertArenaRows(executor, spill_boundary_row_count, padding);
 
