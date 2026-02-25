@@ -30,9 +30,9 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
 ## Status Snapshot (2026-02-25)
 
 ### Phase Status
-- **Phase 1 (Design Investigation and Decision):** partial
-  - High-level direction exists and implementation decisions have started landing.
-  - Still missing a formalized, explicit decision record in this doc for strategy tradeoffs + final invariant text.
+- **Phase 1 (Design Investigation and Decision):** complete
+  - Explicit strategy decision and rejected alternatives are now locked in this document.
+  - Final invariant text is formally stated and used as hard-stop criteria.
 - **Phase 2 (Heap Slot Reclamation):** mostly complete
   - Implemented and covered by tests:
     - reclaim queue + tx lifecycle hooks
@@ -73,30 +73,23 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
 
 This section is the handoff contract for a fresh Codex session. Execute in order.
 
-1. **Phase 1 closeout: finalize decision record and invariants**
-   - Write an explicit strategy decision subsection in this document:
-     - selected reclamation strategy and rejected alternatives;
-     - rationale tied to pg2 constraints (determinism, no background threads, bounded memory, WAL recovery);
-     - final safety invariant text (copy from `Non-Negotiable Invariants` below).
-   - Gate: document contains final design decision + invariant text, no placeholders.
-
-2. **Phase 4 completion: index dead-entry cleanup parity**
+1. **Phase 4 completion: index dead-entry cleanup parity**
    - Add reclaim-time index cleanup hook for rows becoming reclaimable.
    - Add opportunistic dead-entry deletion in generic index point/range scan paths (not only uniqueness checks).
    - Keep behavior MVCC-safe and idempotent under retries/replay.
    - Gate: dead index entries do not grow unbounded under churn; lookup/range correctness preserved.
 
-3. **Phase 5 completion: long-lived snapshot + observability hardening**
+2. **Phase 5 completion: long-lived snapshot + observability hardening**
    - Add targeted stress suite for reclaim blocked by long-lived snapshots, then resumed reclaim after snapshot close.
    - Add observability fields for pinned-by-snapshot reclaim pressure and progress (queue depth alone is insufficient).
    - Gate: deterministic tests prove reclaim is blocked only when required and resumes correctly.
 
-4. **Crash/recovery completion matrix**
+3. **Crash/recovery completion matrix**
    - Add focused crash/replay scenarios for `reclaim_slot`, overflow free-list reuse, and index cleanup paths.
    - Verify idempotent replay and post-restart consistency of heap/overflow/index surfaces.
    - Gate: replay-focused matrix passes with deterministic results.
 
-5. **Final full-gate validation**
+4. **Final full-gate validation**
    - Run `zig build test --summary all`.
    - Ensure this workfront’s phases are updated from partial to complete only when all phase gates are met.
    - Gate: full suite green + all phase gate checkboxes satisfied in this doc.
@@ -173,6 +166,30 @@ Add or extend tests to cover all items below before marking full completion:
 - Reclamation of catalog/schema pages. Only user data pages are in scope.
 
 ## Phase 1: Design Investigation and Decision
+
+### Final Strategy Decision (Locked 2026-02-25)
+- **Selected strategy:** hybrid inline reclamation:
+  - heap slot reclaim gated by `oldest_active`;
+  - overflow reclaim via persisted LIFO free-list allocator;
+  - reclaim-time index cleanup plus opt-in opportunistic scan cleanup hooks for write contexts;
+  - no background workers.
+- **Rejected alternatives:**
+  - background VACUUM (violates no-background-thread constraint);
+  - scan-only opportunistic cleanup (insufficient bounded-growth guarantees);
+  - WAL-only allocator reconstruction without persisted allocator metadata (unsafe once WAL is truncated).
+- **Allocator contract (locked):**
+  - persisted allocator metadata stores `free_list_head` + `next_page_id`;
+  - free-list updates are WAL-logged (`overflow_free_list_push/pop`) and replayed deterministically;
+  - read-only scan paths remain side-effect free.
+- **Observability contract (locked):**
+  - tx/counter based only; no wall-clock age in correctness paths/tests.
+
+### Final Safety Invariants
+1. **Snapshot safety:** No reclamation may free data that could be visible to any active snapshot.
+2. **Abort correctness:** Aborted mutations must never become visible, regardless of undo truncation timing.
+3. **WAL recoverability:** Every physical reclamation state transition must be recoverable and replay-idempotent.
+4. **Determinism:** Reclaim behavior must be deterministic under simulation replay (no time-based or nondeterministic scheduling).
+5. **Bounded operation:** Reclaim paths must honor bounded/static allocation contracts (no unbounded growth path introduced silently).
 
 ### Design Decisions
 - **Survey the design space.** Document tradeoffs for each reclamation strategy in the context of pg2's constraints (no background threads, deterministic simulation, undo-log MVCC, snapshot isolation):
