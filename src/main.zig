@@ -26,10 +26,10 @@ pub fn main() !void {
     var args = std.process.args();
     _ = args.skip(); // program name
 
-    var argv = std.ArrayList([]const u8).init(allocator);
-    defer argv.deinit();
+    var argv = std.ArrayList([]const u8){};
+    defer argv.deinit(allocator);
     while (args.next()) |arg| {
-        argv.append(arg) catch {
+        argv.append(allocator, arg) catch {
             try stdout.writeAll("startup failed: argument parsing allocation failed\n");
             return;
         };
