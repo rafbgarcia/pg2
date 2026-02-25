@@ -7,16 +7,15 @@ Each workfront has phased gates so fresh Codex sessions can resume safely.
 
 Suggested implementation order.
 
-| Order | Workfront                                                                         | Why This Position                                                                                       |
-| ----- | --------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| 6     | `docs/workfronts/14_runtime_storage_backend_workfront.md` (complete) | Enforces real file-backed runtime boundaries so memory limits are production-real, not simulation-only. |
-| 7     | `docs/workfronts/06_variables_and_multi_statement_workfront.md`                   | User-facing execution semantics come after reclamation/storage foundations are reliable.                |
-| 8     | `docs/workfronts/07_adaptive_planning_workfront.md`                               | Planner policy hardening after multi-statement semantics are in place and measurable.                   |
-| 9     | `docs/workfronts/04_advisor_observability_workfront.md`                           | Advisor quality depends on stable metrics emitted by execution/planning/runtime paths above.            |
-| 10    | `docs/workfronts/08_expression_language_v1_workfront.md`                          | Expression work is mostly parity/diagnostic closeout and is safer after core runtime contracts settle.  |
-| 11    | `docs/workfronts/05_test_matrix_workfront.md`                                     | Cross-profile reliability matrix should validate the consolidated behavior from prior workfronts.       |
-| 14    | `docs/workfronts/10_iterator_execution_model_workfront.md` (deferred)             | Structural executor rewrite; only start when subqueries/CTEs/window functions become active priorities. |
-| 15    | `docs/workfronts/15_module_decomposition_drift_workfront.md` (maintenance-only)   | Tracks post-completion drift from decomposition gates without re-opening original extraction history.   |
+| Order | Workfront                                                                       | Why This Position                                                                                       |
+| ----- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| 7     | `docs/workfronts/06_variables_and_multi_statement_workfront.md`                 | User-facing execution semantics come after reclamation/storage foundations are reliable.                |
+| 8     | `docs/workfronts/07_adaptive_planning_workfront.md`                             | Planner policy hardening after multi-statement semantics are in place and measurable.                   |
+| 9     | `docs/workfronts/04_advisor_observability_workfront.md`                         | Advisor quality depends on stable metrics emitted by execution/planning/runtime paths above.            |
+| 10    | `docs/workfronts/08_expression_language_v1_workfront.md`                        | Expression work is mostly parity/diagnostic closeout and is safer after core runtime contracts settle.  |
+| 11    | `docs/workfronts/05_test_matrix_workfront.md`                                   | Cross-profile reliability matrix should validate the consolidated behavior from prior workfronts.       |
+| 14    | `docs/workfronts/10_iterator_execution_model_workfront.md` (deferred)           | Structural executor rewrite; only start when subqueries/CTEs/window functions become active priorities. |
+| 15    | `docs/workfronts/15_module_decomposition_drift_workfront.md` (maintenance-only) | Tracks post-completion drift from decomposition gates without re-opening original extraction history.   |
 
 ## 1.0.0 Release Hardening (Post-Sequence)
 

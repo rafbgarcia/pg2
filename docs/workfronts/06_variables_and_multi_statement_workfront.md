@@ -4,13 +4,26 @@
 Support request-scoped variables (`let`) and multiple statements in a single request for reads and mutations (`select`, `insert`, `update`, `delete`) with deterministic, production-safe semantics.
 
 ## Why
-- Current parser accepts multiple statements and `let`, but executor only runs the first pipeline and ignores `let`.
+- Current parser accepts multiple statements and `let`; this workfront completes `let` execution semantics, variable usage, and final-expression return behavior.
 - Real workflows need query chaining (for example: derive ids, then update/delete using those ids).
 - Request-level atomicity must be explicit and testable before this can be safely promoted.
 
 ## Dependencies
 - Hard dependency: `docs/workfronts/03_degrade_spill_workfront.md` is treated as complete for this workfront's execution semantics.
 - Assumption: spill/temp storage paths are available for deterministic variable materialization beyond in-memory thresholds.
+
+## Implementation Status (2026-02-25)
+- Implemented:
+  - Top-level expression statements (`expr_stmt`) and object literals for arbitrary final return payloads.
+  - Request-scoped `let` execution for scalar and single-column list materialization.
+  - Variable resolution in read and mutation expression paths (including `in(field, var_list)`).
+  - Deterministic ambiguous identifier fail-closed behavior (column vs variable).
+  - Deterministic statement-indexed errors for multi-statement requests.
+  - Final-statement-only response contract with expression payload serialization.
+  - Feature coverage added under `test/features/variables_and_multi_statement/`.
+- Remaining blocker:
+  - Spill-backed persistence for variable materialization across statements is not yet implemented.
+  - Current implementation is bounded in-memory for variable materialization; this is deterministic, but does not yet satisfy full Phase 5 spill behavior.
 
 ## Proposed Query Shape
 ```pg2
@@ -79,12 +92,33 @@ Additional confirmed decisions (2026-02-21):
 Additional confirmed decisions (2026-02-23):
 - If an identifier could resolve to both a column and a `let` variable in the same expression context, fail closed with an explicit ambiguous-identifier error (no precedence fallback).
 
+Additional confirmed decisions (2026-02-25):
+- Top-level statements support arbitrary return expressions (not only model-started pipelines); final statement can return scalar/object/list payloads.
+- `let` variables are materialized as scalar or single-column scalar-list values for cross-statement use; no persisted rowset-handle variable kind is exposed across statement boundaries.
+- Variable memory behavior uses deterministic thresholds with spill-backed materialization as the default over hard-fail-on-size.
+- Multi-statement mutation counters remain aggregated across statements, while response rows remain final-statement-only.
+- Error payloads prioritize immediate user comprehension with a clear `message` plus deterministic context (`statement_index`, `phase`, `code`, `path`, `line`, `col` when available).
+
+### Error Contract (clarity-first)
+Canonical shape:
+`ERR query: message="<human-readable explanation>" statement_index=<n> phase=<parse|semantic|execution|mutation> code=<Code> path=<context> line=<line> col=<col>`
+
+Guidelines:
+- `message` must stand alone and explain exactly what is wrong using user source terms.
+- Include a compact source snippet for semantic/execution errors when available.
+- Keep machine-stable fields deterministic for tests (`statement_index`, `phase`, `code`, `path`, `line`, `col`).
+
+Examples:
+- `ERR query: message="\"a\" is undefined in \"where(a == 1)\"; define it with let before use" statement_index=1 phase=semantic code=UndefinedVariable path=where line=2 col=21`
+- `ERR query: message="\"id\" is ambiguous in \"where(id == 1)\"; it matches both column and let variable" statement_index=2 phase=semantic code=AmbiguousIdentifier path=where line=3 col=15`
+- `ERR query: message="variable \"user_ids\" has type list<string> but in(id, user_ids) expects list<i64>" statement_index=3 phase=semantic code=VariableTypeMismatch path=where.in line=4 col=24`
+
 ## Phase 1: Language and AST Contracts
 ### Scope
 - Define variable value kinds:
   - scalar (`u64`, `i64`, `bool`, `string`, `timestamp`, `null`)
   - list of scalars (single-typed, nullable policy explicit)
-  - rowset handle (internal only; must be materialized before cross-statement use)
+  - transient rowset (internal, statement-local only; must be materialized to scalar/list before binding into request-scope variable store)
 - Define statement boundary rules and diagnostics.
 - Add explicit parse/semantic errors for:
   - undefined variable
@@ -95,6 +129,7 @@ Additional confirmed decisions (2026-02-23):
 
 ### Gate
 - Parser/semantic tests prove deterministic diagnostics for all invalid forms.
+- Status: Complete (parser/AST changes and tests merged).
 
 ## Phase 2: Execution Engine for Statement Lists
 ### Scope
@@ -108,6 +143,7 @@ Additional confirmed decisions (2026-02-23):
 - Multi-statement read-only request executes all statements in order.
 - `let` values can be consumed by later statements in the same request.
 - Read-your-own-writes is deterministic across statement boundaries.
+- Status: Complete.
 
 ## Phase 3: Mutation Semantics and Transaction Guarantees
 ### Scope
@@ -121,16 +157,18 @@ Additional confirmed decisions (2026-02-23):
 ### Gate
 - Failure in statement N rolls back mutations from statements `1..N-1`.
 - Deterministic tests for update/delete chains using variable-driven `in` filters.
+- Status: Complete.
 
 ## Phase 4: Protocol and Result Shaping
 ### Scope
 - Decide and implement response format:
   - final statement result only (confirmed default)
-- Add statement index + phase + error code to serialized errors.
+- Add clarity-first message + deterministic metadata (`statement_index`, `phase`, `code`, `path`, `line`, `col`) to serialized errors.
 - Preserve backwards-compatible one-statement output shape where possible.
 
 ### Gate
 - Session tests prove stable wire output for success and failure across multi-statement requests.
+- Status: Complete.
 
 ## Phase 5: Variable Materialization Under Spill-Ready Runtime
 ### Scope
@@ -143,11 +181,12 @@ Additional confirmed decisions (2026-02-23):
   - bounded in-memory behavior
   - deterministic spill behavior for variable materialization
   - deterministic hard-failure behavior for spill storage faults
+- Status: Incomplete (spill-backed variable materialization across statement boundaries still pending).
 
 ## Phase 6: Feature Test Matrix (One File Per Capability)
 Create dedicated files under `test/features/variables_and_multi_statement/`:
-1. `let_scalar_test.zig`
-2. `let_list_from_query_test.zig`
+1. `let_test.zig`
+2. `let_list_from_query_test.zig` (covered in `let_test.zig`)
 3. `multi_statement_read_chain_test.zig`
 4. `multi_statement_mutation_chain_test.zig`
 5. `multi_statement_atomic_rollback_test.zig`
@@ -159,6 +198,19 @@ Create dedicated files under `test/features/variables_and_multi_statement/`:
 11. `shared_snapshot_read_your_writes_test.zig`
 12. `variable_memory_boundaries_test.zig`
 
+Current coverage implemented:
+- `let_test.zig`
+- `multi_statement_read_chain_test.zig`
+- `multi_statement_mutation_chain_test.zig`
+- `multi_statement_atomic_rollback_test.zig`
+- `undefined_variable_test.zig`
+- `duplicate_variable_test.zig`
+- `invalid_variable_type_usage_test.zig`
+- `statement_error_index_test.zig`
+- `response_shape_multi_statement_test.zig`
+- `shared_snapshot_read_your_writes_test.zig`
+
 ### Gate
 - Feature suite passes under `zig build test`.
 - At least one deterministic fault/recovery scenario added under `test/internals/` for rollback correctness.
+- Status: Feature suite passes; internals fault scenario specific to variable spill materialization still pending with Phase 5.
