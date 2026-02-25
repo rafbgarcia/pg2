@@ -52,6 +52,7 @@ pub const OverflowError = error{
 pub const OverflowAllocatorError = error{
     InvalidRegion,
     RegionExhausted,
+    InvalidPageId,
 };
 
 pub const OverflowReclaimError = error{
@@ -87,7 +88,10 @@ pub const ReclaimQueueEntry = struct {
 pub const PageIdAllocator = struct {
     region_start_page_id: u64 = default_region_start_page_id,
     region_end_page_id: u64 = default_region_end_page_id, // exclusive
+    metadata_page_id: u64 = default_region_start_page_id - 1,
     next_page_id: u64 = default_region_start_page_id,
+    free_list_head: u64 = 0,
+    metadata_loaded: bool = false,
 
     pub fn initDefault() PageIdAllocator {
         return .{};
@@ -97,17 +101,20 @@ pub const PageIdAllocator = struct {
         start_page_id: u64,
         page_count: u64,
     ) OverflowAllocatorError!PageIdAllocator {
-        if (page_count == 0) return error.InvalidRegion;
+        if (page_count == 0 or start_page_id == 0) return error.InvalidRegion;
         const end_page_id = std.math.add(u64, start_page_id, page_count) catch
             return error.InvalidRegion;
         return .{
             .region_start_page_id = start_page_id,
             .region_end_page_id = end_page_id,
+            .metadata_page_id = start_page_id - 1,
             .next_page_id = start_page_id,
+            .free_list_head = 0,
+            .metadata_loaded = false,
         };
     }
 
-    pub fn allocate(self: *PageIdAllocator) OverflowAllocatorError!u64 {
+    pub fn allocateFresh(self: *PageIdAllocator) OverflowAllocatorError!u64 {
         if (self.next_page_id >= self.region_end_page_id) {
             return error.RegionExhausted;
         }
@@ -116,12 +123,64 @@ pub const PageIdAllocator = struct {
         return page_id;
     }
 
+    pub fn markMetadataLoaded(self: *PageIdAllocator) void {
+        self.metadata_loaded = true;
+    }
+
+    pub fn metadataPageId(self: *const PageIdAllocator) u64 {
+        return self.metadata_page_id;
+    }
+
+    pub fn hasFreePages(self: *const PageIdAllocator) bool {
+        return self.free_list_head != 0;
+    }
+
+    pub fn freeListHead(self: *const PageIdAllocator) u64 {
+        return self.free_list_head;
+    }
+
+    pub fn setAllocatorState(
+        self: *PageIdAllocator,
+        free_list_head: u64,
+        next_page_id: u64,
+    ) OverflowAllocatorError!void {
+        if (next_page_id < self.firstAllocatablePageId() or next_page_id > self.region_end_page_id) {
+            return error.InvalidRegion;
+        }
+        if (free_list_head != 0 and !self.ownsPageId(free_list_head)) {
+            return error.InvalidPageId;
+        }
+        self.free_list_head = free_list_head;
+        self.next_page_id = next_page_id;
+        self.metadata_loaded = true;
+    }
+
+    pub fn popFreeListHead(self: *PageIdAllocator, new_head: u64) OverflowAllocatorError!u64 {
+        const head = self.free_list_head;
+        if (head == 0) return error.RegionExhausted;
+        if (!self.ownsPageId(head)) return error.InvalidPageId;
+        if (new_head != 0 and !self.ownsPageId(new_head)) return error.InvalidPageId;
+        self.free_list_head = new_head;
+        return head;
+    }
+
+    pub fn pushFreeListHead(self: *PageIdAllocator, page_id: u64) OverflowAllocatorError!u64 {
+        if (!self.ownsPageId(page_id)) return error.InvalidPageId;
+        const prev_head = self.free_list_head;
+        self.free_list_head = page_id;
+        return prev_head;
+    }
+
     pub fn ownsPageId(self: *const PageIdAllocator, page_id: u64) bool {
-        return page_id >= self.region_start_page_id and page_id < self.region_end_page_id;
+        return page_id >= self.firstAllocatablePageId() and page_id < self.region_end_page_id;
+    }
+
+    pub fn firstAllocatablePageId(self: *const PageIdAllocator) u64 {
+        return self.region_start_page_id;
     }
 
     pub fn capacity(self: *const PageIdAllocator) u64 {
-        return self.region_end_page_id - self.region_start_page_id;
+        return self.region_end_page_id - self.firstAllocatablePageId();
     }
 };
 
@@ -380,13 +439,35 @@ test "overflow read rejects invalid format magic" {
 
 test "page-id allocator allocates monotonically and exhausts fail-closed" {
     var allocator = try PageIdAllocator.initWithBounds(200, 2);
-    try std.testing.expectEqual(@as(u64, 200), try allocator.allocate());
-    try std.testing.expectEqual(@as(u64, 201), try allocator.allocate());
-    try std.testing.expectError(error.RegionExhausted, allocator.allocate());
+    try std.testing.expectEqual(@as(u64, 200), try allocator.allocateFresh());
+    try std.testing.expectEqual(@as(u64, 201), try allocator.allocateFresh());
+    try std.testing.expectError(error.RegionExhausted, allocator.allocateFresh());
+}
+
+test "page-id allocator tracks free-list head in LIFO order" {
+    var allocator = try PageIdAllocator.initWithBounds(300, 5);
+    const a = try allocator.allocateFresh();
+    const b = try allocator.allocateFresh();
+    const c = try allocator.allocateFresh();
+    try std.testing.expectEqual(@as(u64, 300), a);
+    try std.testing.expectEqual(@as(u64, 301), b);
+    try std.testing.expectEqual(@as(u64, 302), c);
+
+    const prev_a = try allocator.pushFreeListHead(a);
+    try std.testing.expectEqual(@as(u64, 0), prev_a);
+    const prev_b = try allocator.pushFreeListHead(b);
+    try std.testing.expectEqual(a, prev_b);
+
+    const head_1 = try allocator.popFreeListHead(a);
+    try std.testing.expectEqual(b, head_1);
+    const head_2 = try allocator.popFreeListHead(0);
+    try std.testing.expectEqual(a, head_2);
+    try std.testing.expectError(error.RegionExhausted, allocator.popFreeListHead(0));
 }
 
 test "page-id allocator rejects invalid region" {
     try std.testing.expectError(error.InvalidRegion, PageIdAllocator.initWithBounds(10, 0));
+    try std.testing.expectError(error.InvalidRegion, PageIdAllocator.initWithBounds(0, 1));
 }
 
 test "reclaim queue is FIFO and rejects duplicates" {

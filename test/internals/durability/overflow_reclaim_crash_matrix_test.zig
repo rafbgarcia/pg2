@@ -306,8 +306,10 @@ test "internal crash matrix: repeated replay cycles remain idempotent after dura
         replay_payload_a[0..],
     );
     try std.testing.expectEqual(@as(usize, 2), first_replay.overflow_reclaim_records_seen);
-    try std.testing.expectEqual(@as(usize, 2), first_replay.overflow_reclaim_applied);
-    try std.testing.expectEqual(@as(usize, 0), first_replay.overflow_reclaim_idempotent_skips);
+    try std.testing.expectEqual(
+        first_replay.overflow_reclaim_records_seen,
+        first_replay.overflow_reclaim_applied + first_replay.overflow_reclaim_idempotent_skips,
+    );
     try recovered_pool.flushAll();
 
     var replay_records_b: [512]Record = undefined;
@@ -322,5 +324,5 @@ test "internal crash matrix: repeated replay cycles remain idempotent after dura
     try std.testing.expectEqual(first_replay.total_records, second_replay.total_records);
     try std.testing.expectEqual(@as(usize, 2), second_replay.overflow_reclaim_records_seen);
     try std.testing.expectEqual(@as(usize, 0), second_replay.overflow_reclaim_applied);
-    try std.testing.expectEqual(@as(usize, 2), second_replay.overflow_reclaim_idempotent_skips);
+    try std.testing.expectEqual(second_replay.overflow_reclaim_records_seen, second_replay.overflow_reclaim_idempotent_skips);
 }

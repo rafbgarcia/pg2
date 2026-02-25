@@ -35,6 +35,9 @@ const OverflowPageIdAllocator = overflow_mod.PageIdAllocator;
 const Catalog = catalog_mod.Catalog;
 const TxId = tx_mod.TxId;
 
+const allocator_meta_magic: u16 = 0x4F46; // "OF"
+const allocator_meta_version: u8 = 1;
+
 pub const OverflowChainRecordMeta = struct {
     first_page_id: u64,
     page_count: u32,
@@ -109,9 +112,14 @@ pub fn writeOverflowChain(
     std.debug.assert(payload.len > overflow_mod.string_inline_threshold_bytes);
     const chunk_capacity = OverflowPage.max_payload_len();
     std.debug.assert(chunk_capacity > 0);
+    try ensureOverflowAllocatorMetadata(pool, overflow_allocator);
 
-    const first_page_id = overflow_allocator.allocate() catch |e|
-        return mapOverflowAllocatorError(e);
+    const first_page_id = try allocateOverflowPage(
+        pool,
+        wal,
+        tx_id,
+        overflow_allocator,
+    );
     var page_count: u32 = 0;
 
     var payload_offset: usize = 0;
@@ -122,7 +130,12 @@ pub fn writeOverflowChain(
         const next_page_id = if (chunk_len == remaining)
             OverflowPage.null_page_id
         else
-            overflow_allocator.allocate() catch |e| return mapOverflowAllocatorError(e);
+            try allocateOverflowPage(
+                pool,
+                wal,
+                tx_id,
+                overflow_allocator,
+            );
 
         var pinned = try PinnedMutationPage.pin(pool, current_page_id);
         defer pinned.release();
@@ -321,14 +334,17 @@ pub fn drainOverflowReclaimQueue(
     tx_id: TxId,
     max_items: usize,
 ) MutationError!void {
+    try ensureOverflowAllocatorMetadata(pool, &catalog.overflow_page_allocator);
     var processed: usize = 0;
     while (processed < max_items and !catalog.overflow_reclaim_queue.isEmpty()) : (processed += 1) {
         const first_page_id = (catalog.overflow_reclaim_queue.dequeueCommitted() catch
             return error.Corruption) orelse break;
         catalog.recordOverflowReclaimDequeue();
         const page_count = reclaimOverflowChain(
+            catalog,
             pool,
-            &catalog.overflow_page_allocator,
+            wal,
+            tx_id,
             first_page_id,
         ) catch |err| {
             catalog.recordOverflowReclaimFailure();
@@ -372,10 +388,13 @@ pub fn rollbackOverflowReclaimEntriesForTx(
 }
 
 pub fn reclaimOverflowChain(
+    catalog: *Catalog,
     pool: *BufferPool,
-    overflow_allocator: *const OverflowPageIdAllocator,
+    wal: *Wal,
+    tx_id: TxId,
     first_page_id: u64,
 ) MutationError!u32 {
+    const overflow_allocator = &catalog.overflow_page_allocator;
     if (!overflow_allocator.ownsPageId(first_page_id)) return error.Corruption;
 
     var page_count: u32 = 0;
@@ -398,15 +417,191 @@ pub fn reclaimOverflowChain(
             return error.Corruption;
         }
 
+        const prev_head = overflow_allocator.freeListHead();
+        writeFreeListNextPointer(pinned.page, prev_head);
         pinned.page.header.page_type = .free;
-        @memset(&pinned.page.content, 0);
+        _ = overflow_allocator.pushFreeListHead(current) catch |err|
+            return mapOverflowAllocatorError(err);
+        const push_lsn = try appendOverflowFreeListPushWal(
+            wal,
+            tx_id,
+            current,
+            prev_head,
+            overflow_allocator.freeListHead(),
+            overflow_allocator.next_page_id,
+        );
+        pinned.page.header.lsn = push_lsn;
         pinned.markDirty();
+        try persistOverflowAllocatorMetadata(
+            pool,
+            overflow_allocator,
+            push_lsn,
+        );
         page_count += 1;
 
         if (next_page_id == OverflowPage.null_page_id) break;
         current = next_page_id;
     }
     return page_count;
+}
+
+fn allocateOverflowPage(
+    pool: *BufferPool,
+    wal: *Wal,
+    tx_id: TxId,
+    overflow_allocator: *OverflowPageIdAllocator,
+) MutationError!u64 {
+    if (overflow_allocator.hasFreePages()) {
+        const head = overflow_allocator.freeListHead();
+        var pinned = try PinnedMutationPage.pin(pool, head);
+        defer pinned.release();
+        if (pinned.page.header.page_type != .free) return error.Corruption;
+        const next_head = readFreeListNextPointer(pinned.page, overflow_allocator) catch
+            return error.Corruption;
+        const page_id = overflow_allocator.popFreeListHead(next_head) catch |err|
+            return mapOverflowAllocatorError(err);
+        const pop_lsn = try appendOverflowFreeListPopWal(
+            wal,
+            tx_id,
+            page_id,
+            overflow_allocator.freeListHead(),
+            overflow_allocator.next_page_id,
+        );
+        pinned.page.header.lsn = pop_lsn;
+        try persistOverflowAllocatorMetadata(pool, overflow_allocator, pop_lsn);
+        return page_id;
+    }
+
+    const page_id = overflow_allocator.allocateFresh() catch |err|
+        return mapOverflowAllocatorError(err);
+    const pop_lsn = try appendOverflowFreeListPopWal(
+        wal,
+        tx_id,
+        page_id,
+        overflow_allocator.freeListHead(),
+        overflow_allocator.next_page_id,
+    );
+    try persistOverflowAllocatorMetadata(pool, overflow_allocator, pop_lsn);
+    return page_id;
+}
+
+fn ensureOverflowAllocatorMetadata(
+    pool: *BufferPool,
+    overflow_allocator: *OverflowPageIdAllocator,
+) MutationError!void {
+    if (overflow_allocator.metadata_loaded) return;
+    const meta_page_id = overflow_allocator.metadataPageId();
+    var pinned = try PinnedMutationPage.pin(pool, meta_page_id);
+    defer pinned.release();
+    if (pinned.page.header.page_type == .free and isAllocatorMetaPage(pinned.page)) {
+        const loaded = decodeAllocatorMetadataPage(pinned.page) catch return error.Corruption;
+        overflow_allocator.setAllocatorState(loaded.free_list_head, loaded.next_page_id) catch |err|
+            return mapOverflowAllocatorError(err);
+        return;
+    }
+
+    pinned.page.header.page_type = .free;
+    writeAllocatorMetadataPage(pinned.page, overflow_allocator.freeListHead(), overflow_allocator.next_page_id);
+    overflow_allocator.markMetadataLoaded();
+    pinned.markDirty();
+}
+
+fn persistOverflowAllocatorMetadata(
+    pool: *BufferPool,
+    overflow_allocator: *const OverflowPageIdAllocator,
+    lsn: u64,
+) MutationError!void {
+    var pinned = try PinnedMutationPage.pin(pool, overflow_allocator.metadataPageId());
+    defer pinned.release();
+    if (pinned.page.header.page_type != .free and pinned.page.header.page_type != .overflow) {
+        return error.Corruption;
+    }
+    pinned.page.header.page_type = .free;
+    pinned.page.header.lsn = lsn;
+    writeAllocatorMetadataPage(
+        pinned.page,
+        overflow_allocator.freeListHead(),
+        overflow_allocator.next_page_id,
+    );
+    pinned.markDirty();
+}
+
+const AllocatorMetadata = struct {
+    free_list_head: u64,
+    next_page_id: u64,
+};
+
+fn writeAllocatorMetadataPage(
+    page: *Page,
+    free_list_head: u64,
+    next_page_id: u64,
+) void {
+    @memset(&page.content, 0);
+    @memcpy(page.content[0..2], std.mem.asBytes(&std.mem.nativeToLittle(u16, allocator_meta_magic)));
+    page.content[2] = allocator_meta_version;
+    page.content[3] = 0;
+    @memcpy(page.content[4..12], std.mem.asBytes(&std.mem.nativeToLittle(u64, free_list_head)));
+    @memcpy(page.content[12..20], std.mem.asBytes(&std.mem.nativeToLittle(u64, next_page_id)));
+}
+
+fn isAllocatorMetaPage(page: *const Page) bool {
+    if (page.content[2] != allocator_meta_version) return false;
+    const magic = std.mem.littleToNative(u16, std.mem.bytesAsValue(u16, page.content[0..2]).*);
+    return magic == allocator_meta_magic;
+}
+
+fn decodeAllocatorMetadataPage(page: *const Page) MutationError!AllocatorMetadata {
+    if (!isAllocatorMetaPage(page)) return error.Corruption;
+    return .{
+        .free_list_head = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, page.content[4..12]).*),
+        .next_page_id = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, page.content[12..20]).*),
+    };
+}
+
+fn writeFreeListNextPointer(page: *Page, next_page_id: u64) void {
+    @memset(&page.content, 0);
+    @memcpy(page.content[0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, next_page_id)));
+}
+
+fn readFreeListNextPointer(
+    page: *const Page,
+    overflow_allocator: *const OverflowPageIdAllocator,
+) MutationError!u64 {
+    const next_page_id = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, page.content[0..8]).*);
+    if (next_page_id != 0 and !overflow_allocator.ownsPageId(next_page_id)) {
+        return error.Corruption;
+    }
+    return next_page_id;
+}
+
+fn appendOverflowFreeListPushWal(
+    wal: *Wal,
+    tx_id: TxId,
+    page_id: u64,
+    previous_head: u64,
+    new_head: u64,
+    next_page_id: u64,
+) MutationError!u64 {
+    var payload: [24]u8 = undefined;
+    @memcpy(payload[0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, previous_head)));
+    @memcpy(payload[8..16], std.mem.asBytes(&std.mem.nativeToLittle(u64, new_head)));
+    @memcpy(payload[16..24], std.mem.asBytes(&std.mem.nativeToLittle(u64, next_page_id)));
+    return wal.append(tx_id, .overflow_free_list_push, page_id, payload[0..]) catch |e|
+        mapWalAppendError(e);
+}
+
+fn appendOverflowFreeListPopWal(
+    wal: *Wal,
+    tx_id: TxId,
+    page_id: u64,
+    new_head: u64,
+    next_page_id: u64,
+) MutationError!u64 {
+    var payload: [16]u8 = undefined;
+    @memcpy(payload[0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, new_head)));
+    @memcpy(payload[8..16], std.mem.asBytes(&std.mem.nativeToLittle(u64, next_page_id)));
+    return wal.append(tx_id, .overflow_free_list_pop, page_id, payload[0..]) catch |e|
+        mapWalAppendError(e);
 }
 
 pub fn encodeOverflowChainRecordMeta(

@@ -39,6 +39,8 @@ pub const ReplayStats = struct {
     overflow_reclaim_records_seen: usize = 0,
     overflow_reclaim_applied: usize = 0,
     overflow_reclaim_idempotent_skips: usize = 0,
+    overflow_free_list_push_records_seen: usize = 0,
+    overflow_free_list_pop_records_seen: usize = 0,
     slot_reclaim_records_seen: usize = 0,
     slot_reclaim_applied: usize = 0,
     slot_reclaim_idempotent_skips: usize = 0,
@@ -54,6 +56,17 @@ const OverflowChainRecordMeta = struct {
     payload_bytes: u32,
 };
 
+const OverflowFreeListPush = struct {
+    previous_head: u64,
+    new_head: u64,
+    next_page_id: u64,
+};
+
+const OverflowFreeListPop = struct {
+    new_head: u64,
+    next_page_id: u64,
+};
+
 const TxReplayDecision = enum {
     replay,
     skip,
@@ -66,7 +79,7 @@ const TxReplayDecision = enum {
 pub fn replayCommittedOverflowLifecycle(
     pool: *BufferPool,
     wal: *Wal,
-    overflow_allocator: *const OverflowPageIdAllocator,
+    overflow_allocator: *OverflowPageIdAllocator,
     records_buf: []Record,
     payload_buf: []u8,
 ) RecoveryError!ReplayStats {
@@ -120,6 +133,42 @@ pub fn replayCommittedOverflowLifecycle(
                 } else {
                     stats.overflow_reclaim_idempotent_skips += 1;
                 }
+            },
+            .overflow_free_list_push => {
+                const push = try decodeOverflowFreeListPush(rec.payload);
+                if (!overflow_allocator.ownsPageId(rec.page_id)) return error.Corruption;
+                if (push.previous_head != 0 and !overflow_allocator.ownsPageId(push.previous_head)) {
+                    return error.Corruption;
+                }
+                if (push.new_head != rec.page_id) return error.Corruption;
+                if (push.next_page_id < overflow_allocator.firstAllocatablePageId() or
+                    push.next_page_id > overflow_allocator.region_end_page_id)
+                {
+                    return error.Corruption;
+                }
+                try applyOverflowFreeListPush(
+                    pool,
+                    overflow_allocator,
+                    rec.page_id,
+                    push.previous_head,
+                    push.next_page_id,
+                );
+                stats.overflow_free_list_push_records_seen += 1;
+            },
+            .overflow_free_list_pop => {
+                const pop = try decodeOverflowFreeListPop(rec.payload);
+                if (!overflow_allocator.ownsPageId(rec.page_id)) return error.Corruption;
+                if (pop.new_head != 0 and !overflow_allocator.ownsPageId(pop.new_head)) {
+                    return error.Corruption;
+                }
+                if (pop.next_page_id < overflow_allocator.firstAllocatablePageId() or
+                    pop.next_page_id > overflow_allocator.region_end_page_id)
+                {
+                    return error.Corruption;
+                }
+                overflow_allocator.setAllocatorState(pop.new_head, pop.next_page_id) catch
+                    return error.Corruption;
+                stats.overflow_free_list_pop_records_seen += 1;
             },
             .reclaim_slot => {
                 if (rec.payload.len != 2) return error.Corruption;
@@ -219,6 +268,23 @@ fn decodeU64(payload: []const u8, offset: usize) RecoveryError!u64 {
     return std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[offset .. offset + 8]).*);
 }
 
+fn decodeOverflowFreeListPush(payload: []const u8) RecoveryError!OverflowFreeListPush {
+    if (payload.len != 24) return error.Corruption;
+    return .{
+        .previous_head = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[0..8]).*),
+        .new_head = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[8..16]).*),
+        .next_page_id = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[16..24]).*),
+    };
+}
+
+fn decodeOverflowFreeListPop(payload: []const u8) RecoveryError!OverflowFreeListPop {
+    if (payload.len != 16) return error.Corruption;
+    return .{
+        .new_head = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[0..8]).*),
+        .next_page_id = std.mem.littleToNative(u64, std.mem.bytesAsValue(u64, payload[8..16]).*),
+    };
+}
+
 fn encodeOverflowChainRecordMetaForTest(
     out: []u8,
     meta: OverflowChainRecordMeta,
@@ -276,6 +342,21 @@ fn applyOverflowReclaimIdempotent(
         current = next_page_id;
     }
     return true;
+}
+
+fn applyOverflowFreeListPush(
+    pool: *BufferPool,
+    overflow_allocator: *OverflowPageIdAllocator,
+    page_id: u64,
+    previous_head: u64,
+    next_page_id: u64,
+) RecoveryError!void {
+    const page = try pool.pin(page_id);
+    defer pool.unpin(page_id, true);
+    page.header.page_type = .free;
+    @memset(&page.content, 0);
+    @memcpy(page.content[0..8], std.mem.asBytes(&std.mem.nativeToLittle(u64, previous_head)));
+    overflow_allocator.setAllocatorState(page_id, next_page_id) catch return error.Corruption;
 }
 
 test "replayCommittedOverflowLifecycle reclaims chain and is idempotent" {

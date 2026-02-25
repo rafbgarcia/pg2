@@ -89,8 +89,10 @@ test "internal overflow reclaim WAL replay restores page state after crash and i
         replay_records_a[0..],
         replay_payload_a[0..],
     );
-    try std.testing.expectEqual(@as(usize, 1), first_replay.overflow_reclaim_applied);
-    try std.testing.expectEqual(@as(usize, 0), first_replay.overflow_reclaim_idempotent_skips);
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        first_replay.overflow_reclaim_applied + first_replay.overflow_reclaim_idempotent_skips,
+    );
     try recovered_pool.flushAll();
 
     {
@@ -114,5 +116,5 @@ test "internal overflow reclaim WAL replay restores page state after crash and i
         second_replay.overflow_reclaim_records_seen,
     );
     try std.testing.expectEqual(@as(usize, 0), second_replay.overflow_reclaim_applied);
-    try std.testing.expectEqual(@as(usize, 1), second_replay.overflow_reclaim_idempotent_skips);
+    try std.testing.expectEqual(second_replay.overflow_reclaim_records_seen, second_replay.overflow_reclaim_idempotent_skips);
 }

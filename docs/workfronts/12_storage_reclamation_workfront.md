@@ -13,6 +13,12 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
 - A rollback correctness flaw was identified and resolved by implementing physical heap rollback on abort from undo pre-images before abort maintenance.
 - Commit/abort maintenance (`undo_log.truncate(...)` + `tx_manager.cleanupBefore(...)`) remains enabled at pool boundaries, with rollback no longer depending on retained aborted visibility history.
 - Reactor pinning tests now assert post-cleanup terminal state (`!= .active`) instead of requiring retained `.aborted` state outside the tx-state retention window.
+- Phase 3 overflow allocator foundation landed:
+  - persisted overflow allocator metadata (`free_list_head`, `next_page_id`) on a dedicated metadata page;
+  - deterministic LIFO free-list reuse wired into overflow allocation path;
+  - free-list push/pop WAL records and replay handling added;
+  - reclaim path now routes freed overflow pages into reusable allocator state (not monotonic-only growth);
+  - churn coverage added to assert reclaimed overflow pages are reused across insert/delete cycles.
 - Full test suite is green after these changes (`zig build test --summary all` passes on 2026-02-25).
 
 ## Status Snapshot (2026-02-25)
@@ -31,9 +37,13 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
   - Remaining to fully close:
     - explicit, documented proof/tests for “never reclaim visible-to-any-active-snapshot” under targeted long-lived-snapshot scenarios
     - expanded crash matrix focused on `reclaim_slot` replay semantics
-- **Phase 3 (Overflow Page Chain Reclamation):** partial
-  - Existing overflow reclaim queue and WAL lifecycle are in place.
-  - **Not complete against this workfront:** allocator still effectively monotonic (no persisted reusable free-list allocator contract for overflow pages).
+- **Phase 3 (Overflow Page Chain Reclamation):** complete
+  - Implemented and covered by tests:
+    - persisted allocator metadata (`free_list_head` + `next_page_id`);
+    - deterministic LIFO free-list reuse;
+    - free-list WAL push/pop + replay handling;
+    - reclaim path writes freed pages back into allocator reuse flow;
+    - churn test proving reclaimed pages are reused.
 - **Phase 4 (B+ Tree Dead Entry Cleanup):** partial
   - Opportunistic dead-entry cleanup exists in uniqueness-check path.
   - **Not complete against this workfront:** no dedicated cleanup hook from heap slot reclaim path; no opportunistic dead-entry deletion in generic index point/range scan path.
@@ -44,9 +54,9 @@ Eliminate the need for a traditional background VACUUM process by reclaiming dea
 ### Current Gap-to-Gate Summary
 - **Complete now:** foundational slot reclaim + rollback safety + WAL/replay plumbing for slot reclaim.
 - **Major remaining gates:**
-  - overflow page reuse via persisted free-list allocator;
   - index dead-entry cleanup tied to reclaim events and scan-time opportunistic cleanup;
-  - phase-5 concurrency/observability matrix for pinned snapshots and reclaim resumption.
+  - phase-5 concurrency/observability matrix for pinned snapshots and reclaim resumption;
+  - replay matrix expansion for index cleanup and additional `reclaim_slot`-focused scenarios.
 
 ## Fresh Session Execution Plan (Ordered, Full-Completion Path)
 
@@ -59,29 +69,23 @@ This section is the handoff contract for a fresh Codex session. Execute in order
      - final safety invariant text (copy from `Non-Negotiable Invariants` below).
    - Gate: document contains final design decision + invariant text, no placeholders.
 
-2. **Phase 3 completion: overflow reusable free-list allocator**
-   - Replace monotonic overflow allocation behavior with reusable free-list contract.
-   - Ensure free-list state is crash-safe (WAL + replay idempotent).
-   - Route overflow reclaim outputs into reusable allocation path (not just page-type reset).
-   - Gate: repeated overflow-heavy insert/delete cycles demonstrate reuse and bounded growth.
-
-3. **Phase 4 completion: index dead-entry cleanup parity**
+2. **Phase 4 completion: index dead-entry cleanup parity**
    - Add reclaim-time index cleanup hook for rows becoming reclaimable.
    - Add opportunistic dead-entry deletion in generic index point/range scan paths (not only uniqueness checks).
    - Keep behavior MVCC-safe and idempotent under retries/replay.
    - Gate: dead index entries do not grow unbounded under churn; lookup/range correctness preserved.
 
-4. **Phase 5 completion: long-lived snapshot + observability hardening**
+3. **Phase 5 completion: long-lived snapshot + observability hardening**
    - Add targeted stress suite for reclaim blocked by long-lived snapshots, then resumed reclaim after snapshot close.
    - Add observability fields for pinned-by-snapshot reclaim pressure and progress (queue depth alone is insufficient).
    - Gate: deterministic tests prove reclaim is blocked only when required and resumes correctly.
 
-5. **Crash/recovery completion matrix**
+4. **Crash/recovery completion matrix**
    - Add focused crash/replay scenarios for `reclaim_slot`, overflow free-list reuse, and index cleanup paths.
    - Verify idempotent replay and post-restart consistency of heap/overflow/index surfaces.
    - Gate: replay-focused matrix passes with deterministic results.
 
-6. **Final full-gate validation**
+5. **Final full-gate validation**
    - Run `zig build test --summary all`.
    - Ensure this workfront’s phases are updated from partial to complete only when all phase gates are met.
    - Gate: full suite green + all phase gate checkboxes satisfied in this doc.

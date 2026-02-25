@@ -1866,6 +1866,7 @@ pub fn mapOverflowAllocatorError(err: overflow_mod.OverflowAllocatorError) Mutat
     return switch (err) {
         error.InvalidRegion => error.Corruption,
         error.RegionExhausted => error.OverflowRegionExhausted,
+        error.InvalidPageId => error.Corruption,
     };
 }
 
