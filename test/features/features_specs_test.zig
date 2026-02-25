@@ -17,7 +17,9 @@ comptime {
     _ = @import("expressions/division_test.zig");
     _ = @import("expressions/having_test.zig");
     _ = @import("expressions/in_test.zig");
-    _ = @import("expressions/insert_test.zig");
+    _ = @import("expressions/insert_constraints_and_defaults_test.zig");
+    _ = @import("expressions/insert_multi_row_behavior_test.zig");
+    _ = @import("expressions/insert_single_row_and_wide_contracts_test.zig");
     _ = @import("expressions/multiplication_test.zig");
     _ = @import("expressions/parameters_test.zig");
     _ = @import("expressions/precedence_parentheses_test.zig");
