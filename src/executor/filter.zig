@@ -50,6 +50,9 @@ pub const EvalError = error{
     UnknownFunction,
     NullInPredicate,
     UndefinedParameter,
+    UndefinedVariable,
+    AmbiguousIdentifier,
+    VariableTypeMismatch,
     ClockUnavailable,
 };
 
@@ -78,6 +81,22 @@ pub const ParameterResolver = struct {
     ) EvalError!Value,
 };
 
+pub const VariableRef = union(enum) {
+    not_found,
+    scalar: Value,
+    list: []const Value,
+};
+
+pub const VariableResolver = struct {
+    ctx: *const anyopaque,
+    resolve: *const fn (
+        ctx: *const anyopaque,
+        tokens: *const TokenizeResult,
+        source: []const u8,
+        token_index: u16,
+    ) EvalError!VariableRef,
+};
+
 /// Bundles all ambient evaluation state needed during expression evaluation.
 ///
 /// This struct consolidates what were previously individual parameters threaded
@@ -86,6 +105,7 @@ pub const ParameterResolver = struct {
 pub const EvalContext = struct {
     statement_timestamp_micros: ?i64 = null,
     parameter_resolver: ?*const ParameterResolver = null,
+    variable_resolver: ?*const VariableResolver = null,
     string_arena: ?*scan_mod.StringArena = null,
 };
 
@@ -100,6 +120,7 @@ const WorkItem = union(enum) {
     apply_aggregate: NodeIndex,
     apply_function: struct { token_index: u16, arg_count: u16 },
     apply_membership: struct { token_index: u16, list_count: u16 },
+    apply_membership_variable: struct { token_index: u16, list_token: u16 },
 };
 
 /// Evaluate an AST expression node to a Value using iterative traversal.
@@ -186,9 +207,28 @@ pub fn evaluateExpressionFull(
             },
             .apply_column_ref => |tok_idx| {
                 const name = tokens.getText(tok_idx, source);
-                const col = schema.findColumn(name) orelse
-                    return error.ColumnNotFound;
-                try evalPush(&eval_stack, &eval_count, row_values[col]);
+                const col = schema.findColumn(name);
+                const variable_ref = if (eval_ctx.variable_resolver) |resolver|
+                    try resolver.resolve(
+                        resolver.ctx,
+                        tokens,
+                        source,
+                        tok_idx,
+                    )
+                else
+                    VariableRef.not_found;
+                if (col != null and variable_ref != .not_found) {
+                    return error.AmbiguousIdentifier;
+                }
+                if (col) |column_idx| {
+                    try evalPush(&eval_stack, &eval_count, row_values[column_idx]);
+                    continue;
+                }
+                switch (variable_ref) {
+                    .not_found => return error.ColumnNotFound,
+                    .scalar => |scalar| try evalPush(&eval_stack, &eval_count, scalar),
+                    .list => return error.VariableTypeMismatch,
+                }
             },
             .apply_parameter => |tok_idx| {
                 const r = eval_ctx.parameter_resolver orelse return error.UndefinedParameter;
@@ -257,6 +297,30 @@ pub fn evaluateExpressionFull(
                     info.token_index,
                     needle,
                     list_values[0..info.list_count],
+                );
+                try evalPush(&eval_stack, &eval_count, result);
+            },
+            .apply_membership_variable => |info| {
+                if (eval_count < 1) return error.StackUnderflow;
+                const needle = evalPop(&eval_stack, &eval_count);
+                const resolver = eval_ctx.variable_resolver orelse return error.UndefinedVariable;
+                const variable_ref = try resolver.resolve(
+                    resolver.ctx,
+                    tokens,
+                    source,
+                    info.list_token,
+                );
+                const list_values = switch (variable_ref) {
+                    .not_found => return error.UndefinedVariable,
+                    .scalar => return error.VariableTypeMismatch,
+                    .list => |list| list,
+                };
+                const result = try applyMembershipFunction(
+                    tokens,
+                    source,
+                    info.token_index,
+                    needle,
+                    list_values,
                 );
                 try evalPush(&eval_stack, &eval_count, result);
             },
@@ -391,24 +455,33 @@ fn pushNodeWork(
                 const value_arg = node.data.unary;
                 const list_arg = tree.getNode(value_arg).next;
                 if (list_arg == null_node) return error.TypeMismatch;
-                if (tree.getNode(list_arg).tag != .expr_list) return error.TypeMismatch;
-
-                const list_head = tree.getNode(list_arg).data.unary;
-                const list_count = tree.listLen(list_head);
-
-                try workPush(work_stack, work_count, .{
-                    .apply_membership = .{
-                        .token_index = fn_tok,
-                        .list_count = list_count,
-                    },
-                });
-                try pushLinkedListReverse(
-                    tree,
-                    work_stack,
-                    work_count,
-                    list_head,
-                    list_count,
-                );
+                const list_arg_node = tree.getNode(list_arg);
+                if (list_arg_node.tag == .expr_list) {
+                    const list_head = list_arg_node.data.unary;
+                    const list_count = tree.listLen(list_head);
+                    try workPush(work_stack, work_count, .{
+                        .apply_membership = .{
+                            .token_index = fn_tok,
+                            .list_count = list_count,
+                        },
+                    });
+                    try pushLinkedListReverse(
+                        tree,
+                        work_stack,
+                        work_count,
+                        list_head,
+                        list_count,
+                    );
+                } else if (list_arg_node.tag == .expr_column_ref) {
+                    try workPush(work_stack, work_count, .{
+                        .apply_membership_variable = .{
+                            .token_index = fn_tok,
+                            .list_token = list_arg_node.data.token,
+                        },
+                    });
+                } else {
+                    return error.TypeMismatch;
+                }
                 try workPush(work_stack, work_count, .{
                     .evaluate = value_arg,
                 });

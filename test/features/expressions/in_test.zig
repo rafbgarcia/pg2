@@ -210,7 +210,7 @@ test "feature membership supports where and sort expression contexts" {
     );
 }
 
-test "feature membership parse fails closed for invalid shape and arity" {
+test "feature membership fails closed for invalid shape and arity" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
     defer env.deinit();
@@ -229,7 +229,7 @@ test "feature membership parse fails closed for invalid shape and arity" {
     var result = try executor.run(
         "InvalidMembership |> where(in(status, status_list)) { id }",
     );
-    try expectContains(result, "ERR parse:");
+    try expectContains(result, "ERR query:");
 
     result = try executor.run(
         "InvalidMembership |> where(in(status)) { id }",

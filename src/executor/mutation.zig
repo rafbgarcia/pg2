@@ -1247,6 +1247,9 @@ pub fn executeUpdateWithDiagnosticAndReturningAndParameters(
                 ) catch |e| switch (e) {
                     error.TypeMismatch => return error.PredicateMustBeBoolean,
                     error.UndefinedParameter => return error.PredicateUndefinedParameter,
+                    error.UndefinedVariable => return error.ColumnNotFound,
+                    error.AmbiguousIdentifier => return error.TypeMismatch,
+                    error.VariableTypeMismatch => return error.TypeMismatch,
                     error.ClockUnavailable => return error.PredicateClockUnavailable,
                     else => continue,
                 };
@@ -1505,6 +1508,9 @@ pub fn executeDeleteWithReturningAndParameters(
                 ) catch |e| switch (e) {
                     error.TypeMismatch => return error.PredicateMustBeBoolean,
                     error.UndefinedParameter => return error.PredicateUndefinedParameter,
+                    error.UndefinedVariable => return error.ColumnNotFound,
+                    error.AmbiguousIdentifier => return error.TypeMismatch,
+                    error.VariableTypeMismatch => return error.TypeMismatch,
                     error.ClockUnavailable => return error.PredicateClockUnavailable,
                     else => continue,
                 };
@@ -2122,6 +2128,9 @@ pub fn mapFilterError(err: filter_mod.EvalError) MutationError {
         error.UnknownFunction => error.UnknownFunction,
         error.NullInPredicate => error.NullInPredicate,
         error.UndefinedParameter => error.UndefinedParameter,
+        error.UndefinedVariable => error.ColumnNotFound,
+        error.AmbiguousIdentifier => error.TypeMismatch,
+        error.VariableTypeMismatch => error.TypeMismatch,
         error.ClockUnavailable => error.ClockUnavailable,
     };
 }

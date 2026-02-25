@@ -1655,6 +1655,27 @@ fn rewriteCollectorForPostOps(
                             });
                             return false;
                         },
+                        error.UndefinedVariable => {
+                            setPredicateUndefinedVariableError(result, switch (stage.kind) {
+                                .having_filter => "having",
+                                else => "where",
+                            });
+                            return false;
+                        },
+                        error.AmbiguousIdentifier => {
+                            setPredicateAmbiguousIdentifierError(result, switch (stage.kind) {
+                                .having_filter => "having",
+                                else => "where",
+                            });
+                            return false;
+                        },
+                        error.VariableTypeMismatch => {
+                            setPredicateVariableTypeMismatchError(result, switch (stage.kind) {
+                                .having_filter => "having",
+                                else => "where",
+                            });
+                            return false;
+                        },
                         else => false,
                     };
                     if (!matches) keep = false;
@@ -4292,6 +4313,18 @@ fn applyWhereFilter(
                     setPredicateMustBeBooleanError(result, predicate_scope);
                     return;
                 },
+                error.UndefinedVariable => {
+                    setPredicateUndefinedVariableError(result, predicate_scope);
+                    return;
+                },
+                error.AmbiguousIdentifier => {
+                    setPredicateAmbiguousIdentifierError(result, predicate_scope);
+                    return;
+                },
+                error.VariableTypeMismatch => {
+                    setPredicateVariableTypeMismatchError(result, predicate_scope);
+                    return;
+                },
                 else => false,
             }
         else
@@ -4315,6 +4348,18 @@ fn applyWhereFilter(
                 },
                 error.TypeMismatch => {
                     setPredicateMustBeBooleanError(result, predicate_scope);
+                    return;
+                },
+                error.UndefinedVariable => {
+                    setPredicateUndefinedVariableError(result, predicate_scope);
+                    return;
+                },
+                error.AmbiguousIdentifier => {
+                    setPredicateAmbiguousIdentifierError(result, predicate_scope);
+                    return;
+                },
+                error.VariableTypeMismatch => {
+                    setPredicateVariableTypeMismatchError(result, predicate_scope);
                     return;
                 },
                 else => false,
@@ -4356,6 +4401,45 @@ fn setPredicateUndefinedParameterError(result: *QueryResult, scope: []const u8) 
         .{scope},
     ) catch {
         setError(result, "undefined parameter in predicate expression");
+        return;
+    };
+    setError(result, msg);
+}
+
+fn setPredicateUndefinedVariableError(result: *QueryResult, scope: []const u8) void {
+    var msg_buf: [96]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        msg_buf[0..],
+        "undefined variable in {s} expression",
+        .{scope},
+    ) catch {
+        setError(result, "undefined variable in predicate expression");
+        return;
+    };
+    setError(result, msg);
+}
+
+fn setPredicateAmbiguousIdentifierError(result: *QueryResult, scope: []const u8) void {
+    var msg_buf: [112]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        msg_buf[0..],
+        "ambiguous identifier in {s} expression",
+        .{scope},
+    ) catch {
+        setError(result, "ambiguous identifier in predicate expression");
+        return;
+    };
+    setError(result, msg);
+}
+
+fn setPredicateVariableTypeMismatchError(result: *QueryResult, scope: []const u8) void {
+    var msg_buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(
+        msg_buf[0..],
+        "variable type mismatch in {s} expression",
+        .{scope},
+    ) catch {
+        setError(result, "variable type mismatch in predicate expression");
         return;
     };
     setError(result, msg);
@@ -4788,6 +4872,18 @@ fn materializeRowsMatchingPredicate(
                 },
                 error.TypeMismatch => {
                     setPredicateMustBeBooleanError(out, "where");
+                    return false;
+                },
+                error.UndefinedVariable => {
+                    setPredicateUndefinedVariableError(out, "where");
+                    return false;
+                },
+                error.AmbiguousIdentifier => {
+                    setPredicateAmbiguousIdentifierError(out, "where");
+                    return false;
+                },
+                error.VariableTypeMismatch => {
+                    setPredicateVariableTypeMismatchError(out, "where");
                     return false;
                 },
                 else => false,

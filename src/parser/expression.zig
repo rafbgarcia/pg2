@@ -500,7 +500,10 @@ fn closeContainer(
         const list_arg = ast.getNode(value_arg).next;
         if (list_arg == null_node) return error.UnexpectedToken;
         if (ast.getNode(list_arg).next != null_node) return error.UnexpectedToken;
-        if (ast.getNode(list_arg).tag != .expr_list) return error.UnexpectedToken;
+        const list_arg_tag = ast.getNode(list_arg).tag;
+        if (list_arg_tag != .expr_list and list_arg_tag != .expr_column_ref) {
+            return error.UnexpectedToken;
+        }
     }
 
     const node = switch (frame.kind) {
@@ -917,12 +920,13 @@ test "negated in function call with list" {
     try testing.expectEqual(NodeTag.expr_function_call, operand.tag);
 }
 
-test "membership function rejects non-list second argument" {
+test "membership function accepts identifier second argument" {
     var ast = Ast{};
     const source = "in(status, status_list)";
     const tokens = tokenizer_mod.tokenize(source);
-    const result = parseExpression(&ast, &tokens, source, 0);
-    try testing.expectError(error.UnexpectedToken, result);
+    const result = try parseExpression(&ast, &tokens, source, 0);
+    const node = ast.getNode(result.node);
+    try testing.expectEqual(NodeTag.expr_function_call, node.tag);
 }
 
 test "membership function rejects wrong arity" {

@@ -242,11 +242,11 @@ test "parse where membership call with list literal" {
     try testing.expect(!result.has_error);
 }
 
-test "parse where membership call rejects non-list second argument" {
+test "parse where membership call accepts identifier second argument" {
     const source = "User |> where(in(status, status_list)) { id }";
     const tokens = tokenizer_mod.tokenize(source);
     const result = parse(&tokens, source);
-    try testing.expect(result.has_error);
+    try testing.expect(!result.has_error);
 }
 
 test "parse where symbolic boolean precedence with explicit parentheses" {
