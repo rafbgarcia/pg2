@@ -49,6 +49,8 @@ pub const NodeTag = enum(u8) {
     expr_function_call, // data.token = fn name, data.unary = first arg (linked by next)
     expr_aggregate, // data.token = agg name, data.unary = arg (or null_node for count(*))
     expr_list, // [a, b, c]; data.unary = first element (linked by next)
+    expr_object, // {a: 1}; data.unary = first expr_object_field (linked by next)
+    expr_object_field, // data.unary = value expression, extra = key token index
     expr_in, // data.binary = lhs (value), rhs (list)
     expr_not_in, // data.binary = lhs (value), rhs (list)
     expr_parameter, // $param; data.token = parameter token

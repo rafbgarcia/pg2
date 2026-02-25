@@ -194,6 +194,16 @@ pub fn parseExpression(
                 continue;
             }
 
+            if (tok.token_type == .left_brace) {
+                const obj = try parseObjectLiteral(ast, tokens, source, pos);
+                if (output_count >= max_output_stack) return error.StackOverflow;
+                output_stack[output_count] = obj.node;
+                output_count += 1;
+                pos = obj.pos;
+                expect_operand = false;
+                continue;
+            }
+
             if (isFunctionStart(tokens, pos) and
                 pos + 1 < tokens.count and
                 tokens.tokens[pos + 1].token_type == .left_paren)
@@ -368,6 +378,62 @@ fn isContainerClose(kind: ContainerKind, tok_type: TokenType) bool {
         .list => tok_type == .right_bracket,
         .function_call, .aggregate_call => tok_type == .right_paren,
     };
+}
+
+fn parseObjectLiteral(
+    ast: *Ast,
+    tokens: *const TokenizeResult,
+    source: []const u8,
+    start_pos: u16,
+) ExprError!ParseExpressionResult {
+    var pos = start_pos + 1; // skip '{'
+    var first_field: NodeIndex = null_node;
+    var last_field: NodeIndex = null_node;
+
+    while (pos < tokens.count) {
+        const tok_type = tokens.tokens[pos].token_type;
+        if (tok_type == .right_brace) {
+            pos += 1;
+            const obj = try ast.addNode(.expr_object, .{ .unary = first_field });
+            return .{ .node = obj, .pos = pos };
+        }
+
+        const key_tok = pos;
+        if (!tokenizer_mod.isContextualIdentifier(tok_type) and tok_type != .string_literal) {
+            return error.UnexpectedToken;
+        }
+        pos += 1;
+
+        if (pos >= tokens.count or tokens.tokens[pos].token_type != .colon) {
+            return error.UnexpectedToken;
+        }
+        pos += 1;
+
+        const value_expr = try parseExpression(ast, tokens, source, pos);
+        const field = try ast.addNodeFull(
+            .expr_object_field,
+            .{ .unary = value_expr.node },
+            key_tok,
+            null_node,
+        );
+        if (first_field == null_node) {
+            first_field = field;
+            last_field = field;
+        } else {
+            ast.setNext(last_field, field);
+            last_field = field;
+        }
+        pos = value_expr.pos;
+        if (pos >= tokens.count) return error.UnexpectedToken;
+
+        if (tokens.tokens[pos].token_type == .comma) {
+            pos += 1;
+            continue;
+        }
+        // Comma is optional; whitespace-separated pairs are allowed.
+    }
+
+    return error.MismatchedParentheses;
 }
 
 fn flushToBase(
@@ -764,6 +830,26 @@ test "list literal" {
     try testing.expectEqual(NodeTag.expr_list, node.tag);
     // Should have 3 elements linked by next.
     try testing.expectEqual(@as(u16, 3), ast.listLen(node.data.unary));
+}
+
+test "object literal with commas" {
+    var ast = Ast{};
+    const source = "{ total: 1, name: \"alice\" }";
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = try parseExpression(&ast, &tokens, source, 0);
+    const node = ast.getNode(result.node);
+    try testing.expectEqual(NodeTag.expr_object, node.tag);
+    try testing.expectEqual(@as(u16, 2), ast.listLen(node.data.unary));
+}
+
+test "object literal allows whitespace-separated fields" {
+    var ast = Ast{};
+    const source = "{ total: 1 name: 2 }";
+    const tokens = tokenizer_mod.tokenize(source);
+    const result = try parseExpression(&ast, &tokens, source, 0);
+    const node = ast.getNode(result.node);
+    try testing.expectEqual(NodeTag.expr_object, node.tag);
+    try testing.expectEqual(@as(u16, 2), ast.listLen(node.data.unary));
 }
 
 test "column reference" {
