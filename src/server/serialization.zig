@@ -515,6 +515,20 @@ fn serializeInspectStats(
             exec_stats.plan.nested_join_hash_spill_count,
         },
     ) catch return error.ResponseTooLarge;
+    var checkpoint_index: u8 = 0;
+    while (checkpoint_index < exec_stats.plan.checkpoint_count) : (checkpoint_index += 1) {
+        const checkpoint = exec_stats.plan.checkpoints[checkpoint_index];
+        writer.print(
+            "INSPECT checkpoint name={s} prior_decision={x} new_decision={x} reason={s} degraded={}\n",
+            .{
+                @tagName(checkpoint.checkpoint),
+                checkpoint.prior_decision_fingerprint,
+                checkpoint.new_decision_fingerprint,
+                @tagName(checkpoint.reason),
+                checkpoint.degraded,
+            },
+        ) catch return error.ResponseTooLarge;
+    }
 }
 
 /// Serialize one row's column values as comma-separated text followed by newline.

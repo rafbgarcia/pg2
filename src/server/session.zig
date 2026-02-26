@@ -1368,7 +1368,7 @@ test "session inspect appends runtime diagnostics when provided" {
 
     var session = Session.init(&runtime, &catalog);
     var pool = ConnectionPool.init(&runtime);
-    var response_buf: [2048]u8 = undefined;
+    var response_buf: [4096]u8 = undefined;
 
     var conn = try pool.checkout();
     const runtime_inspect_stats = RuntimeInspectStats{

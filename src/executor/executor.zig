@@ -36,6 +36,7 @@ const index_key_mod = @import("../storage/index_key.zig");
 const btree_mod = @import("../storage/btree.zig");
 const temp_mod = @import("../storage/temp.zig");
 const planner_mod = @import("../planner/planner.zig");
+const planner_adaptation = @import("../planner/adaptation.zig");
 const planner_types = @import("../planner/types.zig");
 const planner_fingerprint = @import("../planner/fingerprint.zig");
 
@@ -120,7 +121,20 @@ pub const GroupStrategy = enum {
     hash_spill,
 };
 
+pub const StreamingMode = enum {
+    disabled,
+    enabled,
+};
+
 pub const ScanStrategy = index_scan_planner.ScanStrategy;
+
+pub const PlanCheckpointTrace = struct {
+    checkpoint: planner_types.Checkpoint = .pre_scan,
+    prior_decision_fingerprint: u64 = 0,
+    new_decision_fingerprint: u64 = 0,
+    reason: planner_types.ReasonCode = .none,
+    degraded: bool = false,
+};
 
 pub const PlanStats = struct {
     source_model: [32]u8 = [_]u8{0} ** 32,
@@ -133,6 +147,7 @@ pub const PlanStats = struct {
     materialization_mode: MaterializationMode = .none,
     sort_strategy: SortStrategy = .none,
     group_strategy: GroupStrategy = .none,
+    streaming_mode: StreamingMode = .disabled,
     scan_strategy: ScanStrategy = .table_scan,
     nested_relation_count: u8 = 0,
     nested_join_nested_loop_count: u8 = 0,
@@ -146,6 +161,8 @@ pub const PlanStats = struct {
     sort_reason: planner_types.ReasonCode = .none,
     group_reason: planner_types.ReasonCode = .none,
     streaming_reason: planner_types.ReasonCode = .none,
+    checkpoints: [4]PlanCheckpointTrace = [_]PlanCheckpointTrace{.{}} ** 4,
+    checkpoint_count: u8 = 0,
 };
 
 /// Execution statistics for a query.
@@ -1101,6 +1118,22 @@ fn executeReadPipeline(
     string_arena: *scan_mod.StringArena,
 ) void {
     const caps = capacity_mod.OperatorCapacities.defaults();
+    const source_model_name =
+        result.stats.plan.source_model[0..result.stats.plan.source_model_len];
+    const planner_snapshot = buildPlannerSnapshot(
+        ctx,
+        source_model_name,
+        model_id,
+        ops,
+        op_count,
+    );
+    const pre_scan_counters = planner_types.CheckpointCounters{};
+    applyPlannerCheckpoint(
+        &result.stats.plan,
+        &planner_snapshot,
+        .pre_scan,
+        &pre_scan_counters,
+    );
 
     // --- 1. Init temp storage and collector for this query slot ---
     const temp_mgr = TempStorageManager.init(
@@ -1222,6 +1255,25 @@ fn executeReadPipeline(
     result.stats.pages_read = total_pages_read;
     result.stats.rows_scanned = total_rows_scanned;
 
+    const post_filter_counters: planner_types.CheckpointCounters = .{
+        .rows_seen = total_rows_scanned,
+        .rows_after_filter = ctx.collector.totalRowCount(),
+        .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
+        .spill_pages_used = ctx.collector.spill_page_count,
+        .group_count_estimate = @intCast(@min(
+            ctx.collector.totalRowCount(),
+            std.math.maxInt(u32),
+        )),
+        .join_build_rows = 0,
+        .join_probe_rows = ctx.collector.totalRowCount(),
+    };
+    applyPlannerCheckpoint(
+        &result.stats.plan,
+        &planner_snapshot,
+        .post_filter,
+        &post_filter_counters,
+    );
+
     // --- 4. Post-scan: materialize final result ---
     const spilled = ctx.collector.spillTriggered();
     const needs_full_input = hasFullInputOperators(ops, op_count);
@@ -1236,6 +1288,16 @@ fn executeReadPipeline(
             captureTempStats(result, ctx.collector);
             return;
         }
+        const pre_join_counters: planner_types.CheckpointCounters = .{
+            .rows_seen = total_rows_scanned,
+            .rows_after_filter = result.row_count,
+            .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
+            .spill_pages_used = ctx.collector.spill_page_count,
+            .group_count_estimate = result.row_count,
+            .join_build_rows = result.row_count,
+            .join_probe_rows = result.row_count,
+        };
+        applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .pre_join, &pre_join_counters);
         if (!applyNestedSelectionJoin(ctx, result, pipeline_node, model_id, &caps, string_arena)) {
             captureTempStats(result, ctx.collector);
             return;
@@ -1297,6 +1359,16 @@ fn executeReadPipeline(
         }
         applyRowSetToResult(result, output_rows);
         if (hasNestedSelection(ctx.ast, pipeline_node)) {
+            const pre_join_counters: planner_types.CheckpointCounters = .{
+                .rows_seen = total_rows_scanned,
+                .rows_after_filter = rowSetVisibleCount(output_rows),
+                .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
+                .spill_pages_used = ctx.collector.spill_page_count,
+                .group_count_estimate = @intCast(@min(rowSetVisibleCount(output_rows), std.math.maxInt(u32))),
+                .join_build_rows = rowSetVisibleCount(output_rows),
+                .join_probe_rows = rowSetVisibleCount(output_rows),
+            };
+            applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .pre_join, &pre_join_counters);
             if (!applyNestedSelectionJoin(ctx, result, pipeline_node, model_id, &caps, string_arena)) {
                 captureTempStats(result, ctx.collector);
                 return;
@@ -1369,6 +1441,16 @@ fn executeReadPipeline(
             }
             applyRowSetToResult(result, output_rows);
             if (hasNestedSelection(ctx.ast, pipeline_node)) {
+                const pre_join_counters: planner_types.CheckpointCounters = .{
+                    .rows_seen = total_rows_scanned,
+                    .rows_after_filter = rowSetVisibleCount(output_rows),
+                    .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
+                    .spill_pages_used = ctx.collector.spill_page_count,
+                    .group_count_estimate = @intCast(@min(rowSetVisibleCount(output_rows), std.math.maxInt(u32))),
+                    .join_build_rows = rowSetVisibleCount(output_rows),
+                    .join_probe_rows = rowSetVisibleCount(output_rows),
+                };
+                applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .pre_join, &pre_join_counters);
                 if (!applyNestedSelectionJoin(ctx, result, pipeline_node, model_id, &caps, string_arena)) {
                     captureTempStats(result, ctx.collector);
                     return;
@@ -1391,6 +1473,16 @@ fn executeReadPipeline(
                 captureTempStats(result, ctx.collector);
                 return;
             }
+            const pre_join_counters: planner_types.CheckpointCounters = .{
+                .rows_seen = total_rows_scanned,
+                .rows_after_filter = result.row_count,
+                .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
+                .spill_pages_used = ctx.collector.spill_page_count,
+                .group_count_estimate = result.row_count,
+                .join_build_rows = result.row_count,
+                .join_probe_rows = result.row_count,
+            };
+            applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .pre_join, &pre_join_counters);
             if (!applyNestedSelectionJoin(ctx, result, pipeline_node, model_id, &caps, string_arena)) {
                 captureTempStats(result, ctx.collector);
                 return;
@@ -1425,6 +1517,26 @@ fn executeReadPipeline(
             captureTempStats(result, ctx.collector);
             return;
         }
+        const post_group_counters: planner_types.CheckpointCounters = .{
+            .rows_seen = total_rows_scanned,
+            .rows_after_filter = result.row_count,
+            .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
+            .spill_pages_used = ctx.collector.spill_page_count,
+            .group_count_estimate = result.row_count,
+            .join_build_rows = result.row_count,
+            .join_probe_rows = result.row_count,
+        };
+        applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .post_group, &post_group_counters);
+        const pre_join_counters: planner_types.CheckpointCounters = .{
+            .rows_seen = total_rows_scanned,
+            .rows_after_filter = result.row_count,
+            .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
+            .spill_pages_used = ctx.collector.spill_page_count,
+            .group_count_estimate = result.row_count,
+            .join_build_rows = result.row_count,
+            .join_probe_rows = result.row_count,
+        };
+        applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .pre_join, &pre_join_counters);
         if (!applyNestedSelectionJoin(ctx, result, pipeline_node, model_id, &caps, string_arena)) {
             captureTempStats(result, ctx.collector);
             return;
@@ -5841,7 +5953,7 @@ fn capturePlanStats(
         plan.pipeline_ops[i] = ops[i].kind;
     }
 
-    seedPlannerDecisionStats(plan, ctx, model_id, ops, op_count);
+    seedPlannerDecisionStats(plan, ctx, model_name, model_id, ops, op_count);
 }
 
 fn toPlannerOpTag(kind: OpKind) planner_types.OpTag {
@@ -5879,22 +5991,18 @@ fn hashQueryShape(model_name: []const u8, ops: *const [max_operators]OpDescripto
     return (@as(u128, hi) << 64) | @as(u128, lo);
 }
 
-fn seedPlannerDecisionStats(
-    plan: *PlanStats,
+fn buildPlannerSnapshot(
     ctx: *const ExecContext,
+    model_name: []const u8,
     model_id: ModelId,
     ops: *const [max_operators]OpDescriptor,
     op_count: u16,
-) void {
-    var snapshot = planner_types.PlannerInputSnapshot{
+) planner_types.PlannerInputSnapshot {
+    var snapshot: planner_types.PlannerInputSnapshot = .{
         .snapshot_schema_version = planner_types.snapshot_schema_version_current,
         .policy_version = planner_types.policy_version_current,
         .seed = 0,
-        .query_shape_fingerprint = hashQueryShape(
-            plan.source_model[0..plan.source_model_len],
-            ops,
-            op_count,
-        ),
+        .query_shape_fingerprint = hashQueryShape(model_name, ops, op_count),
         // Catalog/runtime/version ids are deterministic snapshots derived from
         // the current execution context until dedicated version ids are wired.
         .catalog_snapshot_id = @as(u64, model_id) + 1,
@@ -5912,12 +6020,48 @@ fn seedPlannerDecisionStats(
         snapshot.operator_sequence[i] = toPlannerOpTag(ops[i].kind);
     }
     snapshot.relation_ids_sorted[0] = @as(u32, model_id) + 1;
+    return snapshot;
+}
 
-    const decisions = planner_mod.planInitial(&snapshot) catch return;
-    plan.planner_policy_version = snapshot.policy_version;
-    plan.planner_snapshot_fingerprint = planner_fingerprint.snapshotFingerprint(&snapshot) catch 0;
-    plan.planner_decision_fingerprint = planner_fingerprint.decisionFingerprint(&decisions);
+fn toPlannerDecisionSet(plan: *const PlanStats) planner_types.PhysicalDecisionSet {
+    return .{
+        .join_strategy = switch (plan.join_strategy) {
+            .none => .none,
+            .nested_loop => .none,
+            .hash_in_memory => .hash_in_memory,
+            .hash_spill => .hash_spill,
+        },
+        .join_order = switch (plan.join_order) {
+            .none => .none,
+            .source_then_nested => .source_then_nested,
+        },
+        .materialization_mode = switch (plan.materialization_mode) {
+            .none => .none,
+            .bounded_row_buffers => .bounded_row_buffers,
+        },
+        .sort_strategy = switch (plan.sort_strategy) {
+            .none => .none,
+            .in_place_insertion, .in_memory_merge => .in_memory_merge,
+            .external_merge => .external_merge,
+        },
+        .group_strategy = switch (plan.group_strategy) {
+            .none => .none,
+            .in_memory_linear => .in_memory_linear,
+            .hash_spill => .hash_spill,
+        },
+        .streaming_mode = switch (plan.streaming_mode) {
+            .disabled => .disabled,
+            .enabled => .enabled,
+        },
+        .join_reason = plan.join_reason,
+        .materialization_reason = plan.materialization_reason,
+        .sort_reason = plan.sort_reason,
+        .group_reason = plan.group_reason,
+        .streaming_reason = plan.streaming_reason,
+    };
+}
 
+fn applyPlannerDecisionSet(plan: *PlanStats, decisions: *const planner_types.PhysicalDecisionSet) void {
     plan.join_reason = decisions.join_reason;
     plan.materialization_reason = decisions.materialization_reason;
     plan.sort_reason = decisions.sort_reason;
@@ -5947,6 +6091,73 @@ fn seedPlannerDecisionStats(
         .in_memory_linear => .in_memory_linear,
         .hash_spill => .hash_spill,
     };
+    plan.streaming_mode = switch (decisions.streaming_mode) {
+        .disabled => .disabled,
+        .enabled => .enabled,
+    };
+}
+
+fn appendCheckpointTrace(
+    plan: *PlanStats,
+    checkpoint: planner_types.Checkpoint,
+    prior_fingerprint: u64,
+    new_fingerprint: u64,
+    reason: planner_types.ReasonCode,
+    degraded: bool,
+) void {
+    if (plan.checkpoint_count >= plan.checkpoints.len) return;
+    const idx = plan.checkpoint_count;
+    plan.checkpoints[idx] = .{
+        .checkpoint = checkpoint,
+        .prior_decision_fingerprint = prior_fingerprint,
+        .new_decision_fingerprint = new_fingerprint,
+        .reason = reason,
+        .degraded = degraded,
+    };
+    plan.checkpoint_count += 1;
+}
+
+fn applyPlannerCheckpoint(
+    plan: *PlanStats,
+    snapshot: *const planner_types.PlannerInputSnapshot,
+    checkpoint: planner_types.Checkpoint,
+    counters: *const planner_types.CheckpointCounters,
+) void {
+    var decisions = toPlannerDecisionSet(plan);
+    const prior_fingerprint = planner_fingerprint.decisionFingerprint(&decisions);
+    const result = planner_adaptation.adaptAtCheckpoint(
+        snapshot,
+        checkpoint,
+        counters,
+        &decisions,
+    ) catch return;
+    const new_fingerprint = planner_fingerprint.decisionFingerprint(&decisions);
+    applyPlannerDecisionSet(plan, &decisions);
+    appendCheckpointTrace(
+        plan,
+        checkpoint,
+        prior_fingerprint,
+        new_fingerprint,
+        result.reason,
+        result.degraded,
+    );
+    plan.planner_decision_fingerprint = new_fingerprint;
+}
+
+fn seedPlannerDecisionStats(
+    plan: *PlanStats,
+    ctx: *const ExecContext,
+    model_name: []const u8,
+    model_id: ModelId,
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+) void {
+    const snapshot = buildPlannerSnapshot(ctx, model_name, model_id, ops, op_count);
+    const decisions = planner_mod.planInitial(&snapshot) catch return;
+    plan.planner_policy_version = snapshot.policy_version;
+    plan.planner_snapshot_fingerprint = planner_fingerprint.snapshotFingerprint(&snapshot) catch 0;
+    plan.planner_decision_fingerprint = planner_fingerprint.decisionFingerprint(&decisions);
+    applyPlannerDecisionSet(plan, &decisions);
 }
 
 fn incrementPlanCounter(counter: *u8) void {
