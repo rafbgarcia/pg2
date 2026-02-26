@@ -5229,6 +5229,8 @@ fn applyNestedReadOperatorsPerParent(
                             caps,
                             &group_runtime,
                             string_arena,
+                            result.stats.plan.parallel_scheduler_path == .scheduled_parallel,
+                            result.stats.plan.parallel_sort_min_rows_per_worker,
                         )) return false;
                     },
                     .inspect_op => {},
@@ -5320,7 +5322,7 @@ fn applyNestedReadOperatorsPerParent(
     return true;
 }
 
-/// Stable insertion sort variant for nested child subsets.
+/// Sort variant for nested child subsets with explicit aux buffer routing.
 ///
 /// This path avoids `ctx.scratch_rows_b` usage so nested joins can preserve
 /// left rows while still honoring per-parent `sort(...)` semantics.
@@ -5332,61 +5334,24 @@ fn applySortNoScratch(
     caps: *const capacity_mod.OperatorCapacities,
     group_runtime: *GroupRuntime,
     string_arena: *scan_mod.StringArena,
+    parallel_enabled: bool,
+    parallel_min_rows_per_worker: u16,
 ) bool {
-    const node = ctx.ast.getNode(sort_node);
-    const key_count = ctx.ast.listLen(node.data.unary);
-    if (key_count == 0) {
-        setError(result, "sort requires at least one key");
-        return false;
-    }
-    if (@as(usize, key_count) > caps.sort_keys) {
-        setError(result, "sort capacity exceeded");
-        return false;
-    }
-
-    var sort_keys: [capacity_mod.max_sort_keys]sorting_mod.SortKeyDescriptor = undefined;
-    if (!sorting_mod.buildSortKeyDescriptors(
+    // Nested per-parent sorting cannot use scratch_rows_b because nested join
+    // paths reserve it to preserve left-row ordering. Route through the
+    // common sort module using scratch_rows_a as explicit auxiliary storage.
+    return sorting_mod.applySortWithAux(
         ctx,
         result,
-        node.data.unary,
+        sort_node,
         schema,
-        sort_keys[0..],
-        key_count,
-    )) return false;
-
-    var i: u16 = 1;
-    while (i < result.row_count) : (i += 1) {
-        var j = i;
-        while (j > 0) {
-            const order = sorting_mod.compareRowsBySortKeys(
-                ctx,
-                schema,
-                group_runtime,
-                j - 1,
-                j,
-                &result.rows[j - 1],
-                &result.rows[j],
-                sort_keys[0..key_count],
-                string_arena,
-            ) catch {
-                setError(result, "sort key evaluation failed");
-                return false;
-            };
-            if (order != .gt) break;
-
-            const tmp = result.rows[j - 1];
-            result.rows[j - 1] = result.rows[j];
-            result.rows[j] = tmp;
-
-            if (group_runtime.active) {
-                const ctmp = group_runtime.group_counts[j - 1];
-                group_runtime.group_counts[j - 1] = group_runtime.group_counts[j];
-                group_runtime.group_counts[j] = ctmp;
-            }
-            j -= 1;
-        }
-    }
-    return true;
+        caps,
+        group_runtime,
+        string_arena,
+        ctx.scratch_rows_a,
+        parallel_enabled,
+        parallel_min_rows_per_worker,
+    );
 }
 
 fn inferAssociationJoinDescriptor(
@@ -8909,6 +8874,170 @@ test "execute nested relation collector path without child operators uses hash i
     try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_nested_loop_count);
     try testing.expectEqual(@as(u8, 1), result.stats.plan.nested_join_hash_in_memory_count);
     try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_hash_spill_count);
+}
+
+test "execute parallel mode applies scheduled tasks for nested per-parent sort stage" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+
+    const post_model = try env.catalog.addModel("Post");
+    _ = try env.catalog.addColumn(post_model, "id", .i64, false);
+    _ = try env.catalog.addColumn(post_model, "user_id", .i64, false);
+    env.catalog.models[post_model].heap_first_page_id = 130;
+    env.catalog.models[post_model].total_pages = 1;
+    _ = try env.catalog.addAssociation(
+        env.model_id,
+        "posts",
+        AssociationKind.has_many,
+        "Post",
+    );
+    try env.catalog.resolveAssociations();
+
+    const post_page = try env.pool.pin(130);
+    heap_mod.HeapPage.init(post_page);
+    env.pool.unpin(130, true);
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const user_src = "User |> insert(id = 1, name = \"Alice\", active = true)";
+    const user_tok = tokenizer_mod.tokenize(user_src);
+    const user_p = parser_mod.parse(&user_tok, user_src);
+    try testing.expect(!user_p.has_error);
+    var user_r = try execute(&env.makeCtx(tx, &snap, &user_p.ast, &user_tok, user_src));
+    defer user_r.deinit();
+    try testing.expect(!user_r.has_error);
+
+    var post_id: u16 = 1;
+    while (post_id <= 96) : (post_id += 1) {
+        var post_buf: [128]u8 = undefined;
+        const post_src = try std.fmt.bufPrint(
+            post_buf[0..],
+            "Post |> insert(id = {d}, user_id = 1)",
+            .{post_id},
+        );
+        const post_tok = tokenizer_mod.tokenize(post_src);
+        const post_p = parser_mod.parse(&post_tok, post_src);
+        try testing.expect(!post_p.has_error);
+        var post_r = try execute(&env.makeCtx(tx, &snap, &post_p.ast, &post_tok, post_src));
+        defer post_r.deinit();
+        try testing.expect(!post_r.has_error);
+    }
+
+    const src = "User |> where(id == 1) { id posts |> sort(id desc) { id } }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(ParallelMode.enabled, result.stats.plan.parallel_mode);
+    try testing.expectEqual(
+        ParallelSchedulerPath.scheduled_parallel,
+        result.stats.plan.parallel_scheduler_path,
+    );
+    try testing.expect(result.stats.plan.parallel_schedule_task_count > 0);
+    try testing.expectEqual(
+        result.stats.plan.parallel_schedule_task_count,
+        result.stats.plan.parallel_schedule_applied_tasks,
+    );
+    try testing.expectEqual(@as(u16, 96), result.row_count);
+    try testing.expectEqual(@as(i64, 96), result.rows[0].values[1].i64);
+    try testing.expectEqual(@as(i64, 1), result.rows[result.row_count - 1].values[1].i64);
+}
+
+test "execute returns equivalent nested child sort rows with planner parallel mode on and off" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const post_model = try env.catalog.addModel("Post");
+    _ = try env.catalog.addColumn(post_model, "id", .i64, false);
+    _ = try env.catalog.addColumn(post_model, "user_id", .i64, false);
+    env.catalog.models[post_model].heap_first_page_id = 131;
+    env.catalog.models[post_model].total_pages = 1;
+    _ = try env.catalog.addAssociation(
+        env.model_id,
+        "posts",
+        AssociationKind.has_many,
+        "Post",
+    );
+    try env.catalog.resolveAssociations();
+
+    const post_page = try env.pool.pin(131);
+    heap_mod.HeapPage.init(post_page);
+    env.pool.unpin(131, true);
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const user_src = "User |> insert(id = 1, name = \"Alice\", active = true)";
+    const user_tok = tokenizer_mod.tokenize(user_src);
+    const user_p = parser_mod.parse(&user_tok, user_src);
+    try testing.expect(!user_p.has_error);
+    var user_r = try execute(&env.makeCtx(tx, &snap, &user_p.ast, &user_tok, user_src));
+    defer user_r.deinit();
+    try testing.expect(!user_r.has_error);
+
+    var post_id: u16 = 1;
+    while (post_id <= 96) : (post_id += 1) {
+        var post_buf: [128]u8 = undefined;
+        const post_src = try std.fmt.bufPrint(
+            post_buf[0..],
+            "Post |> insert(id = {d}, user_id = 1)",
+            .{post_id},
+        );
+        const post_tok = tokenizer_mod.tokenize(post_src);
+        const post_p = parser_mod.parse(&post_tok, post_src);
+        try testing.expect(!post_p.has_error);
+        var post_r = try execute(&env.makeCtx(tx, &snap, &post_p.ast, &post_tok, post_src));
+        defer post_r.deinit();
+        try testing.expect(!post_r.has_error);
+    }
+
+    const src = "User |> where(id == 1) { id posts |> sort(id desc) { id } }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+
+    var seq_ctx = env.makeCtx(tx, &snap, &p.ast, &tok, src);
+    var seq_result = try execute(&seq_ctx);
+    defer seq_result.deinit();
+    try testing.expect(!seq_result.has_error);
+    try testing.expectEqual(ParallelMode.sequential, seq_result.stats.plan.parallel_mode);
+
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+    var par_ctx = env.makeCtx(tx, &snap, &p.ast, &tok, src);
+    var par_result = try execute(&par_ctx);
+    defer par_result.deinit();
+    try testing.expect(!par_result.has_error);
+    try testing.expectEqual(ParallelMode.enabled, par_result.stats.plan.parallel_mode);
+    try testing.expectEqual(
+        ParallelSchedulerPath.scheduled_parallel,
+        par_result.stats.plan.parallel_scheduler_path,
+    );
+    try testing.expect(par_result.stats.plan.parallel_schedule_applied_tasks <= par_result.stats.plan.parallel_schedule_task_count);
+
+    try testing.expectEqual(seq_result.row_count, par_result.row_count);
+    var i: u16 = 0;
+    while (i < seq_result.row_count) : (i += 1) {
+        try testing.expectEqual(seq_result.rows[i].column_count, par_result.rows[i].column_count);
+        var col: u16 = 0;
+        while (col < seq_result.rows[i].column_count) : (col += 1) {
+            try testing.expectEqual(
+                std.math.Order.eq,
+                row_mod.compareValues(
+                    seq_result.rows[i].values[col],
+                    par_result.rows[i].values[col],
+                ),
+            );
+        }
+    }
 }
 
 test "execute nested relation with child operators uses hash spill strategy when right side exceeds flat fit" {

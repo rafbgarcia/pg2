@@ -57,6 +57,32 @@ pub fn applySort(
     parallel_enabled: bool,
     parallel_min_rows_per_worker: u16,
 ) bool {
+    return applySortWithAux(
+        ctx,
+        result,
+        sort_node,
+        schema,
+        caps,
+        group_runtime,
+        string_arena,
+        ctx.scratch_rows_b,
+        parallel_enabled,
+        parallel_min_rows_per_worker,
+    );
+}
+
+pub fn applySortWithAux(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    sort_node: NodeIndex,
+    schema: *const RowSchema,
+    caps: *const capacity_mod.OperatorCapacities,
+    group_runtime: *GroupRuntime,
+    string_arena: *scan_mod.StringArena,
+    aux_rows: []ResultRow,
+    parallel_enabled: bool,
+    parallel_min_rows_per_worker: u16,
+) bool {
     const node = ctx.ast.getNode(sort_node);
     const key_count = ctx.ast.listLen(node.data.unary);
     if (key_count == 0) {
@@ -90,6 +116,7 @@ pub fn applySort(
             schema,
             sort_keys[0..key_count],
             group_runtime,
+            aux_rows,
             parallel_min_rows_per_worker,
             string_arena,
         ))
@@ -99,12 +126,13 @@ pub fn applySort(
         return true;
     }
 
-    sortRowsMerge(
+    sortRowsMergeWithAux(
         ctx,
         result,
         schema,
         sort_keys[0..key_count],
         group_runtime,
+        aux_rows,
         string_arena,
     ) catch {
         setError(result, "sort key evaluation failed");
@@ -149,6 +177,7 @@ fn tryApplySortParallel(
     schema: *const RowSchema,
     sort_keys: []const SortKeyDescriptor,
     group_runtime: *GroupRuntime,
+    aux_rows: []ResultRow,
     parallel_min_rows_per_worker: u16,
     string_arena: *scan_mod.StringArena,
 ) bool {
@@ -241,7 +270,7 @@ fn tryApplySortParallel(
     mergeSortedChunks(
         ctx,
         result.rows[0..result.row_count],
-        ctx.scratch_rows_b[0..result.row_count],
+        aux_rows[0..result.row_count],
         group_runtime,
         &state_indices,
         schema,
@@ -467,10 +496,29 @@ pub fn sortRowsMerge(
     group_runtime: *GroupRuntime,
     string_arena: *scan_mod.StringArena,
 ) SortEvalError!void {
+    try sortRowsMergeWithAux(
+        ctx,
+        result,
+        schema,
+        sort_keys,
+        group_runtime,
+        ctx.scratch_rows_b,
+        string_arena,
+    );
+}
+
+pub fn sortRowsMergeWithAux(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    schema: *const RowSchema,
+    sort_keys: []const SortKeyDescriptor,
+    group_runtime: *GroupRuntime,
+    aux_rows: []ResultRow,
+    string_arena: *scan_mod.StringArena,
+) SortEvalError!void {
     const n = result.row_count;
     if (n <= 1) return;
 
-    const aux_rows = ctx.scratch_rows_b;
     std.debug.assert(aux_rows.len >= n);
 
     // Auxiliary group counts buffer (16 KB on stack for scan_batch_size=4096).

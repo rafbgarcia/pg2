@@ -38,6 +38,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - in-memory sort (ungrouped + grouped aggregate-key)
   - flat OFFSET compaction
   - nested hash left-join probe/write stage (deterministic two-pass parallel path)
+  - nested per-parent child `sort(...)` stage in nested relation pipelines (aux-routed, deterministic parallel path)
 - ✅ Fail-closed serial fallback on worker spawn failure for all true-parallel stages above
 - ✅ Semantic equivalence coverage (sequential vs parallel-enabled) for all true-parallel stages above
 - ✅ Full gate passing (`zig build test-all --summary all`)
@@ -119,8 +120,11 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - parallel-mode checkpoint chronology order coverage added for stable `pre_scan -> post_filter -> post_group -> pre_join` ordering under true parallel execution
   - parallel-mode zero-row coverage added to lock `parallel_schedule_applied_tasks=0` when no rows are processed
   - server serialization contract test added to lock inspect/explain scheduler output for `scheduled_parallel`
+  - nested per-parent child sort parallel coverage added:
+    - applied-task coverage under planner parallel mode
+    - semantic-equivalence coverage (parallel-enabled vs sequential)
 - Verification:
-  - `zig build test-all --summary all` passing after planner-owned stage admission-threshold contract migration (`932/934` passed, `2` skipped)
+  - `zig build test-all --summary all` passing after nested per-parent sort scheduled-parallel extension (`934/936` passed, `2` skipped)
   - phase-gate commands passing:
     - `zig build unit --summary all` (`663/665` passed, `2` skipped)
     - `zig build test --summary all` (`247/247` passed)
