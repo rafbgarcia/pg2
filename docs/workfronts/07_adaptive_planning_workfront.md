@@ -20,6 +20,25 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ## Implementation Status (2026-02-26)
 
+### Progress Checklist
+
+- ✅ Planner module/contracts foundation landed (`src/planner/*`)
+- ✅ Deterministic checkpoint adaptation wired (`pre_scan -> post_filter -> post_group -> pre_join`)
+- ✅ Planner-owned decision fields enforced (`*_strategy`, `*_mode`, `*_reason`)
+- ✅ Deterministic schedule trace + inspect/explain serialization contracts landed
+- ✅ True scheduled parallel execution landed for:
+  - WHERE filtering
+  - HAVING filtering (flat rows)
+  - flat projection (column + computed expressions)
+  - in-memory sort (ungrouped + grouped aggregate-key)
+  - flat OFFSET compaction
+- ✅ Fail-closed serial fallback on worker spawn failure for all true-parallel stages above
+- ✅ Semantic equivalence coverage (sequential vs parallel-enabled) for all true-parallel stages above
+- ✅ Full gate passing (`zig build test-all --summary all`)
+- 🟡 Remaining to complete WF07:
+  - extend true scheduled parallel execution beyond current stage set
+  - finalize Phase 3/4/5/6 completion gates end-to-end and lock completion status
+
 - Implemented:
   - New query planner module surface under `src/planner/` with:
     - immutable snapshot + decision schemas
@@ -85,7 +104,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 - Verification:
   - `zig build test-all --summary all` passing after flat OFFSET scheduled-parallel extension (`924/926` passed, `2` skipped)
 - Remaining:
-  - expand true parallel execution beyond WHERE/HAVING-filter, flat projection, and in-memory sort processing while preserving deterministic/fail-closed behavior
+  - expand true parallel execution beyond WHERE/HAVING-filter, flat projection, in-memory sort, and flat OFFSET processing while preserving deterministic/fail-closed behavior
 
 ## Fresh Session Handoff Snapshot (2026-02-26)
 
@@ -143,6 +162,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Relevant Commits (newest first)
 
+- `37cb3a2` Update WF07 handoff for offset-stage parallel coverage
 - `39bdee4` Extend scheduled parallel execution to flat offset stage
 - `e676ea3` Extend scheduled parallel sort to grouped aggregate-key paths
 - `d5b6d4c` Fix grouped sort aggregate-state alignment invariant
@@ -176,10 +196,11 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Immediate Next Step (single-threaded priority)
 
-1. Extend planner-parallel true execution coverage beyond WHERE/HAVING-filter, flat projection, and in-memory sort stages while preserving:
+1. Extend planner-parallel true execution coverage beyond WHERE/HAVING-filter, flat projection, in-memory sort, and flat OFFSET stages while preserving:
    - deterministic schedule traces for fixed seeds
    - semantic equivalence with sequential mode
    - fail-closed behavior under capacity pressure
+   - checkpoint chronology and inspect/explain contract stability
 
 ### Acceptance Gates (must all pass)
 
