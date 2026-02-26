@@ -209,6 +209,7 @@ const variable_arena_min_bytes: usize = 64 * 1024;
 const max_parallel_filter_workers: usize = 4;
 const parallel_filter_min_rows_per_worker: usize = 1;
 const parallel_filter_worker_arena_bytes: usize = filter_mod.max_string_result_bytes * 2;
+const parallel_offset_min_rows_per_worker: usize = 32;
 
 const VariableValue = union(enum) {
     scalar: Value,
@@ -5817,6 +5818,20 @@ fn applyOffset(
     }
 
     const remaining = result.row_count - offset;
+    if (result.stats.plan.parallel_scheduler_path == .scheduled_parallel and
+        tryApplyOffsetParallel(
+            ctx,
+            result,
+            group_runtime,
+            offset,
+            remaining,
+        ))
+    {
+        result.stats.plan.parallel_schedule_applied_tasks =
+            result.stats.plan.parallel_schedule_task_count;
+        return;
+    }
+
     var i: u16 = 0;
     while (i < remaining) : (i += 1) {
         result.rows[i] = result.rows[i + offset];
@@ -5827,6 +5842,97 @@ fn applyOffset(
     }
     result.row_count = remaining;
     std.debug.assert(result.row_count == remaining);
+}
+
+const ParallelOffsetWorker = struct {
+    src_rows: []const ResultRow,
+    dst_rows: []ResultRow,
+    src_counts: ?*const [scan_mod.scan_batch_size]u32 = null,
+    dst_counts: ?*[scan_mod.scan_batch_size]u32 = null,
+    offset: u16,
+    start_idx: u16,
+    end_idx: u16,
+
+    fn run(self: *ParallelOffsetWorker) void {
+        var i = self.start_idx;
+        while (i < self.end_idx) : (i += 1) {
+            self.dst_rows[i] = self.src_rows[i + self.offset];
+            if (self.src_counts != null and self.dst_counts != null) {
+                self.dst_counts.?[i] = self.src_counts.?[i + self.offset];
+            }
+        }
+    }
+};
+
+fn tryApplyOffsetParallel(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    group_runtime: *GroupRuntime,
+    offset: u16,
+    remaining: u16,
+) bool {
+    const remaining_usize: usize = remaining;
+    if (remaining_usize < parallel_offset_min_rows_per_worker * 2) return false;
+
+    const max_workers = @min(max_parallel_filter_workers, remaining_usize);
+    var worker_count = @min(max_workers, remaining_usize / parallel_offset_min_rows_per_worker);
+    if (worker_count < 2) return false;
+    if (worker_count > max_parallel_filter_workers) worker_count = max_parallel_filter_workers;
+
+    var aux_counts: [scan_mod.scan_batch_size]u32 = undefined;
+    var workers: [max_parallel_filter_workers]ParallelOffsetWorker = undefined;
+    var threads: [max_parallel_filter_workers - 1]?std.Thread =
+        [_]?std.Thread{null} ** (max_parallel_filter_workers - 1);
+    var spawned: usize = 0;
+
+    const base = remaining_usize / worker_count;
+    const remainder = remaining_usize % worker_count;
+    var start_idx: usize = 0;
+    var worker_idx: usize = 0;
+    while (worker_idx < worker_count) : (worker_idx += 1) {
+        const span = base + if (worker_idx < remainder) @as(usize, 1) else @as(usize, 0);
+        const end_idx = start_idx + span;
+        workers[worker_idx] = .{
+            .src_rows = result.rows[0..result.row_count],
+            .dst_rows = ctx.scratch_rows_a[0..result.row_count],
+            .src_counts = if (group_runtime.active) &group_runtime.group_counts else null,
+            .dst_counts = if (group_runtime.active) &aux_counts else null,
+            .offset = offset,
+            .start_idx = @intCast(start_idx),
+            .end_idx = @intCast(end_idx),
+        };
+        start_idx = end_idx;
+    }
+
+    worker_idx = 1;
+    while (worker_idx < worker_count) : (worker_idx += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, ParallelOffsetWorker.run, .{&workers[worker_idx]}) catch {
+            var join_idx: usize = 0;
+            while (join_idx < spawned) : (join_idx += 1) {
+                threads[join_idx].?.join();
+            }
+            return false;
+        };
+        spawned += 1;
+    }
+
+    workers[0].run();
+
+    var join_idx: usize = 0;
+    while (join_idx < spawned) : (join_idx += 1) {
+        threads[join_idx].?.join();
+    }
+
+    @memcpy(
+        result.rows[0..remaining],
+        ctx.scratch_rows_a[0..remaining],
+    );
+    if (group_runtime.active) {
+        @memcpy(group_runtime.group_counts[0..remaining], aux_counts[0..remaining]);
+    }
+    result.row_count = remaining;
+    std.debug.assert(result.row_count == remaining);
+    return true;
 }
 
 fn numericToRowCount(value: Value) ?u16 {
@@ -7727,6 +7833,104 @@ test "execute returns equivalent grouped aggregate-key sort rows with planner pa
     }
 
     const src = "User |> group(id) |> sort(sum(id) desc) { id }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+
+    env.planner_feature_gate_mask = 0;
+    var result_seq = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result_seq.deinit();
+    try testing.expect(!result_seq.has_error);
+    try testing.expectEqual(ParallelMode.sequential, result_seq.stats.plan.parallel_mode);
+
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+    var result_par = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result_par.deinit();
+    try testing.expect(!result_par.has_error);
+    try testing.expectEqual(ParallelMode.enabled, result_par.stats.plan.parallel_mode);
+    try testing.expectEqual(
+        ParallelSchedulerPath.scheduled_parallel,
+        result_par.stats.plan.parallel_scheduler_path,
+    );
+    try testing.expect(
+        result_par.stats.plan.parallel_schedule_applied_tasks <=
+            result_par.stats.plan.parallel_schedule_task_count,
+    );
+
+    try expectResultRowsEqual(&result_seq, &result_par);
+}
+
+test "execute parallel mode applies scheduled tasks for flat offset compaction" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    var id: u32 = 1;
+    while (id <= 96) : (id += 1) {
+        var insert_buf: [128]u8 = undefined;
+        const src_insert = try std.fmt.bufPrint(
+            insert_buf[0..],
+            "User |> insert(id = {d}, name = \"OF{d}\", active = true)",
+            .{ id, id },
+        );
+        const tok_insert = tokenizer_mod.tokenize(src_insert);
+        const p_insert = parser_mod.parse(&tok_insert, src_insert);
+        try testing.expect(!p_insert.has_error);
+        var r_insert = try execute(&env.makeCtx(tx, &snap, &p_insert.ast, &tok_insert, src_insert));
+        defer r_insert.deinit();
+        try testing.expect(!r_insert.has_error);
+    }
+
+    const src = "User |> offset(16) |> inspect";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(ParallelMode.enabled, result.stats.plan.parallel_mode);
+    try testing.expectEqual(
+        ParallelSchedulerPath.scheduled_parallel,
+        result.stats.plan.parallel_scheduler_path,
+    );
+    try testing.expect(result.stats.plan.parallel_schedule_task_count > 0);
+    try testing.expectEqual(
+        result.stats.plan.parallel_schedule_task_count,
+        result.stats.plan.parallel_schedule_applied_tasks,
+    );
+}
+
+test "execute returns equivalent rows for limit and offset with planner parallel mode" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    var id: u32 = 1;
+    while (id <= 96) : (id += 1) {
+        var insert_buf: [128]u8 = undefined;
+        const src_insert = try std.fmt.bufPrint(
+            insert_buf[0..],
+            "User |> insert(id = {d}, name = \"LO{d}\", active = true)",
+            .{ id, id },
+        );
+        const tok_insert = tokenizer_mod.tokenize(src_insert);
+        const p_insert = parser_mod.parse(&tok_insert, src_insert);
+        try testing.expect(!p_insert.has_error);
+        var r_insert = try execute(&env.makeCtx(tx, &snap, &p_insert.ast, &tok_insert, src_insert));
+        defer r_insert.deinit();
+        try testing.expect(!r_insert.has_error);
+    }
+
+    const src = "User |> offset(17) |> limit(40)";
     const tok = tokenizer_mod.tokenize(src);
     const p = parser_mod.parse(&tok, src);
     try testing.expect(!p.has_error);
