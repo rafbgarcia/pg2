@@ -61,6 +61,7 @@ pub const simulator = struct {
 };
 
 pub const planner = @import("planner/mod.zig");
+pub const advisor = @import("advisor/mod.zig");
 
 pub const runtime = struct {
     pub const bootstrap = @import("runtime/bootstrap.zig");
@@ -123,6 +124,7 @@ comptime {
     _ = simulator.fault_matrix;
     _ = simulator.fk_fault_matrix;
     _ = planner;
+    _ = advisor;
     _ = runtime.bootstrap;
     _ = runtime.config;
     _ = runtime.capacity_planner;

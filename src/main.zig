@@ -16,6 +16,7 @@ const pool_mod = @import("pg2").server.pool;
 const diagnostics_mod = @import("pg2").server.diagnostics;
 const reactor_mod = @import("pg2").server.reactor;
 const io_uring_transport_mod = @import("pg2").server.io_uring_transport;
+const advisor_mod = @import("pg2").advisor;
 const catalog_mod = @import("pg2").catalog.meta;
 const io_mod = @import("pg2").storage.io;
 
@@ -41,6 +42,10 @@ pub fn main() !void {
     }
     if (argv.items.len > 0 and std.mem.eql(u8, argv.items[0], "inspect")) {
         try handleInspectCommand(stdout, argv.items[1..]);
+        return;
+    }
+    if (argv.items.len > 0 and std.mem.eql(u8, argv.items[0], "advise")) {
+        try handleAdviseCommand(stdout, argv.items[1..]);
         return;
     }
 
@@ -83,6 +88,7 @@ pub fn main() !void {
                 \\  pg2 [--memory <bytes|MiB|GiB>] [--listen <host:port>] [--storage <dir>]
                 \\  pg2 lock inspect [--storage <dir>]
                 \\  pg2 inspect runtime --format json --server <host:port>
+                \\  pg2 advise
                 \\  --memory       Startup memory budget (default: 512MiB)
                 \\  --listen       Start server accept loop (Linux-only target)
                 \\  --storage      Runtime storage root (default: .pg2)
@@ -488,4 +494,49 @@ fn handleInspectCommand(stdout: std.fs.File, args: []const []const u8) !void {
         return;
     }
     try stdout.writeAll(response);
+}
+
+fn handleAdviseCommand(stdout: std.fs.File, args: []const []const u8) !void {
+    if (args.len > 0) {
+        if (args.len == 1 and std.mem.eql(u8, args[0], "--help")) {
+            try stdout.writeAll("Usage: pg2 advise\n");
+            return;
+        }
+        try stdout.writeAll("unknown argument\n");
+        return;
+    }
+
+    var storage_dir = std.fs.cwd().openDir(runtime_storage_root_mod.default_storage_root, .{}) catch {
+        try stdout.writeAll("no advisories\n");
+        return;
+    };
+    defer storage_dir.close();
+
+    const allocator = std.heap.page_allocator;
+    const records = advisor_mod.metrics.readAll(allocator, &storage_dir) catch |err| switch (err) {
+        error.FileNotFound => {
+            try stdout.writeAll("no advisories\n");
+            return;
+        },
+        error.InvalidFormat, error.UnsupportedVersion => {
+            try stdout.writeAll("advise failed: advisor metrics file is corrupted\n");
+            return;
+        },
+        else => {
+            try stdout.writeAll("advise failed: could not read advisor metrics\n");
+            return;
+        },
+    };
+    defer allocator.free(records);
+
+    const advisories = advisor_mod.rules.evaluate(allocator, records) catch {
+        try stdout.writeAll("advise failed: could not evaluate advisories\n");
+        return;
+    };
+    defer allocator.free(advisories);
+
+    advisor_mod.rules.writeText(stdout.writer(), advisories) catch {
+        try stdout.writeAll("advise failed: output formatting failed\n");
+        return;
+    };
 }

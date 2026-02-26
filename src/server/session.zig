@@ -15,6 +15,7 @@ const parser_mod = @import("../parser/parser.zig");
 const tokenizer_mod = @import("../parser/tokenizer.zig");
 const ast_mod = @import("../parser/ast.zig");
 const serialization_mod = @import("serialization.zig");
+const exec_mod = @import("../executor/executor.zig");
 const mutation_mod = @import("../executor/mutation.zig");
 const spill_collector_mod = @import("../executor/spill_collector.zig");
 const scan_mod = @import("../executor/scan.zig");
@@ -26,6 +27,7 @@ const catalog_mod = @import("../catalog/catalog.zig");
 const heap_mod = @import("../storage/heap.zig");
 const io_mod = @import("../storage/io.zig");
 const disk_mod = @import("../simulator/disk.zig");
+const advisor_metrics_mod = @import("../advisor/metrics.zig");
 
 const BootstrappedRuntime = bootstrap_mod.BootstrappedRuntime;
 const Catalog = catalog_mod.Catalog;
@@ -232,6 +234,14 @@ pub const Session = struct {
             &tokens,
             source,
         );
+        if (!result.has_error) {
+            self.persistAdvisorMetric(
+                &parsed.ast,
+                source,
+                &result.stats,
+                runtime_inspect_stats,
+            );
+        }
         const had_mutation =
             result.stats.rows_inserted > 0 or
             result.stats.rows_updated > 0 or
@@ -240,6 +250,44 @@ pub const Session = struct {
             .bytes_written = stream.pos,
             .is_query_error = result.has_error,
             .had_mutation = had_mutation,
+        };
+    }
+
+    fn persistAdvisorMetric(
+        self: *Session,
+        ast: *const ast_mod.Ast,
+        source: []const u8,
+        stats: *const exec_mod.ExecStats,
+        runtime_inspect_stats: ?RuntimeInspectStats,
+    ) void {
+        const storage_root = self.storage_root orelse return;
+        const operation = detectOperationKind(ast);
+        const runtime_stats = runtime_inspect_stats orelse RuntimeInspectStats{};
+        const metric: advisor_metrics_mod.MetricRecord = .{
+            .timestamp_unix_ns = @intCast(@max(@as(i64, 0), std.time.nanoTimestamp())),
+            .query_fingerprint = std.hash.Wyhash.hash(0, source),
+            .operation_kind = operation,
+            .has_predicate_filter = astHasPredicateFilter(ast),
+            .had_error = false,
+            .spill_triggered = stats.spill_triggered,
+            .scan_strategy = @intCast(@intFromEnum(stats.plan.scan_strategy)),
+            .join_strategy = @intCast(@intFromEnum(stats.plan.join_strategy)),
+            .rows_scanned = stats.rows_scanned,
+            .rows_matched = stats.rows_matched,
+            .rows_returned = stats.rows_returned,
+            .rows_inserted = stats.rows_inserted,
+            .rows_updated = stats.rows_updated,
+            .rows_deleted = stats.rows_deleted,
+            .temp_pages_allocated = stats.temp_pages_allocated,
+            .temp_pages_reclaimed = stats.temp_pages_reclaimed,
+            .temp_bytes_written = stats.temp_bytes_written,
+            .temp_bytes_read = stats.temp_bytes_read,
+            .queue_depth = saturatingU32(runtime_stats.queue_depth),
+            .workers_busy = saturatingU32(runtime_stats.workers_busy),
+            .queue_timeout_total = runtime_stats.queue_timeout_total,
+        };
+        advisor_metrics_mod.appendRecord(&storage_root.root_dir, &metric) catch |err| {
+            std.log.warn("advisor metrics append failed: {s}", .{@errorName(err)});
         };
     }
 
@@ -955,6 +1003,59 @@ fn astHasInspectOp(ast: *const ast_mod.Ast) bool {
         if (ast.nodes[i].tag == NodeTag.op_inspect) return true;
     }
     return false;
+}
+
+fn detectOperationKind(ast: *const ast_mod.Ast) advisor_metrics_mod.OperationKind {
+    if (astTopLevelStatementCount(ast) > 1) return .mixed;
+
+    var has_insert = false;
+    var has_update = false;
+    var has_delete = false;
+    var i: usize = 0;
+    while (i < ast.node_count) : (i += 1) {
+        switch (ast.nodes[i].tag) {
+            .op_insert => has_insert = true,
+            .op_update => has_update = true,
+            .op_delete => has_delete = true,
+            else => {},
+        }
+    }
+    var kind_count: u8 = 0;
+    if (has_insert) kind_count += 1;
+    if (has_update) kind_count += 1;
+    if (has_delete) kind_count += 1;
+    if (kind_count > 1) return .mixed;
+    if (has_insert) return .insert;
+    if (has_update) return .update;
+    if (has_delete) return .delete;
+    return .select;
+}
+
+fn astHasPredicateFilter(ast: *const ast_mod.Ast) bool {
+    var i: usize = 0;
+    while (i < ast.node_count) : (i += 1) {
+        switch (ast.nodes[i].tag) {
+            .op_where, .op_having => return true,
+            else => {},
+        }
+    }
+    return false;
+}
+
+fn saturatingU32(value: usize) u32 {
+    return @intCast(@min(value, @as(usize, std.math.maxInt(u32))));
+}
+
+fn astTopLevelStatementCount(ast: *const ast_mod.Ast) u16 {
+    if (ast.root == null_node) return 0;
+    const root = ast.getNode(ast.root);
+    if (root.tag != .root) return 0;
+    var count: u16 = 0;
+    var stmt = root.data.unary;
+    while (stmt != null_node) : (stmt = ast.nodes[stmt].next) {
+        count += 1;
+    }
+    return count;
 }
 
 fn missingCrudReturningBlock(ast: *const ast_mod.Ast) bool {
