@@ -29,6 +29,9 @@ const GroupRuntime = aggregation_mod.GroupRuntime;
 const max_sort_keys = capacity_mod.max_sort_keys;
 const sort_key_desc_mask: u16 = 0x0001;
 const sort_key_expr_mask: u16 = 0x8000;
+const max_parallel_sort_workers: usize = 4;
+const parallel_sort_min_rows_per_worker: usize = 32;
+const parallel_sort_worker_arena_bytes: usize = filter_mod.max_string_result_bytes * 2;
 
 pub const SortKeyKind = enum {
     column,
@@ -50,6 +53,7 @@ pub fn applySort(
     caps: *const capacity_mod.OperatorCapacities,
     group_runtime: *GroupRuntime,
     string_arena: *scan_mod.StringArena,
+    parallel_enabled: bool,
 ) bool {
     const node = ctx.ast.getNode(sort_node);
     const key_count = ctx.ast.listLen(node.data.unary);
@@ -77,6 +81,21 @@ pub fn applySort(
         return false;
     }
 
+    if (parallel_enabled and
+        !group_runtime.active and
+        tryApplySortParallel(
+            ctx,
+            result,
+            schema,
+            sort_keys[0..key_count],
+            string_arena,
+        ))
+    {
+        result.stats.plan.parallel_schedule_applied_tasks =
+            result.stats.plan.parallel_schedule_task_count;
+        return true;
+    }
+
     sortRowsMerge(
         ctx,
         result,
@@ -89,6 +108,266 @@ pub fn applySort(
         return false;
     };
     return true;
+}
+
+const ParallelSortWorker = struct {
+    ctx: *const ExecContext,
+    rows: []ResultRow,
+    aux: []ResultRow,
+    schema: *const RowSchema,
+    sort_keys: []const SortKeyDescriptor,
+    had_eval_error: bool = false,
+
+    fn run(self: *ParallelSortWorker) void {
+        var arena_buf: [parallel_sort_worker_arena_bytes]u8 = undefined;
+        var arena = scan_mod.StringArena.init(&arena_buf);
+        sortRowsMergeUngrouped(
+            self.ctx,
+            self.rows,
+            self.aux,
+            self.schema,
+            self.sort_keys,
+            &arena,
+        ) catch {
+            self.had_eval_error = true;
+        };
+    }
+};
+
+fn tryApplySortParallel(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    schema: *const RowSchema,
+    sort_keys: []const SortKeyDescriptor,
+    string_arena: *scan_mod.StringArena,
+) bool {
+    const row_count: usize = result.row_count;
+    if (row_count < parallel_sort_min_rows_per_worker * 2) return false;
+
+    const max_workers = @min(max_parallel_sort_workers, row_count);
+    var worker_count = @min(max_workers, row_count / parallel_sort_min_rows_per_worker);
+    if (worker_count < 2) return false;
+    if (worker_count > max_parallel_sort_workers) worker_count = max_parallel_sort_workers;
+
+    var boundaries: [max_parallel_sort_workers + 1]u16 = [_]u16{0} ** (max_parallel_sort_workers + 1);
+    const base = row_count / worker_count;
+    const remainder = row_count % worker_count;
+    var cursor: usize = 0;
+    var worker_idx: usize = 0;
+    while (worker_idx < worker_count) : (worker_idx += 1) {
+        boundaries[worker_idx] = @intCast(cursor);
+        const span = base + if (worker_idx < remainder) @as(usize, 1) else @as(usize, 0);
+        cursor += span;
+    }
+    boundaries[worker_count] = @intCast(cursor);
+    std.debug.assert(boundaries[worker_count] == result.row_count);
+
+    var workers: [max_parallel_sort_workers]ParallelSortWorker = undefined;
+    worker_idx = 0;
+    while (worker_idx < worker_count) : (worker_idx += 1) {
+        const start = boundaries[worker_idx];
+        const end = boundaries[worker_idx + 1];
+        workers[worker_idx] = .{
+            .ctx = ctx,
+            .rows = result.rows[start..end],
+            .aux = ctx.scratch_rows_b[start..end],
+            .schema = schema,
+            .sort_keys = sort_keys,
+        };
+    }
+
+    var threads: [max_parallel_sort_workers - 1]?std.Thread =
+        [_]?std.Thread{null} ** (max_parallel_sort_workers - 1);
+    var spawned: usize = 0;
+    worker_idx = 1;
+    while (worker_idx < worker_count) : (worker_idx += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, ParallelSortWorker.run, .{&workers[worker_idx]}) catch {
+            var join_idx: usize = 0;
+            while (join_idx < spawned) : (join_idx += 1) {
+                threads[join_idx].?.join();
+            }
+            return false;
+        };
+        spawned += 1;
+    }
+    workers[0].run();
+    var join_idx: usize = 0;
+    while (join_idx < spawned) : (join_idx += 1) {
+        threads[join_idx].?.join();
+    }
+    worker_idx = 0;
+    while (worker_idx < worker_count) : (worker_idx += 1) {
+        if (!workers[worker_idx].had_eval_error) continue;
+        setError(result, "sort key evaluation failed");
+        return true;
+    }
+
+    mergeSortedChunksUngrouped(
+        ctx,
+        result.rows[0..result.row_count],
+        ctx.scratch_rows_b[0..result.row_count],
+        schema,
+        sort_keys,
+        boundaries[0 .. worker_count + 1],
+        string_arena,
+    ) catch {
+        setError(result, "sort key evaluation failed");
+        return true;
+    };
+    return true;
+}
+
+fn sortRowsMergeUngrouped(
+    ctx: *const ExecContext,
+    rows: []ResultRow,
+    aux: []ResultRow,
+    schema: *const RowSchema,
+    sort_keys: []const SortKeyDescriptor,
+    string_arena: *scan_mod.StringArena,
+) SortEvalError!void {
+    const n = rows.len;
+    if (n <= 1) return;
+    std.debug.assert(aux.len >= n);
+
+    var src_rows = rows;
+    var dst_rows = aux[0..n];
+    var in_result = true;
+    const group_runtime = GroupRuntime{};
+
+    var width: usize = 1;
+    while (width < n) {
+        var i: usize = 0;
+        while (i < n) {
+            const mid = @min(i + width, n);
+            const end = @min(mid + width, n);
+            try mergeAdjacentRunsUngrouped(
+                ctx,
+                schema,
+                &group_runtime,
+                sort_keys,
+                string_arena,
+                src_rows,
+                dst_rows,
+                @intCast(i),
+                @intCast(mid),
+                @intCast(end),
+            );
+            i = end;
+        }
+
+        const tmp = src_rows;
+        src_rows = dst_rows;
+        dst_rows = tmp;
+        in_result = !in_result;
+
+        if (width > n / 2) break;
+        width *= 2;
+    }
+
+    if (!in_result) {
+        @memcpy(rows, src_rows);
+    }
+}
+
+fn mergeAdjacentRunsUngrouped(
+    ctx: *const ExecContext,
+    schema: *const RowSchema,
+    group_runtime: *const GroupRuntime,
+    sort_keys: []const SortKeyDescriptor,
+    string_arena: *scan_mod.StringArena,
+    src: []const ResultRow,
+    dst: []ResultRow,
+    left: u16,
+    mid: u16,
+    right: u16,
+) SortEvalError!void {
+    var l = left;
+    var r = mid;
+    var out = left;
+
+    while (l < mid and r < right) {
+        const order = compareRowsBySortKeys(
+            ctx,
+            schema,
+            group_runtime,
+            l,
+            r,
+            &src[l],
+            &src[r],
+            sort_keys,
+            string_arena,
+        ) catch return error.EvalFailed;
+        if (order != .gt) {
+            dst[out] = src[l];
+            l += 1;
+        } else {
+            dst[out] = src[r];
+            r += 1;
+        }
+        out += 1;
+    }
+    while (l < mid) {
+        dst[out] = src[l];
+        l += 1;
+        out += 1;
+    }
+    while (r < right) {
+        dst[out] = src[r];
+        r += 1;
+        out += 1;
+    }
+}
+
+fn mergeSortedChunksUngrouped(
+    ctx: *const ExecContext,
+    rows: []ResultRow,
+    aux: []ResultRow,
+    schema: *const RowSchema,
+    sort_keys: []const SortKeyDescriptor,
+    boundaries: []const u16,
+    string_arena: *scan_mod.StringArena,
+) SortEvalError!void {
+    const chunk_count = boundaries.len - 1;
+    std.debug.assert(chunk_count >= 2);
+    const group_runtime = GroupRuntime{};
+
+    var positions: [max_parallel_sort_workers]u16 = undefined;
+    for (0..chunk_count) |i| positions[i] = boundaries[i];
+
+    var out: usize = 0;
+    while (out < rows.len) : (out += 1) {
+        var best_chunk: ?usize = null;
+        var chunk_idx: usize = 0;
+        while (chunk_idx < chunk_count) : (chunk_idx += 1) {
+            if (positions[chunk_idx] >= boundaries[chunk_idx + 1]) continue;
+            if (best_chunk == null) {
+                best_chunk = chunk_idx;
+                continue;
+            }
+            const current_idx = positions[chunk_idx];
+            const best_idx = positions[best_chunk.?];
+            const order = compareRowsBySortKeys(
+                ctx,
+                schema,
+                &group_runtime,
+                current_idx,
+                best_idx,
+                &rows[current_idx],
+                &rows[best_idx],
+                sort_keys,
+                string_arena,
+            ) catch return error.EvalFailed;
+            if (order == .lt or (order == .eq and chunk_idx < best_chunk.?)) {
+                best_chunk = chunk_idx;
+            }
+        }
+        std.debug.assert(best_chunk != null);
+        const selected_chunk = best_chunk.?;
+        const selected_idx = positions[selected_chunk];
+        aux[out] = rows[selected_idx];
+        positions[selected_chunk] += 1;
+    }
+    @memcpy(rows, aux[0..rows.len]);
 }
 
 pub fn buildSortKeyDescriptors(
