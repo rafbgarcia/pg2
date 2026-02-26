@@ -53,7 +53,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
       - `parallel_schedule_fingerprint`
     - executor now routes `parallel_mode=enabled` through deterministic parallel execution for per-chunk WHERE filtering (`parallel_scheduler_path=scheduled_parallel`) with fail-closed serial fallback if worker spawn fails
     - flat, column-only selection projection now also supports deterministic parallel execution under planner parallel mode with fail-closed serial fallback
-  - Tests:
+- Tests:
   - internal planner contract tests added under `test/internals/planner/`
   - user-visible inspect contract coverage added under:
     - `test/features/queries/planner_inspect_contract_test.zig`
@@ -101,7 +101,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - deterministic parallel scheduler path activated when `parallel_mode=enabled`
   - parallel WHERE-filter execution uses deterministic row-range partitioning and stable compaction order
   - parallel flat-column projection execution uses deterministic row-range partitioning and per-row in-place rewrite
-  - parallel path degrades fail-closed to serial filtering if worker spawn fails
+  - parallel path degrades fail-closed to serial filtering/projection if worker spawn fails
 - Tests added/extended:
   - internals planner contract tests
   - sim adaptation replay determinism
@@ -109,11 +109,14 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - stress planner checkpoint/fingerprint assertions
   - feature-level inspect contract test (`test/features/queries/planner_inspect_contract_test.zig`)
   - executor semantic-equivalence + deterministic parallel metadata replay tests
+  - executor large-row semantic-equivalence test for flat projection in planner parallel mode
   - server serialization inspect/explain scheduler-contract test for `scheduled_parallel`
 
 ### Relevant Commits (newest first)
 
+- `b3c7148` Update WF07 status/handoff for projection-stage parallelization slice
 - `d75083e` Extend planner-parallel true execution to flat column projection stage
+- `a096320` Append latest WF07 implementation commits into handoff list
 - `858f9fc` Lock scheduled-parallel inspect contract and refresh WF07 handoff/status
 - `330e33e` Replace scheduled-serial execution path with deterministic parallel WHERE filtering
 - `0c05bf8` Extend inspect explain with join/materialization/parallel details
