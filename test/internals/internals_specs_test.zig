@@ -16,6 +16,7 @@ comptime {
     _ = @import("maintenance/overflow_reclaim_surface_test.zig");
     _ = @import("maintenance/reclaim_concurrency_matrix_test.zig");
     _ = @import("maintenance/reclaim_snapshot_blocking_test.zig");
+    _ = @import("planner/query_planner_contract_test.zig");
     _ = @import("query_protocol/tree_response_test.zig");
     _ = @import("runtime/planner_overflow_test.zig");
     _ = @import("server/reactor_queueing_admission_test.zig");

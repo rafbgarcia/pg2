@@ -60,9 +60,12 @@ pub const simulator = struct {
     pub const fk_fault_matrix = @import("simulator/fk_fault_matrix.zig");
 };
 
+pub const planner = @import("planner/mod.zig");
+
 pub const runtime = struct {
     pub const bootstrap = @import("runtime/bootstrap.zig");
     pub const config = @import("runtime/config.zig");
+    pub const capacity_planner = @import("runtime/capacity_planner.zig");
     pub const planner = @import("runtime/planner.zig");
     pub const request = @import("runtime/request.zig");
     pub const error_taxonomy = @import("runtime/error_taxonomy.zig");
@@ -119,8 +122,10 @@ comptime {
     _ = simulator.clock;
     _ = simulator.fault_matrix;
     _ = simulator.fk_fault_matrix;
+    _ = planner;
     _ = runtime.bootstrap;
     _ = runtime.config;
+    _ = runtime.capacity_planner;
     _ = runtime.planner;
     _ = runtime.request;
     _ = runtime.error_taxonomy;

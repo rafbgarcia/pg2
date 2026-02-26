@@ -8,7 +8,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const runtime_config = @import("pg2").runtime.config;
-const runtime_planner = @import("pg2").runtime.planner;
+const runtime_capacity_planner = @import("pg2").runtime.capacity_planner;
 const runtime_bootstrap = @import("pg2").runtime.bootstrap;
 const runtime_storage_root_mod = @import("pg2").runtime.storage_root;
 const session_mod = @import("pg2").server.session;
@@ -140,7 +140,7 @@ pub fn main() !void {
     defer storage_root.deinit();
 
     const detected_vcpus = runtime_config.detectVcpus();
-    const plan = runtime_planner.planFromMemory(memory_bytes, detected_vcpus) catch |err| switch (err) {
+    const plan = runtime_capacity_planner.planFromMemory(memory_bytes, detected_vcpus) catch |err| switch (err) {
         error.InvalidInput => {
             try stdout.writeAll("startup failed: invalid startup planning inputs\n");
             return;

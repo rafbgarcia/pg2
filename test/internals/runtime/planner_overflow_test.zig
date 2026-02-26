@@ -5,7 +5,7 @@
 //! - Prevents startup-path panics/wraparound for extreme memory envelopes.
 const std = @import("std");
 const pg2 = @import("pg2");
-const planner = pg2.runtime.planner;
+const planner = pg2.runtime.capacity_planner;
 
 test "planner returns Overflow when wal ratio multiplication overflows" {
     const total = std.math.maxInt(usize);
