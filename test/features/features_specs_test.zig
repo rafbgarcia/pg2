@@ -50,6 +50,7 @@ comptime {
     _ = @import("field_types/u32_test.zig");
     _ = @import("field_types/u64_test.zig");
     _ = @import("field_types/u8_test.zig");
+    _ = @import("queries/planner_inspect_contract_test.zig");
     _ = @import("schema_definition/reference_test.zig");
     _ = @import("semantic_validations/type_mismatch_test.zig");
     _ = @import("semantic_validations/unknown_field_test.zig");

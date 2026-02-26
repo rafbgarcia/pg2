@@ -48,6 +48,8 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
     - executor now routes `parallel_mode=enabled` through a deterministic serial scheduler path (`parallel_scheduler_path=scheduled_serial`) while preserving current sequential semantics
 - Tests:
   - internal planner contract tests added under `test/internals/planner/`
+  - user-visible inspect contract coverage added under:
+    - `test/features/queries/planner_inspect_contract_test.zig`
   - deterministic replay coverage for planner adaptation traces added in:
     - `test/sim/planner_adaptation_replay_sim_test.zig`
     - `test/stress/spill_phase2_gate_nested_hash_spill_contracts_test.zig`
