@@ -123,8 +123,9 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - nested per-parent child sort parallel coverage added:
     - applied-task coverage under planner parallel mode
     - semantic-equivalence coverage (parallel-enabled vs sequential)
+    - deterministic replay coverage for schedule metadata under fixed inputs
 - Verification:
-  - `zig build test-all --summary all` passing after nested per-parent sort scheduled-parallel extension (`934/936` passed, `2` skipped)
+  - `zig build test-all --summary all` passing after nested child-sort replay determinism coverage (`935/937` passed, `2` skipped)
   - phase-gate commands passing:
     - `zig build unit --summary all` (`663/665` passed, `2` skipped)
     - `zig build test --summary all` (`247/247` passed)

@@ -9040,6 +9040,92 @@ test "execute returns equivalent nested child sort rows with planner parallel mo
     }
 }
 
+test "execute nested child sort parallel schedule metadata is deterministic across replayed runs" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+
+    const post_model = try env.catalog.addModel("Post");
+    _ = try env.catalog.addColumn(post_model, "id", .i64, false);
+    _ = try env.catalog.addColumn(post_model, "user_id", .i64, false);
+    env.catalog.models[post_model].heap_first_page_id = 132;
+    env.catalog.models[post_model].total_pages = 1;
+    _ = try env.catalog.addAssociation(
+        env.model_id,
+        "posts",
+        AssociationKind.has_many,
+        "Post",
+    );
+    try env.catalog.resolveAssociations();
+
+    const post_page = try env.pool.pin(132);
+    heap_mod.HeapPage.init(post_page);
+    env.pool.unpin(132, true);
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const user_src = "User |> insert(id = 1, name = \"Alice\", active = true)";
+    const user_tok = tokenizer_mod.tokenize(user_src);
+    const user_p = parser_mod.parse(&user_tok, user_src);
+    try testing.expect(!user_p.has_error);
+    var user_r = try execute(&env.makeCtx(tx, &snap, &user_p.ast, &user_tok, user_src));
+    defer user_r.deinit();
+    try testing.expect(!user_r.has_error);
+
+    var post_id: u16 = 1;
+    while (post_id <= 96) : (post_id += 1) {
+        var post_buf: [128]u8 = undefined;
+        const post_src = try std.fmt.bufPrint(
+            post_buf[0..],
+            "Post |> insert(id = {d}, user_id = 1)",
+            .{post_id},
+        );
+        const post_tok = tokenizer_mod.tokenize(post_src);
+        const post_p = parser_mod.parse(&post_tok, post_src);
+        try testing.expect(!post_p.has_error);
+        var post_r = try execute(&env.makeCtx(tx, &snap, &post_p.ast, &post_tok, post_src));
+        defer post_r.deinit();
+        try testing.expect(!post_r.has_error);
+    }
+
+    const src = "User |> where(id == 1) { id posts |> sort(id desc) { id } }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+
+    var run_a = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer run_a.deinit();
+    try testing.expect(!run_a.has_error);
+
+    var run_b = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer run_b.deinit();
+    try testing.expect(!run_b.has_error);
+
+    try testing.expectEqual(
+        ParallelSchedulerPath.scheduled_parallel,
+        run_a.stats.plan.parallel_scheduler_path,
+    );
+    try testing.expectEqual(
+        run_a.stats.plan.parallel_scheduler_path,
+        run_b.stats.plan.parallel_scheduler_path,
+    );
+    try testing.expectEqual(
+        run_a.stats.plan.parallel_schedule_task_count,
+        run_b.stats.plan.parallel_schedule_task_count,
+    );
+    try testing.expectEqual(
+        run_a.stats.plan.parallel_schedule_applied_tasks,
+        run_b.stats.plan.parallel_schedule_applied_tasks,
+    );
+    try testing.expectEqual(
+        run_a.stats.plan.parallel_schedule_fingerprint,
+        run_b.stats.plan.parallel_schedule_fingerprint,
+    );
+}
+
 test "execute nested relation with child operators uses hash spill strategy when right side exceeds flat fit" {
     var env: ExecTestEnv = undefined;
     try env.init();
