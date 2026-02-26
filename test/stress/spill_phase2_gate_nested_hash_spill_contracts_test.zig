@@ -34,6 +34,7 @@ test "mixed root spill and nested hash spill is deterministic under tight temp b
     try std.testing.expect(std.mem.indexOf(u8, run1, "planner_decision_fingerprint=") != null);
     try std.testing.expect(std.mem.indexOf(u8, run1, "INSPECT checkpoint name=pre_scan ") != null);
     try std.testing.expect(std.mem.indexOf(u8, run1, "INSPECT checkpoint name=post_filter ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run1, "INSPECT checkpoint name=post_group ") != null);
     try std.testing.expect(std.mem.indexOf(u8, run1, "INSPECT checkpoint name=pre_join ") != null);
 }
 

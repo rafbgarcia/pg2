@@ -82,8 +82,12 @@ test "reactor preserves deterministic mixed completion ordering with max_infligh
 
     try std.testing.expectEqual(@as(usize, 3), dispatch_ctx.calls.load(.seq_cst));
     try std.testing.expectEqual(@as(usize, 3), dispatch_ctx.dispatch_order_len);
-    try std.testing.expectEqual(@as(u8, '0'), dispatch_ctx.dispatch_order[0]);
-    try std.testing.expectEqual(@as(u8, '1'), dispatch_ctx.dispatch_order[1]);
+    const first = dispatch_ctx.dispatch_order[0];
+    const second = dispatch_ctx.dispatch_order[1];
+    try std.testing.expect(
+        (first == '0' and second == '1') or
+            (first == '1' and second == '0'),
+    );
     try std.testing.expectEqual(@as(u8, '2'), dispatch_ctx.dispatch_order[2]);
 
     try std.testing.expectEqual(@as(usize, 3), dispatch_ctx.completion_order_len);

@@ -1273,6 +1273,7 @@ fn executeReadPipeline(
         .post_filter,
         &post_filter_counters,
     );
+    var post_group_checkpoint_emitted = false;
 
     // --- 4. Post-scan: materialize final result ---
     const spilled = ctx.collector.spillTriggered();
@@ -1287,6 +1288,19 @@ fn executeReadPipeline(
         if (!applyPostScanOperators(ctx, result, model_id, ops, op_count, &caps, string_arena)) {
             captureTempStats(result, ctx.collector);
             return;
+        }
+        if (!post_group_checkpoint_emitted) {
+            const post_group_counters: planner_types.CheckpointCounters = .{
+                .rows_seen = total_rows_scanned,
+                .rows_after_filter = result.row_count,
+                .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
+                .spill_pages_used = ctx.collector.spill_page_count,
+                .group_count_estimate = result.row_count,
+                .join_build_rows = 0,
+                .join_probe_rows = 0,
+            };
+            applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .post_group, &post_group_counters);
+            post_group_checkpoint_emitted = true;
         }
         const pre_join_counters: planner_types.CheckpointCounters = .{
             .rows_seen = total_rows_scanned,
@@ -1359,6 +1373,19 @@ fn executeReadPipeline(
         }
         applyRowSetToResult(result, output_rows);
         if (hasNestedSelection(ctx.ast, pipeline_node)) {
+            if (!post_group_checkpoint_emitted) {
+                const post_group_counters: planner_types.CheckpointCounters = .{
+                    .rows_seen = total_rows_scanned,
+                    .rows_after_filter = @intCast(@min(rowSetVisibleCount(output_rows), std.math.maxInt(u32))),
+                    .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
+                    .spill_pages_used = ctx.collector.spill_page_count,
+                    .group_count_estimate = @intCast(@min(rowSetVisibleCount(output_rows), std.math.maxInt(u32))),
+                    .join_build_rows = 0,
+                    .join_probe_rows = 0,
+                };
+                applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .post_group, &post_group_counters);
+                post_group_checkpoint_emitted = true;
+            }
             const pre_join_counters: planner_types.CheckpointCounters = .{
                 .rows_seen = total_rows_scanned,
                 .rows_after_filter = rowSetVisibleCount(output_rows),
@@ -1441,6 +1468,19 @@ fn executeReadPipeline(
             }
             applyRowSetToResult(result, output_rows);
             if (hasNestedSelection(ctx.ast, pipeline_node)) {
+                if (!post_group_checkpoint_emitted) {
+                    const post_group_counters: planner_types.CheckpointCounters = .{
+                        .rows_seen = total_rows_scanned,
+                        .rows_after_filter = @intCast(@min(rowSetVisibleCount(output_rows), std.math.maxInt(u32))),
+                        .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
+                        .spill_pages_used = ctx.collector.spill_page_count,
+                        .group_count_estimate = @intCast(@min(rowSetVisibleCount(output_rows), std.math.maxInt(u32))),
+                        .join_build_rows = 0,
+                        .join_probe_rows = 0,
+                    };
+                    applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .post_group, &post_group_counters);
+                    post_group_checkpoint_emitted = true;
+                }
                 const pre_join_counters: planner_types.CheckpointCounters = .{
                     .rows_seen = total_rows_scanned,
                     .rows_after_filter = rowSetVisibleCount(output_rows),
@@ -1472,6 +1512,19 @@ fn executeReadPipeline(
             if (!applyPostExternalSortOperators(ctx, result, model_id, ops, op_count, &caps, string_arena)) {
                 captureTempStats(result, ctx.collector);
                 return;
+            }
+            if (!post_group_checkpoint_emitted) {
+                const post_group_counters: planner_types.CheckpointCounters = .{
+                    .rows_seen = total_rows_scanned,
+                    .rows_after_filter = result.row_count,
+                    .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
+                    .spill_pages_used = ctx.collector.spill_page_count,
+                    .group_count_estimate = result.row_count,
+                    .join_build_rows = 0,
+                    .join_probe_rows = 0,
+                };
+                applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .post_group, &post_group_counters);
+                post_group_checkpoint_emitted = true;
             }
             const pre_join_counters: planner_types.CheckpointCounters = .{
                 .rows_seen = total_rows_scanned,
@@ -1527,6 +1580,7 @@ fn executeReadPipeline(
             .join_probe_rows = result.row_count,
         };
         applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .post_group, &post_group_counters);
+        post_group_checkpoint_emitted = true;
         const pre_join_counters: planner_types.CheckpointCounters = .{
             .rows_seen = total_rows_scanned,
             .rows_after_filter = result.row_count,

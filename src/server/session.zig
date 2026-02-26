@@ -1340,9 +1340,15 @@ test "session inspect appends execution and pool stats" {
     );
     const pre_scan_index = std.mem.indexOf(u8, output, "INSPECT checkpoint name=pre_scan");
     const post_filter_index = std.mem.indexOf(u8, output, "INSPECT checkpoint name=post_filter");
+    const post_group_index = std.mem.indexOf(u8, output, "INSPECT checkpoint name=post_group");
+    const pre_join_index = std.mem.indexOf(u8, output, "INSPECT checkpoint name=pre_join");
     try std.testing.expect(pre_scan_index != null);
     try std.testing.expect(post_filter_index != null);
+    try std.testing.expect(post_group_index != null);
+    try std.testing.expect(pre_join_index != null);
     try std.testing.expect(pre_scan_index.? < post_filter_index.?);
+    try std.testing.expect(post_filter_index.? < post_group_index.?);
+    try std.testing.expect(post_group_index.? < pre_join_index.?);
     try std.testing.expect(
         std.mem.indexOf(
             u8,

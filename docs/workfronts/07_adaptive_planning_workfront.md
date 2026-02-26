@@ -33,8 +33,8 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - Checkpoint adaptation is now wired in read-pipeline execution at:
     - `pre_scan`
     - `post_filter`
+    - `post_group` (group and non-group paths; non-group emits deterministic no-op checkpoint)
     - `pre_join`
-    - `post_group` (group path)
   - Inspect serialization now includes:
     - planner policy/snapshot/decision fingerprints
     - per-decision reason codes
@@ -49,7 +49,6 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - `zig build sim --summary all` passing with planner adaptation replay checks
   - `zig build stress --summary all` passing with planner checkpoint/fingerprint assertions in mixed spill scenarios
 - Remaining:
-  - expand adaptation coverage for non-group root paths to emit `post_group` no-op chronology records consistently
   - implement planner-level parallelization policy and deterministic schedule trace gates
 
 ## Non-Goals
@@ -172,8 +171,8 @@ Initial required threshold forms:
 - checkpoint chronology in fixed order:
   - `pre_scan`
   - `post_filter`
-  - `pre_join`
   - `post_group`
+  - `pre_join`
 - per-checkpoint transition record:
   - `prior_decision`
   - `new_decision`
@@ -181,8 +180,11 @@ Initial required threshold forms:
   - `degraded=true|false`
 
 Formatting and section order must be deterministic for fixture stability.
+Chronology must reflect real execution stage order, not a synthetic display-only order.
 
 ## Phase 1: Planner Module and Contracts
+
+Status: ✅ Complete
 
 ### Scope
 
@@ -198,6 +200,8 @@ Formatting and section order must be deterministic for fixture stability.
 - Negative tests: missing snapshot/version fields fail planning with deterministic error codes.
 
 ## Phase 2: Physical Decision Policy v1
+
+Status: ✅ Complete (v1 baseline landed; further refinement may extend policy detail without changing completion state)
 
 ### Scope
 
@@ -218,6 +222,8 @@ Formatting and section order must be deterministic for fixture stability.
 
 ## Phase 3: Runtime-Observed Adaptation Rules
 
+Status: 🟡 In Progress
+
 ### Scope
 
 - Define explicit checkpoint contract: pre-scan, post-filter, pre-join, post-group.
@@ -235,6 +241,8 @@ Formatting and section order must be deterministic for fixture stability.
 
 ## Phase 4: Inspect/Explain Contract
 
+Status: 🟡 In Progress
+
 ### Scope
 
 - Stabilize `INSPECT plan` fields and reason-code vocabulary.
@@ -249,6 +257,8 @@ Formatting and section order must be deterministic for fixture stability.
 
 ## Phase 5: Parallelization Policy
 
+Status: ⬜ Not Started
+
 ### Scope
 
 - Define planner-level policy for what may run in parallel.
@@ -262,6 +272,8 @@ Formatting and section order must be deterministic for fixture stability.
 - Deterministic simulation tests show reproducible task schedule traces under fixed seeds.
 
 ## Phase 6: Planning Test Surface
+
+Status: 🟡 In Progress
 
 ### Scope
 
