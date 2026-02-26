@@ -69,10 +69,8 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - parallel-mode checkpoint chronology order coverage added for stable `pre_scan -> post_filter -> post_group -> pre_join` ordering under true parallel execution
   - parallel-mode zero-row coverage added to lock `parallel_schedule_applied_tasks=0` when no rows are processed
   - server serialization contract test added to lock inspect/explain scheduler output for `scheduled_parallel`
-  - full `zig build unit --summary all` and `zig build test --summary all` passing after integration
 - Verification:
-  - `zig build sim --summary all` passing with planner adaptation replay checks
-  - `zig build stress --summary all` passing with planner checkpoint/fingerprint assertions in mixed spill scenarios
+  - `zig build test-all --summary all` passing after applied-task contract updates (`913/915` passed, `2` skipped)
 - Remaining:
   - expand true parallel execution beyond WHERE-filter and flat-column-projection processing while preserving deterministic/fail-closed behavior
 
@@ -119,6 +117,8 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Relevant Commits (newest first)
 
+- `2fe6785` Document applied-task parallel execution contract updates in WF07 handoff
+- `a65a693` Complete WF07 handoff doc details for the projection-parallel slice
 - `d108414` Emit parallel applied-task metrics only when a parallel stage actually executes
 - `b3c7148` Update WF07 status/handoff for projection-stage parallelization slice
 - `d75083e` Extend planner-parallel true execution to flat column projection stage
@@ -149,10 +149,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Acceptance Gates (must all pass)
 
-- `zig build unit --summary all`
-- `zig build test --summary all`
-- `zig build sim --summary all`
-- `zig build stress --summary all`
+- `zig build test-all --summary all`
 
 ### Hard-Stop Reminders
 
