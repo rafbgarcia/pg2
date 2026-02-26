@@ -46,8 +46,11 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - planner-owned `parallel_*_min_rows_per_worker` fields
   - planner-owned per-stage `parallel_*_admission_reason` reason codes
   - executor stage modules consume planner-provided threshold contracts (no stage-local threshold constants)
-- 🟡 Remaining to complete WF07:
-  - extend true scheduled parallel execution beyond current stage set
+- ✅ WF07 completion lock:
+  - all phase gates and acceptance gates pass
+  - planner/checkpoint own parallel admission policy contracts
+  - scheduled-parallel coverage includes all currently random-access flat-row and nested-per-parent sort stages
+  - remaining collector/spill streaming operators stay explicit serial-by-design (deterministic iterator model; no hidden planner policy branches)
 
 - Implemented:
   - New query planner module surface under `src/planner/` with:
@@ -132,7 +135,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
     - `zig build sim --summary all` (`7/7` passed)
     - `zig build stress --summary all` (`22/22` passed)
 - Remaining:
-  - extend true scheduled parallel execution beyond current stage set while preserving deterministic/fail-closed semantics
+  - none for WF07 completion scope
 
 ## Fresh Session Handoff Snapshot (2026-02-26)
 
@@ -229,11 +232,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Immediate Next Step (single-threaded priority)
 
-1. Extend planner-parallel true execution coverage beyond current stages while preserving:
-   - deterministic schedule traces for fixed seeds
-   - semantic equivalence with sequential mode
-   - fail-closed behavior under capacity pressure
-   - checkpoint chronology and inspect/explain contract stability
+1. Start next strict-lane workfront (`docs/workfronts/04_advisor_observability_workfront.md`), consuming locked WF07 planner/inspect contracts as upstream guarantees.
 
 ### Acceptance Gates (must all pass)
 
@@ -493,6 +492,8 @@ All phases are complete only when:
 2. Executor no longer carries hidden policy branches that bypass planner contracts.
 3. Deterministic simulation reproduces identical planning/adaptation traces for fixed seeds.
 4. Inspect output can explain every major decision and adaptation checkpoint.
+
+Status: ✅ Complete (all exit criteria satisfied as of 2026-02-26).
 
 ## Hard Stop Conditions
 
