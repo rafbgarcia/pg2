@@ -21,6 +21,12 @@
   - uses storage-root-local advisor metrics file
   - fail-closed behavior (advisor append failures do not break query execution)
 - ✅ Gate run after landing: `zig build test-all --summary all` passed.
+- ✅ Decision lock extension (critical-path hardening):
+  - no advisory rule evaluation on statement path
+  - statement path performs bounded enqueue only
+  - advisor persistence is asynchronous background flush
+  - queue overflow drops metrics (increments dropped counter) instead of blocking
+  - no keep/drop rule logic on statement path (preserve denominators and avoid coupling)
 - ⏳ Remaining from original scope:
   - queue pressure rule
   - spill ratio rule
@@ -72,15 +78,17 @@ These decisions are locked for current implementation unless explicitly changed.
 3. Deterministic behavior for identical metric streams.
 4. Bounded/static memory behavior in runtime paths (Tiger Style discipline).
 5. Stable, versioned on-disk format for advisor metrics file.
+6. No synchronous advisory file I/O on the critical statement execution path.
 
 ## Phase 1: Metrics Contract and Persistence Foundation
 
 ### Scope
 
 - Define canonical advisor metric record schema (raw values only), versioned.
-- Add writer path to persist raw metric records to `.pg2/advisor_metrics.pg2`.
+- Add async writer path to persist raw metric records to `.pg2/advisor_metrics.pg2`.
 - Ingest from existing runtime/query stats without changing core semantics.
 - Include operation type and whether predicate filtering was present.
+- Introduce bounded in-memory queue for statement-path metric handoff.
 
 ### Minimum raw fields (v1)
 
@@ -95,7 +103,8 @@ These decisions are locked for current implementation unless explicitly changed.
 
 - Deterministic unit tests for encode/decode and schema invariants.
 - Corruption handling tests for advisor file parser/reader.
-- Runtime integration tests proving writer path does not alter query results.
+- Runtime integration tests proving enqueue path does not alter query results.
+- Runtime tests proving queue overflow drops metrics instead of blocking.
 
 ## Phase 2: Rule Evaluation Engine (Raw-to-Derived at Read Time)
 
