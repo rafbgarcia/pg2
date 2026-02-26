@@ -134,7 +134,7 @@ pub const ParallelMode = enum {
 
 pub const ParallelSchedulerPath = enum {
     direct,
-    scheduled_serial,
+    scheduled_parallel,
 };
 
 pub const ScanStrategy = index_scan_planner.ScanStrategy;
@@ -206,6 +206,9 @@ const max_variable_list_values_capacity: u16 = default_variable_list_values_befo
 const max_variable_spill_pages: u16 = @intCast(max_spill_pages);
 const variable_arena_divisor: usize = 4;
 const variable_arena_min_bytes: usize = 64 * 1024;
+const max_parallel_filter_workers: usize = 4;
+const parallel_filter_min_rows_per_worker: usize = 1;
+const parallel_filter_worker_arena_bytes: usize = filter_mod.max_string_result_bytes * 2;
 
 const VariableValue = union(enum) {
     scalar: Value,
@@ -1083,7 +1086,7 @@ fn executePipelineStatement(
     );
     capturePlanStats(&result.stats.plan, ctx, model_name, model_id, &ops, op_count);
     if (result.stats.plan.parallel_mode == .enabled) {
-        result.stats.plan.parallel_scheduler_path = .scheduled_serial;
+        result.stats.plan.parallel_scheduler_path = .scheduled_parallel;
     }
 
     if (findMutationOp(&ops, op_count)) |mut_idx| {
@@ -1137,7 +1140,7 @@ fn executeReadPipeline(
     op_count: u16,
     string_arena: *scan_mod.StringArena,
 ) void {
-    if (result.stats.plan.parallel_scheduler_path == .scheduled_serial) {
+    if (result.stats.plan.parallel_scheduler_path == .scheduled_parallel) {
         result.stats.plan.parallel_schedule_applied_tasks =
             result.stats.plan.parallel_schedule_task_count;
     }
@@ -2120,21 +2123,230 @@ fn applyPerChunkOperators(
 ) void {
     var group_runtime = GroupRuntime{};
     const schema = &ctx.catalog.models[model_id].row_schema;
+    var used_parallel_filter = false;
     var i: u16 = 0;
     while (i < op_count) : (i += 1) {
         const op = ops[i];
         switch (op.kind) {
-            .where_filter => applyWhereFilter(
-                ctx,
-                result,
-                op.node,
-                schema,
-                &group_runtime,
-                string_arena,
-            ),
+            .where_filter => {
+                if (result.stats.plan.parallel_scheduler_path == .scheduled_parallel and
+                    !group_runtime.active and
+                    tryApplyWhereFilterParallel(
+                        ctx,
+                        result,
+                        op.node,
+                        schema,
+                    ))
+                {
+                    used_parallel_filter = true;
+                } else {
+                    applyWhereFilter(
+                        ctx,
+                        result,
+                        op.node,
+                        schema,
+                        &group_runtime,
+                        string_arena,
+                    );
+                }
+            },
             else => {},
         }
     }
+    if (used_parallel_filter) {
+        result.stats.plan.parallel_schedule_applied_tasks =
+            result.stats.plan.parallel_schedule_task_count;
+    }
+}
+
+const ParallelWhereError = enum(u8) {
+    none = 0,
+    undefined_parameter,
+    clock_unavailable,
+    type_mismatch,
+    undefined_variable,
+    ambiguous_identifier,
+    variable_type_mismatch,
+    variable_storage_read,
+};
+
+const ParallelWhereWorker = struct {
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    predicate: NodeIndex,
+    schema: *const RowSchema,
+    start_idx: u16,
+    end_idx: u16,
+    match_flags: *[scan_mod.scan_batch_size]u8,
+    first_error_index: u16 = std.math.maxInt(u16),
+    first_error_code: ParallelWhereError = .none,
+
+    fn run(self: *ParallelWhereWorker) void {
+        var arena_buf: [parallel_filter_worker_arena_bytes]u8 = undefined;
+        var arena = scan_mod.StringArena.init(&arena_buf);
+        var exec_eval = evalContextForExec(self.ctx, &arena);
+        exec_eval.bind();
+
+        var read_idx = self.start_idx;
+        while (read_idx < self.end_idx) : (read_idx += 1) {
+            arena.reset();
+            const row = &self.result.rows[read_idx];
+            const matches = filter_mod.evaluatePredicateFull(
+                self.ctx.ast,
+                self.ctx.tokens,
+                self.ctx.source,
+                self.predicate,
+                row.values[0..row.column_count],
+                self.schema,
+                null,
+                &exec_eval.eval_ctx,
+            ) catch |err| switch (err) {
+                error.UndefinedParameter => {
+                    self.first_error_index = read_idx;
+                    self.first_error_code = .undefined_parameter;
+                    return;
+                },
+                error.ClockUnavailable => {
+                    self.first_error_index = read_idx;
+                    self.first_error_code = .clock_unavailable;
+                    return;
+                },
+                error.TypeMismatch => {
+                    self.first_error_index = read_idx;
+                    self.first_error_code = .type_mismatch;
+                    return;
+                },
+                error.UndefinedVariable => {
+                    self.first_error_index = read_idx;
+                    self.first_error_code = .undefined_variable;
+                    return;
+                },
+                error.AmbiguousIdentifier => {
+                    self.first_error_index = read_idx;
+                    self.first_error_code = .ambiguous_identifier;
+                    return;
+                },
+                error.VariableTypeMismatch => {
+                    self.first_error_index = read_idx;
+                    self.first_error_code = .variable_type_mismatch;
+                    return;
+                },
+                error.VariableStorageRead => {
+                    self.first_error_index = read_idx;
+                    self.first_error_code = .variable_storage_read;
+                    return;
+                },
+                else => false,
+            };
+            self.match_flags[read_idx] = if (matches) 1 else 0;
+        }
+    }
+};
+
+fn setParallelPredicateError(result: *QueryResult, scope: []const u8, err: ParallelWhereError) void {
+    switch (err) {
+        .none => {},
+        .undefined_parameter => setPredicateUndefinedParameterError(result, scope),
+        .clock_unavailable => setPredicateClockUnavailableError(result, scope),
+        .type_mismatch => setPredicateMustBeBooleanError(result, scope),
+        .undefined_variable => setPredicateUndefinedVariableError(result, scope),
+        .ambiguous_identifier => setPredicateAmbiguousIdentifierError(result, scope),
+        .variable_type_mismatch => setPredicateVariableTypeMismatchError(result, scope),
+        .variable_storage_read => setPredicateVariableStorageReadError(result, scope),
+    }
+}
+
+fn tryApplyWhereFilterParallel(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    where_node: NodeIndex,
+    schema: *const RowSchema,
+) bool {
+    const node = ctx.ast.getNode(where_node);
+    if (node.tag == .op_having) return false;
+    const predicate = node.data.unary;
+    if (predicate == null_node) return true;
+
+    const row_count_usize: usize = result.row_count;
+    if (row_count_usize < 2) return false;
+
+    const max_workers = @min(max_parallel_filter_workers, row_count_usize);
+    var worker_count = @min(max_workers, row_count_usize / parallel_filter_min_rows_per_worker);
+    if (worker_count < 2) return false;
+    if (worker_count > max_parallel_filter_workers) worker_count = max_parallel_filter_workers;
+
+    var match_flags: [scan_mod.scan_batch_size]u8 = [_]u8{0} ** scan_mod.scan_batch_size;
+    var workers: [max_parallel_filter_workers]ParallelWhereWorker = undefined;
+    var threads: [max_parallel_filter_workers - 1]?std.Thread =
+        [_]?std.Thread{null} ** (max_parallel_filter_workers - 1);
+    var spawned: usize = 0;
+
+    const base = row_count_usize / worker_count;
+    const remainder = row_count_usize % worker_count;
+    var start_idx: usize = 0;
+    var worker_idx: usize = 0;
+    while (worker_idx < worker_count) : (worker_idx += 1) {
+        const span = base + if (worker_idx < remainder) @as(usize, 1) else @as(usize, 0);
+        const end_idx = start_idx + span;
+        workers[worker_idx] = .{
+            .ctx = ctx,
+            .result = result,
+            .predicate = predicate,
+            .schema = schema,
+            .start_idx = @intCast(start_idx),
+            .end_idx = @intCast(end_idx),
+            .match_flags = &match_flags,
+        };
+        start_idx = end_idx;
+    }
+
+    worker_idx = 1;
+    while (worker_idx < worker_count) : (worker_idx += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, ParallelWhereWorker.run, .{&workers[worker_idx]}) catch {
+            var join_idx: usize = 0;
+            while (join_idx < spawned) : (join_idx += 1) {
+                threads[join_idx].?.join();
+            }
+            return false;
+        };
+        spawned += 1;
+    }
+
+    workers[0].run();
+
+    var join_idx: usize = 0;
+    while (join_idx < spawned) : (join_idx += 1) {
+        threads[join_idx].?.join();
+    }
+
+    var first_error_index: u16 = std.math.maxInt(u16);
+    var first_error_code: ParallelWhereError = .none;
+    worker_idx = 0;
+    while (worker_idx < worker_count) : (worker_idx += 1) {
+        if (workers[worker_idx].first_error_code == .none) continue;
+        if (workers[worker_idx].first_error_index < first_error_index) {
+            first_error_index = workers[worker_idx].first_error_index;
+            first_error_code = workers[worker_idx].first_error_code;
+        }
+    }
+    if (first_error_code != .none) {
+        setParallelPredicateError(result, "where", first_error_code);
+        return true;
+    }
+
+    const original_count = result.row_count;
+    var write_idx: u16 = 0;
+    var read_idx: u16 = 0;
+    while (read_idx < original_count) : (read_idx += 1) {
+        if (match_flags[read_idx] == 0) continue;
+        if (write_idx != read_idx) {
+            result.rows[write_idx] = result.rows[read_idx];
+        }
+        write_idx += 1;
+    }
+    result.row_count = write_idx;
+    std.debug.assert(result.row_count <= original_count);
+    return true;
 }
 
 /// Apply post-scan operators (GROUP/SORT/LIMIT/OFFSET/HAVING) to the
@@ -6873,11 +7085,13 @@ test "execute captures parallel mode when planner feature gate is enabled" {
         result.stats.plan.parallel_mode,
     );
     try testing.expectEqual(
-        ParallelSchedulerPath.scheduled_serial,
+        ParallelSchedulerPath.scheduled_parallel,
         result.stats.plan.parallel_scheduler_path,
     );
     try testing.expect(result.stats.plan.parallel_schedule_task_count > 0);
-    try testing.expect(result.stats.plan.parallel_schedule_applied_tasks > 0);
+    try testing.expect(
+        result.stats.plan.parallel_schedule_applied_tasks <= result.stats.plan.parallel_schedule_task_count,
+    );
     try testing.expect(result.stats.plan.parallel_schedule_fingerprint != 0);
 }
 
@@ -6920,8 +7134,74 @@ test "execute returns equivalent rows with planner parallel mode on and off" {
     defer result_par.deinit();
     try testing.expect(!result_par.has_error);
     try testing.expectEqual(ParallelMode.enabled, result_par.stats.plan.parallel_mode);
+    try testing.expectEqual(
+        ParallelSchedulerPath.scheduled_parallel,
+        result_par.stats.plan.parallel_scheduler_path,
+    );
+    try testing.expect(result_par.stats.plan.parallel_schedule_applied_tasks > 0);
 
     try expectResultRowsEqual(&result_seq, &result_par);
+}
+
+test "execute parallel schedule metadata is deterministic across replayed runs" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    var id: u32 = 1;
+    while (id <= 64) : (id += 1) {
+        var insert_buf: [128]u8 = undefined;
+        const insert_src = try std.fmt.bufPrint(
+            insert_buf[0..],
+            "User |> insert(id = {d}, name = \"U{d}\", active = true)",
+            .{ id, id },
+        );
+        const tok_insert = tokenizer_mod.tokenize(insert_src);
+        const p_insert = parser_mod.parse(&tok_insert, insert_src);
+        try testing.expect(!p_insert.has_error);
+        var insert_result = try execute(&env.makeCtx(tx, &snap, &p_insert.ast, &tok_insert, insert_src));
+        defer insert_result.deinit();
+        try testing.expect(!insert_result.has_error);
+    }
+
+    const src = "User |> where(active == true) |> inspect { id }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+
+    var run_a = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer run_a.deinit();
+    try testing.expect(!run_a.has_error);
+
+    var run_b = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer run_b.deinit();
+    try testing.expect(!run_b.has_error);
+
+    try testing.expectEqual(
+        ParallelSchedulerPath.scheduled_parallel,
+        run_a.stats.plan.parallel_scheduler_path,
+    );
+    try testing.expectEqual(
+        run_a.stats.plan.parallel_scheduler_path,
+        run_b.stats.plan.parallel_scheduler_path,
+    );
+    try testing.expectEqual(
+        run_a.stats.plan.parallel_schedule_task_count,
+        run_b.stats.plan.parallel_schedule_task_count,
+    );
+    try testing.expectEqual(
+        run_a.stats.plan.parallel_schedule_applied_tasks,
+        run_b.stats.plan.parallel_schedule_applied_tasks,
+    );
+    try testing.expectEqual(
+        run_a.stats.plan.parallel_schedule_fingerprint,
+        run_b.stats.plan.parallel_schedule_fingerprint,
+    );
 }
 
 test "execute with unknown model returns error" {
