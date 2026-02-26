@@ -1377,6 +1377,13 @@ test "session inspect appends execution and pool stats" {
             "INSPECT explain sort=not_applied group=not_applied nested_join_breakdown=nested_loop:0,hash_in_memory:0,hash_spill:0\n",
         ) != null,
     );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "INSPECT explain_detail join=not_applied materialization=no explicit bounded materialization streaming=streaming disabled for bounded safety parallel=sequential mode scheduler=direct execution path\n",
+        ) != null,
+    );
 }
 
 test "session inspect appends runtime diagnostics when provided" {

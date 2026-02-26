@@ -521,6 +521,16 @@ fn serializeInspectStats(
             exec_stats.plan.nested_join_hash_spill_count,
         },
     ) catch return error.ResponseTooLarge;
+    writer.print(
+        "INSPECT explain_detail join={s} materialization={s} streaming={s} parallel={s} scheduler={s}\n",
+        .{
+            joinStrategyExplain(exec_stats.plan.join_strategy),
+            materializationExplain(exec_stats.plan.materialization_mode),
+            streamingExplain(exec_stats.plan.streaming_mode),
+            parallelModeExplain(exec_stats.plan.parallel_mode),
+            parallelSchedulerExplain(exec_stats.plan.parallel_scheduler_path),
+        },
+    ) catch return error.ResponseTooLarge;
     var checkpoint_index: u8 = 0;
     while (checkpoint_index < exec_stats.plan.checkpoint_count) : (checkpoint_index += 1) {
         const checkpoint = exec_stats.plan.checkpoints[checkpoint_index];
@@ -579,5 +589,42 @@ fn groupStrategyExplain(strategy: exec_mod.GroupStrategy) []const u8 {
         .none => "not_applied",
         .in_memory_linear => "groups merged with linear key scan in memory",
         .hash_spill => "groups aggregated with hash table and partition spill",
+    };
+}
+
+fn joinStrategyExplain(strategy: exec_mod.JoinStrategy) []const u8 {
+    return switch (strategy) {
+        .none => "not_applied",
+        .nested_loop => "nested loop join",
+        .hash_in_memory => "in-memory hash join",
+        .hash_spill => "spill-backed hash join",
+    };
+}
+
+fn materializationExplain(mode: exec_mod.MaterializationMode) []const u8 {
+    return switch (mode) {
+        .none => "no explicit bounded materialization",
+        .bounded_row_buffers => "bounded row buffers with spill-safe path",
+    };
+}
+
+fn streamingExplain(mode: exec_mod.StreamingMode) []const u8 {
+    return switch (mode) {
+        .disabled => "streaming disabled for bounded safety",
+        .enabled => "streaming enabled",
+    };
+}
+
+fn parallelModeExplain(mode: exec_mod.ParallelMode) []const u8 {
+    return switch (mode) {
+        .sequential => "sequential mode",
+        .enabled => "parallel policy enabled",
+    };
+}
+
+fn parallelSchedulerExplain(path: exec_mod.ParallelSchedulerPath) []const u8 {
+    return switch (path) {
+        .direct => "direct execution path",
+        .scheduled_serial => "deterministic serial scheduler path",
     };
 }

@@ -39,6 +39,12 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
     - planner policy/snapshot/decision fingerprints
     - per-decision reason codes
     - deterministic checkpoint chronology with prior/new decision fingerprints
+    - plain-language explain detail line for major decisions:
+      - join
+      - materialization
+      - streaming
+      - parallel mode
+      - scheduler path
   - Parallelization policy foundation landed:
     - planner-level `parallel_mode` decision (default `sequential`, feature-gated `enabled`)
     - deterministic parallel schedule-trace builder under `src/planner/parallel.zig`
