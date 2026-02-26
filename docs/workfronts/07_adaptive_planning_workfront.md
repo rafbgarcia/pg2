@@ -29,14 +29,22 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - Runtime startup planner split started:
     - startup capacity planner moved to `src/runtime/capacity_planner.zig`
     - `src/runtime/planner.zig` now acts as compatibility wrapper during migration
-  - Executor plan stats now seed from planner snapshot/decision contracts and expose planner metadata/reason fields through inspect serialization.
+  - Executor plan stats now seed from planner snapshot/decision contracts.
+  - Checkpoint adaptation is now wired in read-pipeline execution at:
+    - `pre_scan`
+    - `post_filter`
+    - `pre_join`
+    - `post_group` (group path)
+  - Inspect serialization now includes:
+    - planner policy/snapshot/decision fingerprints
+    - per-decision reason codes
+    - deterministic checkpoint chronology with prior/new decision fingerprints
 - Tests:
   - internal planner contract tests added under `test/internals/planner/`
   - full `zig build unit --summary all` and `zig build test --summary all` passing after integration
 - Remaining:
-  - wire adaptation checkpoints in live executor flow (`pre_scan`, `post_filter`, `pre_join`, `post_group`)
-  - stabilize inspect/explain checkpoint chronology output
   - add deterministic sim/stress traces for adaptation and (later) parallel scheduling
+  - expand adaptation coverage for non-group root paths to emit `post_group` no-op chronology records consistently
 
 ## Non-Goals
 

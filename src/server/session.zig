@@ -1338,6 +1338,11 @@ test "session inspect appends execution and pool stats" {
             "streaming_reason=STREAMING_DISABLED_RISK_UNBOUNDED",
         ) != null,
     );
+    const pre_scan_index = std.mem.indexOf(u8, output, "INSPECT checkpoint name=pre_scan");
+    const post_filter_index = std.mem.indexOf(u8, output, "INSPECT checkpoint name=post_filter");
+    try std.testing.expect(pre_scan_index != null);
+    try std.testing.expect(post_filter_index != null);
+    try std.testing.expect(pre_scan_index.? < post_filter_index.?);
     try std.testing.expect(
         std.mem.indexOf(
             u8,
