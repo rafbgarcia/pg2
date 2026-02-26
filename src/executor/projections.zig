@@ -20,6 +20,8 @@ const ExecContext = @import("executor.zig").ExecContext;
 const QueryResult = @import("executor.zig").QueryResult;
 const evalContextForExec = @import("executor.zig").evalContextForExec;
 const setError = @import("executor.zig").setError;
+const max_parallel_projection_workers: usize = 4;
+const parallel_projection_min_rows_per_worker: usize = 8;
 
 pub const ProjectionKind = enum {
     column,
@@ -38,6 +40,7 @@ pub fn applyFlatColumnProjection(
     pipeline_node: NodeIndex,
     model_id: ModelId,
     string_arena: *scan_mod.StringArena,
+    parallel_enabled: bool,
 ) bool {
     const selection = getPipelineSelection(ctx.ast, pipeline_node) orelse
         return true;
@@ -145,6 +148,16 @@ pub fn applyFlatColumnProjection(
     }
 
     if (projection_count == 0) return true;
+    if (parallel_enabled and
+        projectionDescriptorsColumnOnly(projection_descriptors[0..projection_count]) and
+        tryApplyFlatColumnProjectionParallel(
+            result,
+            projection_descriptors[0..projection_count],
+            projection_count,
+        ))
+    {
+        return true;
+    }
 
     var row_index: u16 = 0;
     while (row_index < result.row_count) : (row_index += 1) {
@@ -185,6 +198,122 @@ pub fn applyFlatColumnProjection(
         result.rows[row_index].column_count = projection_count;
     }
 
+    return true;
+}
+
+const ParallelProjectionError = enum(u8) {
+    none = 0,
+    out_of_bounds,
+};
+
+const ParallelProjectionWorker = struct {
+    result: *QueryResult,
+    descriptors: []const ProjectionDescriptor,
+    projection_count: u16,
+    start_idx: u16,
+    end_idx: u16,
+    first_error_index: u16 = std.math.maxInt(u16),
+    first_error_code: ParallelProjectionError = .none,
+
+    fn run(self: *ParallelProjectionWorker) void {
+        var row_index = self.start_idx;
+        while (row_index < self.end_idx) : (row_index += 1) {
+            var projected: [scan_mod.max_columns]Value = undefined;
+            for (self.descriptors, 0..) |descriptor, out_idx| {
+                if (descriptor.column_index >= self.result.rows[row_index].column_count) {
+                    self.first_error_index = row_index;
+                    self.first_error_code = .out_of_bounds;
+                    return;
+                }
+                projected[out_idx] = self.result.rows[row_index].values[descriptor.column_index];
+            }
+            @memcpy(
+                self.result.rows[row_index].values[0..self.projection_count],
+                projected[0..self.projection_count],
+            );
+            self.result.rows[row_index].column_count = self.projection_count;
+        }
+    }
+};
+
+fn projectionDescriptorsColumnOnly(descriptors: []const ProjectionDescriptor) bool {
+    for (descriptors) |descriptor| {
+        if (descriptor.kind != .column) return false;
+    }
+    return true;
+}
+
+fn tryApplyFlatColumnProjectionParallel(
+    result: *QueryResult,
+    descriptors: []const ProjectionDescriptor,
+    projection_count: u16,
+) bool {
+    const row_count_usize: usize = result.row_count;
+    if (row_count_usize < parallel_projection_min_rows_per_worker * 2) return false;
+
+    const max_workers = @min(max_parallel_projection_workers, row_count_usize);
+    var worker_count = @min(
+        max_workers,
+        row_count_usize / parallel_projection_min_rows_per_worker,
+    );
+    if (worker_count < 2) return false;
+    if (worker_count > max_parallel_projection_workers) worker_count = max_parallel_projection_workers;
+
+    var workers: [max_parallel_projection_workers]ParallelProjectionWorker = undefined;
+    var threads: [max_parallel_projection_workers - 1]?std.Thread =
+        [_]?std.Thread{null} ** (max_parallel_projection_workers - 1);
+    var spawned: usize = 0;
+
+    const base = row_count_usize / worker_count;
+    const remainder = row_count_usize % worker_count;
+    var start_idx: usize = 0;
+    var worker_idx: usize = 0;
+    while (worker_idx < worker_count) : (worker_idx += 1) {
+        const span = base + if (worker_idx < remainder) @as(usize, 1) else @as(usize, 0);
+        const end_idx = start_idx + span;
+        workers[worker_idx] = .{
+            .result = result,
+            .descriptors = descriptors,
+            .projection_count = projection_count,
+            .start_idx = @intCast(start_idx),
+            .end_idx = @intCast(end_idx),
+        };
+        start_idx = end_idx;
+    }
+
+    worker_idx = 1;
+    while (worker_idx < worker_count) : (worker_idx += 1) {
+        threads[spawned] = std.Thread.spawn(.{}, ParallelProjectionWorker.run, .{&workers[worker_idx]}) catch {
+            var join_idx: usize = 0;
+            while (join_idx < spawned) : (join_idx += 1) {
+                threads[join_idx].?.join();
+            }
+            return false;
+        };
+        spawned += 1;
+    }
+
+    workers[0].run();
+    var join_idx: usize = 0;
+    while (join_idx < spawned) : (join_idx += 1) {
+        threads[join_idx].?.join();
+    }
+
+    var first_error_index: u16 = std.math.maxInt(u16);
+    var first_error_code: ParallelProjectionError = .none;
+    worker_idx = 0;
+    while (worker_idx < worker_count) : (worker_idx += 1) {
+        if (workers[worker_idx].first_error_code == .none) continue;
+        if (workers[worker_idx].first_error_index < first_error_index) {
+            first_error_index = workers[worker_idx].first_error_index;
+            first_error_code = workers[worker_idx].first_error_code;
+        }
+    }
+
+    if (first_error_code == .out_of_bounds) {
+        setError(result, "projection column out of bounds");
+        return true;
+    }
     return true;
 }
 

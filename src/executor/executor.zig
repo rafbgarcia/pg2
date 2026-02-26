@@ -1647,7 +1647,14 @@ fn executeReadPipeline(
             },
         };
     } else {
-        if (!applyFlatColumnProjection(ctx, result, pipeline_node, model_id, string_arena)) {
+        if (!applyFlatColumnProjection(
+            ctx,
+            result,
+            pipeline_node,
+            model_id,
+            string_arena,
+            result.stats.plan.parallel_scheduler_path == .scheduled_parallel,
+        )) {
             captureTempStats(result, ctx.collector);
             return;
         }
@@ -5961,7 +5968,14 @@ fn executeMutation(
     }
 
     if (has_projection and !result.has_error) {
-        _ = applyFlatColumnProjection(ctx, result, pipeline_node, model_id, string_arena);
+        _ = applyFlatColumnProjection(
+            ctx,
+            result,
+            pipeline_node,
+            model_id,
+            string_arena,
+            false,
+        );
     }
 }
 
@@ -7202,6 +7216,55 @@ test "execute parallel schedule metadata is deterministic across replayed runs" 
         run_a.stats.plan.parallel_schedule_fingerprint,
         run_b.stats.plan.parallel_schedule_fingerprint,
     );
+}
+
+test "execute returns equivalent rows for large flat projection with planner parallel mode" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    var id: u32 = 1;
+    while (id <= 48) : (id += 1) {
+        var insert_buf: [128]u8 = undefined;
+        const src_insert = try std.fmt.bufPrint(
+            insert_buf[0..],
+            "User |> insert(id = {d}, name = \"N{d}\", active = true)",
+            .{ id, id },
+        );
+        const tok_insert = tokenizer_mod.tokenize(src_insert);
+        const p_insert = parser_mod.parse(&tok_insert, src_insert);
+        try testing.expect(!p_insert.has_error);
+        var r_insert = try execute(&env.makeCtx(tx, &snap, &p_insert.ast, &tok_insert, src_insert));
+        defer r_insert.deinit();
+        try testing.expect(!r_insert.has_error);
+    }
+
+    const src = "User |> sort(id asc) { id }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+
+    env.planner_feature_gate_mask = 0;
+    var result_seq = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result_seq.deinit();
+    try testing.expect(!result_seq.has_error);
+    try testing.expectEqual(ParallelMode.sequential, result_seq.stats.plan.parallel_mode);
+
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+    var result_par = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result_par.deinit();
+    try testing.expect(!result_par.has_error);
+    try testing.expectEqual(ParallelMode.enabled, result_par.stats.plan.parallel_mode);
+    try testing.expectEqual(
+        ParallelSchedulerPath.scheduled_parallel,
+        result_par.stats.plan.parallel_scheduler_path,
+    );
+
+    try expectResultRowsEqual(&result_seq, &result_par);
 }
 
 test "execute with unknown model returns error" {
