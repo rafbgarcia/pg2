@@ -53,6 +53,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
       - `parallel_schedule_fingerprint`
     - executor now routes `parallel_mode=enabled` through deterministic parallel execution for per-chunk WHERE filtering (`parallel_scheduler_path=scheduled_parallel`) with fail-closed serial fallback if worker spawn fails
     - flat, column-only selection projection now also supports deterministic parallel execution under planner parallel mode with fail-closed serial fallback
+    - `parallel_schedule_applied_tasks` now reflects actually applied parallel execution work (WHERE/projection), not prefilled scheduler metadata
 - Tests:
   - internal planner contract tests added under `test/internals/planner/`
   - user-visible inspect contract coverage added under:
@@ -65,6 +66,8 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - semantic-equivalence coverage for planner parallel mode gate added in executor tests (parallel-mode enabled vs disabled yields identical result rows with true parallel filtering enabled)
   - executor replay test added to assert deterministic parallel schedule metadata across repeated seeded runs
   - large-row equivalence coverage added for flat column projection under planner parallel mode
+  - parallel-mode checkpoint chronology order coverage added for stable `pre_scan -> post_filter -> post_group -> pre_join` ordering under true parallel execution
+  - parallel-mode zero-row coverage added to lock `parallel_schedule_applied_tasks=0` when no rows are processed
   - server serialization contract test added to lock inspect/explain scheduler output for `scheduled_parallel`
   - full `zig build unit --summary all` and `zig build test --summary all` passing after integration
 - Verification:
@@ -101,6 +104,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - deterministic parallel scheduler path activated when `parallel_mode=enabled`
   - parallel WHERE-filter execution uses deterministic row-range partitioning and stable compaction order
   - parallel flat-column projection execution uses deterministic row-range partitioning and per-row in-place rewrite
+  - parallel applied-task metrics are emitted only when a parallel execution stage is actually used
   - parallel path degrades fail-closed to serial filtering/projection if worker spawn fails
 - Tests added/extended:
   - internals planner contract tests
@@ -110,10 +114,12 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - feature-level inspect contract test (`test/features/queries/planner_inspect_contract_test.zig`)
   - executor semantic-equivalence + deterministic parallel metadata replay tests
   - executor large-row semantic-equivalence test for flat projection in planner parallel mode
+  - executor parallel-mode checkpoint chronology and zero-row applied-task contract tests
   - server serialization inspect/explain scheduler-contract test for `scheduled_parallel`
 
 ### Relevant Commits (newest first)
 
+- `d108414` Emit parallel applied-task metrics only when a parallel stage actually executes
 - `b3c7148` Update WF07 status/handoff for projection-stage parallelization slice
 - `d75083e` Extend planner-parallel true execution to flat column projection stage
 - `a096320` Append latest WF07 implementation commits into handoff list
