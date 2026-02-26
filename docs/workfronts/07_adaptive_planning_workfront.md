@@ -54,6 +54,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
     - executor now routes `parallel_mode=enabled` through deterministic parallel execution for per-chunk WHERE filtering (`parallel_scheduler_path=scheduled_parallel`) with fail-closed serial fallback if worker spawn fails
     - flat, column-only selection projection now also supports deterministic parallel execution under planner parallel mode with fail-closed serial fallback
     - grouped and non-grouped HAVING predicates on flat row sets now also support deterministic scheduled parallel filtering under planner parallel mode with fail-closed serial fallback
+    - in-memory flat-row sort now supports deterministic scheduled parallel execution (parallel chunk sort + deterministic serial merge) with fail-closed serial fallback on worker spawn failure
     - `parallel_schedule_applied_tasks` now reflects actually applied parallel execution work (WHERE/projection), not prefilled scheduler metadata
     - executor sort/group modules no longer override planner decision fields; plan decisions stay checkpoint-owned
 - Tests:
@@ -70,11 +71,13 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - large-row equivalence coverage added for flat column projection under planner parallel mode
   - grouped HAVING semantic-equivalence coverage added (parallel-mode enabled vs disabled yields identical grouped rows)
   - grouped HAVING applied-task coverage added (parallel scheduler applied-task count reflects true HAVING-stage parallel execution)
+  - in-memory sort semantic-equivalence coverage added (parallel-mode enabled vs disabled yields identical sorted rows)
+  - in-memory sort applied-task coverage added (parallel scheduler applied-task count reflects true sort-stage parallel execution)
   - parallel-mode checkpoint chronology order coverage added for stable `pre_scan -> post_filter -> post_group -> pre_join` ordering under true parallel execution
   - parallel-mode zero-row coverage added to lock `parallel_schedule_applied_tasks=0` when no rows are processed
   - server serialization contract test added to lock inspect/explain scheduler output for `scheduled_parallel`
 - Verification:
-  - `zig build test-all --summary all` passing after grouped-HAVING parallel extension (`915/917` passed, `2` skipped)
+  - `zig build test-all --summary all` passing after in-memory sort parallel extension (`917/919` passed, `2` skipped)
 - Remaining:
   - expand true parallel execution beyond WHERE/HAVING-filter and flat-column-projection processing while preserving deterministic/fail-closed behavior
 
@@ -109,8 +112,9 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - parallel WHERE-filter execution uses deterministic row-range partitioning and stable compaction order
   - parallel HAVING-filter execution on flat row sets uses deterministic row-range partitioning and stable compaction order (including grouped-count compaction)
   - parallel flat-column projection execution uses deterministic row-range partitioning and per-row in-place rewrite
+  - parallel in-memory sort execution uses deterministic row-range chunking with stable per-chunk sort and deterministic global merge order
   - parallel applied-task metrics are emitted only when a parallel execution stage is actually used
-  - parallel path degrades fail-closed to serial filtering/projection if worker spawn fails
+  - parallel path degrades fail-closed to serial filtering/projection/sort if worker spawn fails
   - sort/group operator modules no longer mutate plan decision fields; decision ownership remains in planner seeding + checkpoint adaptation
   - nested-join decision fields (join/materialization strategy + reasons) now remain planner-owned:
     - planner snapshot captures nested relation ids deterministically
@@ -131,6 +135,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Relevant Commits (newest first)
 
+- `843278d` Extend scheduled parallel execution to in-memory sort stage
 - `bc9a95d` Move nested join plan decisions into planner/checkpoint flow
 - `a039de7` Keep sort/group plan decisions planner-owned
 - `9ec577b` Extend scheduled-parallel execution coverage to grouped HAVING predicates
