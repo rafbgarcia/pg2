@@ -6847,6 +6847,49 @@ test "execute captures parallel mode when planner feature gate is enabled" {
     );
 }
 
+test "execute returns equivalent rows with planner parallel mode on and off" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const seed = [_][]const u8{
+        "User |> insert(id = 1, name = \"A\", active = true)",
+        "User |> insert(id = 2, name = \"B\", active = false)",
+        "User |> insert(id = 3, name = \"C\", active = true)",
+    };
+    for (seed) |src_insert| {
+        const tok_insert = tokenizer_mod.tokenize(src_insert);
+        const p_insert = parser_mod.parse(&tok_insert, src_insert);
+        try testing.expect(!p_insert.has_error);
+        var r_insert = try execute(&env.makeCtx(tx, &snap, &p_insert.ast, &tok_insert, src_insert));
+        defer r_insert.deinit();
+        try testing.expect(!r_insert.has_error);
+    }
+
+    const src = "User |> where(active == true) |> sort(id desc) { id name }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+
+    env.planner_feature_gate_mask = 0;
+    var result_seq = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result_seq.deinit();
+    try testing.expect(!result_seq.has_error);
+    try testing.expectEqual(ParallelMode.sequential, result_seq.stats.plan.parallel_mode);
+
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+    var result_par = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result_par.deinit();
+    try testing.expect(!result_par.has_error);
+    try testing.expectEqual(ParallelMode.enabled, result_par.stats.plan.parallel_mode);
+
+    try expectResultRowsEqual(&result_seq, &result_par);
+}
+
 test "execute with unknown model returns error" {
     var env: ExecTestEnv = undefined;
     try env.init();

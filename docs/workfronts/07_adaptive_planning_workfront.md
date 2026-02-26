@@ -49,13 +49,13 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
     - `test/stress/spill_phase2_gate_nested_hash_spill_contracts_test.zig`
   - deterministic replay coverage for parallel schedule traces added in:
     - `test/sim/planner_parallel_schedule_sim_test.zig`
+  - semantic-equivalence coverage for planner parallel mode gate added in executor tests (parallel-mode enabled vs disabled yields identical result rows while execution remains sequential)
   - full `zig build unit --summary all` and `zig build test --summary all` passing after integration
 - Verification:
   - `zig build sim --summary all` passing with planner adaptation replay checks
   - `zig build stress --summary all` passing with planner checkpoint/fingerprint assertions in mixed spill scenarios
 - Remaining:
   - wire parallel mode to executor scheduling (currently policy/traces only; execution remains sequential)
-  - add semantic-equivalence tests between sequential and parallel-enabled execution modes
 
 ## Non-Goals
 
