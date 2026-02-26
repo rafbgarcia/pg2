@@ -9,8 +9,6 @@ Suggested implementation order.
 
 | Order | Workfront                                                                       | Why This Position                                                                                       |
 | ----- | ------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
-| 8     | `docs/workfronts/07_adaptive_planning_workfront.md`                             | Planner policy hardening after multi-statement semantics are in place and measurable.                   |
-| 9     | `docs/workfronts/04_advisor_observability_workfront.md`                         | Advisor quality depends on stable metrics emitted by execution/planning/runtime paths above.            |
 | 10    | `docs/workfronts/08_expression_language_v1_workfront.md`                        | Expression work is mostly parity/diagnostic closeout and is safer after core runtime contracts settle.  |
 | 11    | `docs/workfronts/05_test_matrix_workfront.md`                                   | Cross-profile reliability matrix should validate the consolidated behavior from prior workfronts.       |
 | 14    | `docs/workfronts/10_iterator_execution_model_workfront.md` (deferred)           | Structural executor rewrite; only start when subqueries/CTEs/window functions become active priorities. |
