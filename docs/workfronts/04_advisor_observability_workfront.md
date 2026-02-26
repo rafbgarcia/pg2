@@ -2,7 +2,7 @@
 
 ## Status
 
-🚧 IN PROGRESS
+✅ COMPLETE
 
 ### Current Implementation Snapshot (2026-02-26)
 
@@ -27,11 +27,14 @@
   - advisor persistence is asynchronous background flush
   - queue overflow drops metrics (increments dropped counter) instead of blocking
   - no keep/drop rule logic on statement path (preserve denominators and avoid coupling)
-- ⏳ Remaining from original scope:
-  - queue pressure rule
-  - spill ratio rule
-  - latency spike rule
-  - parse/plan/execute/serialize phase timing ingestion
+- ✅ Added v1 queue pressure rule (saturation + timeout-edge semantics).
+- ✅ Added v1 spill ratio rule.
+- ✅ Added v1 latency spike rule over persisted `total_ns`.
+- ✅ Added raw phase timing ingestion:
+  - `parse_ns`, `plan_ns`, `execute_ns`, `serialize_ns`, `total_ns`
+- ✅ Added explicit CLI coverage for missing/corrupt metrics file and trigger/no-trigger matrix.
+- ✅ Full gate pass after completion:
+  - `zig build test-all --summary all`
 
 ## Objective
 
@@ -107,7 +110,7 @@ These decisions are locked for current implementation unless explicitly changed.
 - ✅ DONE: async sink with bounded queue and non-blocking enqueue from statement path
 - ✅ DONE: queue-overflow drop behavior (no request-path blocking)
 - ✅ DONE: deterministic persistence/corruption tests
-- ⏳ MISSING: raw phase timing fields (`parse_ns`, `plan_ns`, `execute_ns`, `serialize_ns`, `total_ns`)
+- ✅ DONE: raw phase timing fields (`parse_ns`, `plan_ns`, `execute_ns`, `serialize_ns`, `total_ns`)
 
 ### Scope
 
@@ -139,10 +142,10 @@ These decisions are locked for current implementation unless explicitly changed.
 
 - ✅ DONE: rule engine framework + deterministic text formatter
 - ✅ DONE: low-selectivity predicate advisory rule
-- ⏳ MISSING: queue pressure rule
-- ⏳ MISSING: spill ratio rule
-- ⏳ MISSING: latency spike rule
-- ⏳ MISSING: synthetic trigger/non-trigger tests for missing rules
+- ✅ DONE: queue pressure rule
+- ✅ DONE: spill ratio rule
+- ✅ DONE: latency spike rule
+- ✅ DONE: synthetic trigger/non-trigger tests for all v1 rules
 
 ### Scope
 
@@ -194,7 +197,7 @@ These decisions are locked for current implementation unless explicitly changed.
 - ✅ DONE: `pg2 advise` command in `src/main.zig`
 - ✅ DONE: plain text deterministic output with all triggered advisories
 - ✅ DONE: deterministic no-advisory output line
-- ⏳ MISSING: explicit CLI tests for missing/corrupt advisor file paths and trigger/no-trigger matrix
+- ✅ DONE: explicit CLI tests for missing/corrupt advisor file paths and trigger/no-trigger matrix
 
 ### Scope
 
@@ -228,14 +231,8 @@ These decisions are locked for current implementation unless explicitly changed.
 
 ### Next Session Start Here
 
-1. Add phase timing raw fields to `MetricRecord` and populate in session/request boundary.
-2. Implement rule: queue pressure (using persisted queue/backpressure counters).
-3. Implement rule: spill ratio (using persisted spill/temp counters).
-4. Implement rule: latency spike (using persisted latency fields after step 1).
-5. Add deterministic tests for trigger/non-trigger per new rule.
-6. Add/expand CLI-level tests for missing/corrupt metrics file behavior and multi-rule output.
-7. Run gate:
-   - `zig build test-all --summary all`
+1. No critical-path scope remains for Workfront 04.
+2. Future enhancements should be treated as new scoped follow-up workfront items.
 
 ## Hard-Stop Conditions
 
