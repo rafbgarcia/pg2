@@ -51,7 +51,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
     - executor/inspect now expose deterministic schedule-trace metadata:
       - `parallel_schedule_task_count`
       - `parallel_schedule_fingerprint`
-    - executor now routes `parallel_mode=enabled` through a deterministic serial scheduler path (`parallel_scheduler_path=scheduled_serial`) while preserving current sequential semantics
+    - executor now routes `parallel_mode=enabled` through deterministic parallel execution for per-chunk WHERE filtering (`parallel_scheduler_path=scheduled_parallel`) with fail-closed serial fallback if worker spawn fails
 - Tests:
   - internal planner contract tests added under `test/internals/planner/`
   - user-visible inspect contract coverage added under:
@@ -61,13 +61,15 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
     - `test/stress/spill_phase2_gate_nested_hash_spill_contracts_test.zig`
   - deterministic replay coverage for parallel schedule traces added in:
     - `test/sim/planner_parallel_schedule_sim_test.zig`
-  - semantic-equivalence coverage for planner parallel mode gate added in executor tests (parallel-mode enabled vs disabled yields identical result rows while execution remains sequential)
+  - semantic-equivalence coverage for planner parallel mode gate added in executor tests (parallel-mode enabled vs disabled yields identical result rows with true parallel filtering enabled)
+  - executor replay test added to assert deterministic parallel schedule metadata across repeated seeded runs
+  - server serialization contract test added to lock inspect/explain scheduler output for `scheduled_parallel`
   - full `zig build unit --summary all` and `zig build test --summary all` passing after integration
 - Verification:
   - `zig build sim --summary all` passing with planner adaptation replay checks
   - `zig build stress --summary all` passing with planner checkpoint/fingerprint assertions in mixed spill scenarios
 - Remaining:
-  - replace deterministic serial scheduler path with real parallel execution while preserving deterministic scheduling traces and semantic equivalence guarantees
+  - expand true parallel execution beyond WHERE-filter chunk processing while preserving deterministic/fail-closed behavior
 
 ## Fresh Session Handoff Snapshot (2026-02-26)
 
@@ -94,13 +96,17 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - checkpoint traces recorded and serialized
   - plain-language explain details emitted via `INSPECT explain_detail`
   - parallel policy metadata and deterministic schedule-trace metadata emitted
-  - deterministic serial scheduler path activated when `parallel_mode=enabled`
+  - deterministic parallel scheduler path activated when `parallel_mode=enabled`
+  - parallel WHERE-filter execution uses deterministic row-range partitioning and stable compaction order
+  - parallel path degrades fail-closed to serial filtering if worker spawn fails
 - Tests added/extended:
   - internals planner contract tests
   - sim adaptation replay determinism
   - sim parallel schedule determinism
   - stress planner checkpoint/fingerprint assertions
   - feature-level inspect contract test (`test/features/queries/planner_inspect_contract_test.zig`)
+  - executor semantic-equivalence + deterministic parallel metadata replay tests
+  - server serialization inspect/explain scheduler-contract test for `scheduled_parallel`
 
 ### Relevant Commits (newest first)
 
@@ -121,7 +127,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Immediate Next Step (single-threaded priority)
 
-1. Replace `parallel_scheduler_path=scheduled_serial` with true parallel execution while preserving:
+1. Extend planner-parallel true execution coverage beyond WHERE-filter chunks while preserving:
    - deterministic schedule traces for fixed seeds
    - semantic equivalence with sequential mode
    - fail-closed behavior under capacity pressure

@@ -625,6 +625,65 @@ fn parallelModeExplain(mode: exec_mod.ParallelMode) []const u8 {
 fn parallelSchedulerExplain(path: exec_mod.ParallelSchedulerPath) []const u8 {
     return switch (path) {
         .direct => "direct execution path",
-        .scheduled_serial => "deterministic serial scheduler path",
+        .scheduled_parallel => "deterministic parallel scheduler path",
     };
+}
+
+test "serializeInspectStats keeps parallel scheduler inspect and explain contract stable" {
+    var exec_stats = exec_mod.ExecStats{};
+    const model_name = "User";
+    @memcpy(exec_stats.plan.source_model[0..model_name.len], model_name);
+    exec_stats.plan.source_model_len = model_name.len;
+    exec_stats.plan.pipeline_ops[0] = .inspect_op;
+    exec_stats.plan.pipeline_op_count = 1;
+    exec_stats.plan.parallel_mode = .enabled;
+    exec_stats.plan.parallel_scheduler_path = .scheduled_parallel;
+    exec_stats.plan.parallel_schedule_task_count = 3;
+    exec_stats.plan.parallel_schedule_applied_tasks = 3;
+    exec_stats.plan.parallel_schedule_fingerprint = 0x1234;
+    exec_stats.plan.streaming_mode = .disabled;
+
+    const pool_stats: PoolStats = .{
+        .overload_policy = .reject,
+        .pool_size = 1,
+        .checked_out = 0,
+        .pinned = 0,
+        .pool_exhausted_total = 0,
+    };
+
+    var buf: [16 * 1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(buf[0..]);
+    try serializeInspectStats(
+        stream.writer(),
+        &exec_stats,
+        pool_stats,
+        null,
+        null,
+        .{},
+        .{},
+        .{},
+    );
+    const output = stream.getWritten();
+
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "parallel_mode=enabled",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "parallel_scheduler_path=scheduled_parallel",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "scheduler=deterministic parallel scheduler path",
+        ) != null,
+    );
 }
