@@ -390,6 +390,7 @@ pub const ExecContext = struct {
     collector: *SpillingResultCollector,
     temp_pages_per_query_slot: u64 = temp_mod.default_pages_per_query_slot,
     work_memory_bytes_per_slot: u64,
+    planner_feature_gate_mask: u64 = 0,
     variable_list_values_before_spill: u16 = default_variable_list_values_before_spill,
     request_state: ?*RequestState = null,
 };
@@ -6069,6 +6070,7 @@ fn buildPlannerSnapshot(
         .runtime_counters_snapshot_id = ctx.snapshot.next_tx,
         .capacity_profile_id = (@as(u64, ctx.work_memory_bytes_per_slot) << 16) ^
             @as(u64, @intCast(@min(ctx.temp_pages_per_query_slot, std.math.maxInt(u16)))),
+        .feature_gate_mask = ctx.planner_feature_gate_mask,
         .work_memory_bytes_per_slot = ctx.work_memory_bytes_per_slot,
         .aggregate_groups_cap = capacity_mod.max_aggregate_groups,
         .join_build_budget_bytes = ctx.work_memory_bytes_per_slot,
@@ -6330,6 +6332,7 @@ const ExecTestEnv = struct {
     nested_decode_arena_bytes: []u8,
     nested_match_arena_bytes: []u8,
     collector: SpillingResultCollector,
+    planner_feature_gate_mask: u64 = 0,
 
     /// Initialize in-place so that disk.storage() captures a stable pointer.
     fn init(self: *ExecTestEnv) !void {
@@ -6457,6 +6460,7 @@ const ExecTestEnv = struct {
             .query_slot_index = 0,
             .collector = &self.collector,
             .work_memory_bytes_per_slot = 4 * 1024 * 1024,
+            .planner_feature_gate_mask = self.planner_feature_gate_mask,
         };
     }
 };
@@ -6780,6 +6784,10 @@ test "execute captures deterministic inspect plan metadata" {
         GroupStrategy.none,
         result.stats.plan.group_strategy,
     );
+    try testing.expectEqual(
+        ParallelMode.sequential,
+        result.stats.plan.parallel_mode,
+    );
     try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_relation_count);
     try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_nested_loop_count);
     try testing.expectEqual(@as(u8, 0), result.stats.plan.nested_join_hash_in_memory_count);
@@ -6811,6 +6819,31 @@ test "execute captures group strategy in inspect plan metadata" {
     try testing.expectEqual(
         GroupStrategy.in_memory_linear,
         result.stats.plan.group_strategy,
+    );
+}
+
+test "execute captures parallel mode when planner feature gate is enabled" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const src = "User |> where(active == true) |> inspect";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    var result = try execute(
+        &env.makeCtx(tx, &snap, &p.ast, &tok, src),
+    );
+    defer result.deinit();
+
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(
+        ParallelMode.enabled,
+        result.stats.plan.parallel_mode,
     );
 }
 
