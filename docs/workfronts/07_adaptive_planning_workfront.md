@@ -42,6 +42,9 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - Parallelization policy foundation landed:
     - planner-level `parallel_mode` decision (default `sequential`, feature-gated `enabled`)
     - deterministic parallel schedule-trace builder under `src/planner/parallel.zig`
+    - executor/inspect now expose deterministic schedule-trace metadata:
+      - `parallel_schedule_task_count`
+      - `parallel_schedule_fingerprint`
 - Tests:
   - internal planner contract tests added under `test/internals/planner/`
   - deterministic replay coverage for planner adaptation traces added in:

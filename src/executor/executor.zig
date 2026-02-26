@@ -37,6 +37,7 @@ const btree_mod = @import("../storage/btree.zig");
 const temp_mod = @import("../storage/temp.zig");
 const planner_mod = @import("../planner/planner.zig");
 const planner_adaptation = @import("../planner/adaptation.zig");
+const planner_parallel = @import("../planner/parallel.zig");
 const planner_types = @import("../planner/types.zig");
 const planner_fingerprint = @import("../planner/fingerprint.zig");
 
@@ -167,6 +168,8 @@ pub const PlanStats = struct {
     sort_reason: planner_types.ReasonCode = .none,
     group_reason: planner_types.ReasonCode = .none,
     streaming_reason: planner_types.ReasonCode = .none,
+    parallel_schedule_task_count: u8 = 0,
+    parallel_schedule_fingerprint: u64 = 0,
     checkpoints: [4]PlanCheckpointTrace = [_]PlanCheckpointTrace{.{}} ** 4,
     checkpoint_count: u8 = 0,
 };
@@ -6228,6 +6231,16 @@ fn seedPlannerDecisionStats(
     plan.planner_snapshot_fingerprint = planner_fingerprint.snapshotFingerprint(&snapshot) catch 0;
     plan.planner_decision_fingerprint = planner_fingerprint.decisionFingerprint(&decisions);
     applyPlannerDecisionSet(plan, &decisions);
+
+    const schedule = planner_parallel.buildScheduleTrace(&snapshot, &decisions) catch return;
+    plan.parallel_schedule_task_count = schedule.task_count;
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(&[_]u8{@intFromEnum(schedule.mode)});
+    for (schedule.tasks[0..schedule.task_count]) |task| {
+        hasher.update(std.mem.asBytes(&task.relation_id));
+        hasher.update(&[_]u8{@intFromEnum(task.op)});
+    }
+    plan.parallel_schedule_fingerprint = hasher.final();
 }
 
 fn incrementPlanCounter(counter: *u8) void {
@@ -6845,6 +6858,8 @@ test "execute captures parallel mode when planner feature gate is enabled" {
         ParallelMode.enabled,
         result.stats.plan.parallel_mode,
     );
+    try testing.expect(result.stats.plan.parallel_schedule_task_count > 0);
+    try testing.expect(result.stats.plan.parallel_schedule_fingerprint != 0);
 }
 
 test "execute returns equivalent rows with planner parallel mode on and off" {
