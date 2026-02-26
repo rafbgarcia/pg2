@@ -55,6 +55,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
     - flat, column-only selection projection now also supports deterministic parallel execution under planner parallel mode with fail-closed serial fallback
     - grouped and non-grouped HAVING predicates on flat row sets now also support deterministic scheduled parallel filtering under planner parallel mode with fail-closed serial fallback
     - `parallel_schedule_applied_tasks` now reflects actually applied parallel execution work (WHERE/projection), not prefilled scheduler metadata
+    - executor sort/group modules no longer override planner decision fields; plan decisions stay checkpoint-owned
 - Tests:
   - internal planner contract tests added under `test/internals/planner/`
   - user-visible inspect contract coverage added under:
@@ -76,6 +77,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - `zig build test-all --summary all` passing after grouped-HAVING parallel extension (`915/917` passed, `2` skipped)
 - Remaining:
   - expand true parallel execution beyond WHERE/HAVING-filter and flat-column-projection processing while preserving deterministic/fail-closed behavior
+  - migrate remaining nested-join decision-field writes to planner-owned checkpoint flow (executor should emit counters/telemetry only)
 
 ## Fresh Session Handoff Snapshot (2026-02-26)
 
@@ -85,6 +87,8 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - `pre_scan -> post_filter -> post_group -> pre_join`
 - Adaptation remains degrade-only and deterministic.
 - Parallel execution policy is feature-gated; default behavior remains sequential and fail-closed.
+- Planner is the sole owner of plan decision fields (`*_strategy`, `*_mode`, `*_reason`).
+- Executor/operator paths may emit observed execution counters/telemetry, but must not mutate plan decisions directly.
 
 ### Delivered Through This Session
 
@@ -108,6 +112,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - parallel flat-column projection execution uses deterministic row-range partitioning and per-row in-place rewrite
   - parallel applied-task metrics are emitted only when a parallel execution stage is actually used
   - parallel path degrades fail-closed to serial filtering/projection if worker spawn fails
+  - sort/group operator modules no longer mutate plan decision fields; decision ownership remains in planner seeding + checkpoint adaptation
 - Tests added/extended:
   - internals planner contract tests
   - sim adaptation replay determinism
@@ -122,6 +127,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Relevant Commits (newest first)
 
+- `a039de7` Keep sort/group plan decisions planner-owned
 - `9ec577b` Extend scheduled-parallel execution coverage to grouped HAVING predicates
 - `2fe6785` Document applied-task parallel execution contract updates in WF07 handoff
 - `a65a693` Complete WF07 handoff doc details for the projection-parallel slice
@@ -152,6 +158,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
    - deterministic schedule traces for fixed seeds
    - semantic equivalence with sequential mode
    - fail-closed behavior under capacity pressure
+2. Move remaining nested-join decision mutations out of executor/operator paths so planner checkpoints remain the only decision mutation surface.
 
 ### Acceptance Gates (must all pass)
 
