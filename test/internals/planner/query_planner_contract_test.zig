@@ -12,6 +12,10 @@ test "identical input fingerprint yields identical decision fingerprint" {
         .catalog_snapshot_id = 100,
         .runtime_counters_snapshot_id = 101,
         .capacity_profile_id = 102,
+        .work_memory_bytes_per_slot = 1024,
+        .aggregate_groups_cap = 256,
+        .join_build_budget_bytes = 4096,
+        .average_row_width_bytes = 64,
         .relation_ids_sorted = blk: {
             var ids = [_]u32{0} ** types.max_relations;
             ids[0] = 7;
@@ -36,6 +40,10 @@ test "missing required snapshot fields fail closed with deterministic codes" {
         .catalog_snapshot_id = 1,
         .runtime_counters_snapshot_id = 2,
         .capacity_profile_id = 3,
+        .work_memory_bytes_per_slot = 1024,
+        .aggregate_groups_cap = 256,
+        .join_build_budget_bytes = 4096,
+        .average_row_width_bytes = 64,
     };
     try std.testing.expectError(
         error.MissingQueryShapeFingerprint,
@@ -46,6 +54,10 @@ test "missing required snapshot fields fail closed with deterministic codes" {
         .query_shape_fingerprint = 1,
         .runtime_counters_snapshot_id = 2,
         .capacity_profile_id = 3,
+        .work_memory_bytes_per_slot = 1024,
+        .aggregate_groups_cap = 256,
+        .join_build_budget_bytes = 4096,
+        .average_row_width_bytes = 64,
     };
     try std.testing.expectError(
         error.MissingCatalogSnapshotId,

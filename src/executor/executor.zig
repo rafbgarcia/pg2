@@ -5901,6 +5901,10 @@ fn seedPlannerDecisionStats(
         .runtime_counters_snapshot_id = ctx.snapshot.next_tx,
         .capacity_profile_id = (@as(u64, ctx.work_memory_bytes_per_slot) << 16) ^
             @as(u64, @intCast(@min(ctx.temp_pages_per_query_slot, std.math.maxInt(u16)))),
+        .work_memory_bytes_per_slot = ctx.work_memory_bytes_per_slot,
+        .aggregate_groups_cap = capacity_mod.max_aggregate_groups,
+        .join_build_budget_bytes = ctx.work_memory_bytes_per_slot,
+        .average_row_width_bytes = scan_mod.max_row_size_bytes / 4,
     };
 
     var i: usize = 0;

@@ -23,6 +23,10 @@ test "identical snapshots produce identical fingerprints" {
         .catalog_snapshot_id = 12,
         .runtime_counters_snapshot_id = 13,
         .capacity_profile_id = 14,
+        .work_memory_bytes_per_slot = 1024,
+        .aggregate_groups_cap = 256,
+        .join_build_budget_bytes = 4096,
+        .average_row_width_bytes = 64,
     };
 
     const a = try snapshotFingerprint(&snapshot);

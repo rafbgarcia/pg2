@@ -2,9 +2,11 @@
 pub const types = @import("types.zig");
 pub const fingerprint = @import("fingerprint.zig");
 pub const planner = @import("planner.zig");
+pub const adaptation = @import("adaptation.zig");
 
 test {
     _ = types;
     _ = fingerprint;
     _ = planner;
+    _ = adaptation;
 }

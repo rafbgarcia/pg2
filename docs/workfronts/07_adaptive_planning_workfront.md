@@ -18,6 +18,26 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 - Depends on `docs/workfronts/03_degrade_spill_workfront.md` for spill/degrade execution primitives.
 - Must converge planner contracts used by `docs/workfronts/06_variables_and_multi_statement_workfront.md`; WF06 may ship first, and WF07 then formalizes/owns those contracts without semantic drift.
 
+## Implementation Status (2026-02-26)
+
+- Implemented:
+  - New query planner module surface under `src/planner/` with:
+    - immutable snapshot + decision schemas
+    - deterministic snapshot/decision fingerprint utilities
+    - deterministic initial policy derivation (`planInitial`)
+    - checkpoint adaptation module with degrade-only transitions (`adaptAtCheckpoint`)
+  - Runtime startup planner split started:
+    - startup capacity planner moved to `src/runtime/capacity_planner.zig`
+    - `src/runtime/planner.zig` now acts as compatibility wrapper during migration
+  - Executor plan stats now seed from planner snapshot/decision contracts and expose planner metadata/reason fields through inspect serialization.
+- Tests:
+  - internal planner contract tests added under `test/internals/planner/`
+  - full `zig build unit --summary all` and `zig build test --summary all` passing after integration
+- Remaining:
+  - wire adaptation checkpoints in live executor flow (`pre_scan`, `post_filter`, `pre_join`, `post_group`)
+  - stabilize inspect/explain checkpoint chronology output
+  - add deterministic sim/stress traces for adaptation and (later) parallel scheduling
+
 ## Non-Goals
 
 - No classic static cost model with cardinality selectivity estimation as primary decision source.

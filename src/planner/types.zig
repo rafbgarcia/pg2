@@ -18,6 +18,10 @@ pub const PlannerError = error{
     MissingCatalogSnapshotId,
     MissingRuntimeCountersSnapshotId,
     MissingCapacityProfileId,
+    MissingWorkMemoryBudget,
+    MissingAggregateGroupsCap,
+    MissingJoinBuildBudgetBytes,
+    MissingAverageRowWidthBytes,
     InvalidRelationOrdering,
 };
 
@@ -97,6 +101,10 @@ pub const PlannerInputSnapshot = extern struct {
     catalog_snapshot_id: u64 = 0,
     runtime_counters_snapshot_id: u64 = 0,
     capacity_profile_id: u64 = 0,
+    work_memory_bytes_per_slot: u64 = 0,
+    aggregate_groups_cap: u32 = 0,
+    join_build_budget_bytes: u64 = 0,
+    average_row_width_bytes: u32 = 0,
     feature_gate_mask: u64 = 0,
     operator_sequence: [max_operator_sequence]OpTag = [_]OpTag{.none} ** max_operator_sequence,
     relation_ids_sorted: [max_relations]u32 = [_]u32{0} ** max_relations,
@@ -108,6 +116,10 @@ pub const PlannerInputSnapshot = extern struct {
         if (self.catalog_snapshot_id == 0) return error.MissingCatalogSnapshotId;
         if (self.runtime_counters_snapshot_id == 0) return error.MissingRuntimeCountersSnapshotId;
         if (self.capacity_profile_id == 0) return error.MissingCapacityProfileId;
+        if (self.work_memory_bytes_per_slot == 0) return error.MissingWorkMemoryBudget;
+        if (self.aggregate_groups_cap == 0) return error.MissingAggregateGroupsCap;
+        if (self.join_build_budget_bytes == 0) return error.MissingJoinBuildBudgetBytes;
+        if (self.average_row_width_bytes == 0) return error.MissingAverageRowWidthBytes;
 
         var previous: u32 = 0;
         var seen_zero_tail = false;
