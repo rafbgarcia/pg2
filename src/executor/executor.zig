@@ -8860,6 +8860,48 @@ test "execute group supports sum avg min max aggregates via having and sort" {
     try testing.expectEqual(false, result.rows[1].values[2].bool);
 }
 
+test "execute grouped sort keeps aggregate state aligned after multi-pass merge" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    var id: u32 = 1;
+    while (id <= 32) : (id += 1) {
+        var insert_buf: [128]u8 = undefined;
+        const src_insert = try std.fmt.bufPrint(
+            insert_buf[0..],
+            "User |> insert(id = {d}, name = \"A{d}\", active = true)",
+            .{ id, id },
+        );
+        const tok_insert = tokenizer_mod.tokenize(src_insert);
+        const p_insert = parser_mod.parse(&tok_insert, src_insert);
+        try testing.expect(!p_insert.has_error);
+        var r_insert = try execute(&env.makeCtx(tx, &snap, &p_insert.ast, &tok_insert, src_insert));
+        defer r_insert.deinit();
+        try testing.expect(!r_insert.has_error);
+    }
+
+    const src = "User |> group(id) |> sort(sum(id) desc) { id }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(@as(u16, 32), result.row_count);
+
+    var expected_id: i64 = 32;
+    var row_idx: u16 = 0;
+    while (row_idx < result.row_count) : (row_idx += 1) {
+        try testing.expectEqual(expected_id, result.rows[row_idx].values[0].i64);
+        expected_id -= 1;
+    }
+}
+
 test "execute group sum enforces numeric input types in having" {
     var env: ExecTestEnv = undefined;
     try env.init();

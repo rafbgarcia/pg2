@@ -25,6 +25,7 @@ const QueryResult = @import("executor.zig").QueryResult;
 const evalContextForExec = @import("executor.zig").evalContextForExec;
 const setError = @import("executor.zig").setError;
 const GroupRuntime = aggregation_mod.GroupRuntime;
+const AggregateState = aggregation_mod.AggregateState;
 
 const max_sort_keys = capacity_mod.max_sort_keys;
 const sort_key_desc_mask: u16 = 0x0001;
@@ -454,6 +455,12 @@ pub fn sortRowsMerge(
 
     // Auxiliary group counts buffer (16 KB on stack for scan_batch_size=4096).
     var aux_counts: [scan_mod.scan_batch_size]u32 = undefined;
+    var src_group_state_indices: [scan_mod.scan_batch_size]u16 = undefined;
+    var dst_group_state_indices: [scan_mod.scan_batch_size]u16 = undefined;
+    var i: u16 = 0;
+    while (i < n) : (i += 1) {
+        src_group_state_indices[i] = i;
+    }
 
     var src_rows: []ResultRow = result.rows[0..n];
     var dst_rows: []ResultRow = aux_rows[0..n];
@@ -462,9 +469,9 @@ pub fn sortRowsMerge(
     var width: u16 = 1;
     while (width < n) {
         // Merge pass: merge adjacent runs of `width` from src into dst.
-        var i: u16 = 0;
-        while (i < n) {
-            const mid = @min(i +| width, n);
+        var run_start: u16 = 0;
+        while (run_start < n) {
+            const mid = @min(run_start +| width, n);
             const end = @min(mid +| width, n);
 
             try mergeAdjacentRuns(
@@ -477,12 +484,14 @@ pub fn sortRowsMerge(
                 dst_rows,
                 &group_runtime.group_counts,
                 &aux_counts,
-                i,
+                &src_group_state_indices,
+                &dst_group_state_indices,
+                run_start,
                 mid,
                 end,
             );
 
-            i = end;
+            run_start = end;
         }
 
         // After the merge pass, merged counts are in aux_counts.
@@ -498,6 +507,9 @@ pub fn sortRowsMerge(
         src_rows = dst_rows;
         dst_rows = tmp;
         in_result = !in_result;
+        const tmp_indices = src_group_state_indices;
+        src_group_state_indices = dst_group_state_indices;
+        dst_group_state_indices = tmp_indices;
 
         // Prevent u16 overflow on the final doubling.
         if (width > n / 2) break;
@@ -507,6 +519,21 @@ pub fn sortRowsMerge(
     // Ensure sorted rows end up in result.rows.
     if (!in_result) {
         @memcpy(result.rows[0..n], src_rows);
+    }
+    if (group_runtime.active and group_runtime.aggregate_count > 0) {
+        var reordered_states: [scan_mod.scan_batch_size]AggregateState = undefined;
+        var slot: u16 = 0;
+        while (slot < group_runtime.aggregate_count) : (slot += 1) {
+            var idx: u16 = 0;
+            while (idx < n) : (idx += 1) {
+                const state_idx = src_group_state_indices[idx];
+                reordered_states[idx] = group_runtime.aggregate_states[slot][state_idx];
+            }
+            @memcpy(
+                group_runtime.aggregate_states[slot][0..n],
+                reordered_states[0..n],
+            );
+        }
     }
     // group_runtime.group_counts is already correct (copied after each pass).
 }
@@ -525,6 +552,8 @@ fn mergeAdjacentRuns(
     dst: []ResultRow,
     src_counts: *const [scan_mod.scan_batch_size]u32,
     dst_counts: *[scan_mod.scan_batch_size]u32,
+    src_group_state_indices: *const [scan_mod.scan_batch_size]u16,
+    dst_group_state_indices: *[scan_mod.scan_batch_size]u16,
     left: u16,
     mid: u16,
     right: u16,
@@ -538,8 +567,8 @@ fn mergeAdjacentRuns(
             ctx,
             schema,
             group_runtime,
-            l,
-            r,
+            src_group_state_indices[l],
+            src_group_state_indices[r],
             &src[l],
             &src[r],
             sort_keys,
@@ -550,10 +579,12 @@ fn mergeAdjacentRuns(
             // Left <= right: take left (preserves stability).
             dst[out] = src[l];
             if (group_runtime.active) dst_counts[out] = src_counts[l];
+            if (group_runtime.active) dst_group_state_indices[out] = src_group_state_indices[l];
             l += 1;
         } else {
             dst[out] = src[r];
             if (group_runtime.active) dst_counts[out] = src_counts[r];
+            if (group_runtime.active) dst_group_state_indices[out] = src_group_state_indices[r];
             r += 1;
         }
         out += 1;
@@ -563,6 +594,7 @@ fn mergeAdjacentRuns(
     while (l < mid) {
         dst[out] = src[l];
         if (group_runtime.active) dst_counts[out] = src_counts[l];
+        if (group_runtime.active) dst_group_state_indices[out] = src_group_state_indices[l];
         l += 1;
         out += 1;
     }
@@ -571,6 +603,7 @@ fn mergeAdjacentRuns(
     while (r < right) {
         dst[out] = src[r];
         if (group_runtime.active) dst_counts[out] = src_counts[r];
+        if (group_runtime.active) dst_group_state_indices[out] = src_group_state_indices[r];
         r += 1;
         out += 1;
     }
