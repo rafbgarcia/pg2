@@ -245,10 +245,17 @@ pub fn main() !void {
         };
 
         var catalog = catalog_mod.Catalog{};
-        var session = session_mod.Session.initWithStorageRoot(
+        var advisor_sink = advisor_mod.sink.Sink.init();
+        advisor_sink.start(&storage_root.root_dir) catch {
+            try stdout.writeAll("startup failed: could not start advisor sink\n");
+            return;
+        };
+        defer advisor_sink.deinit();
+        var session = session_mod.Session.initWithStorageRootAndAdvisor(
             &runtime,
             &catalog,
             &storage_root,
+            &advisor_sink,
         );
         var pool = pool_mod.ConnectionPool.initWithConfig(&runtime, .{
             .overload_policy = .queue,

@@ -28,6 +28,7 @@ const heap_mod = @import("../storage/heap.zig");
 const io_mod = @import("../storage/io.zig");
 const disk_mod = @import("../simulator/disk.zig");
 const advisor_metrics_mod = @import("../advisor/metrics.zig");
+const advisor_sink_mod = @import("../advisor/sink.zig");
 
 const BootstrappedRuntime = bootstrap_mod.BootstrappedRuntime;
 const Catalog = catalog_mod.Catalog;
@@ -86,12 +87,13 @@ pub const Session = struct {
     runtime: *BootstrappedRuntime,
     catalog: *Catalog,
     storage_root: ?*RuntimeStorageRoot,
+    advisor_sink: ?*advisor_sink_mod.Sink,
 
     pub fn init(
         runtime: *BootstrappedRuntime,
         catalog: *Catalog,
     ) Session {
-        return initWithStorageRoot(runtime, catalog, null);
+        return initWithStorageRootAndAdvisor(runtime, catalog, null, null);
     }
 
     pub fn initWithStorageRoot(
@@ -99,11 +101,21 @@ pub const Session = struct {
         catalog: *Catalog,
         storage_root: ?*RuntimeStorageRoot,
     ) Session {
+        return initWithStorageRootAndAdvisor(runtime, catalog, storage_root, null);
+    }
+
+    pub fn initWithStorageRootAndAdvisor(
+        runtime: *BootstrappedRuntime,
+        catalog: *Catalog,
+        storage_root: ?*RuntimeStorageRoot,
+        advisor_sink: ?*advisor_sink_mod.Sink,
+    ) Session {
         std.debug.assert(runtime.static_allocator.isSealed());
         return .{
             .runtime = runtime,
             .catalog = catalog,
             .storage_root = storage_root,
+            .advisor_sink = advisor_sink,
         };
     }
 
@@ -260,7 +272,8 @@ pub const Session = struct {
         stats: *const exec_mod.ExecStats,
         runtime_inspect_stats: ?RuntimeInspectStats,
     ) void {
-        const storage_root = self.storage_root orelse return;
+        _ = self.storage_root;
+        const sink = self.advisor_sink orelse return;
         const operation = detectOperationKind(ast);
         const runtime_stats = runtime_inspect_stats orelse RuntimeInspectStats{};
         const metric: advisor_metrics_mod.MetricRecord = .{
@@ -286,9 +299,7 @@ pub const Session = struct {
             .workers_busy = saturatingU32(runtime_stats.workers_busy),
             .queue_timeout_total = runtime_stats.queue_timeout_total,
         };
-        advisor_metrics_mod.appendRecord(&storage_root.root_dir, &metric) catch |err| {
-            std.log.warn("advisor metrics append failed: {s}", .{@errorName(err)});
-        };
+        _ = sink.enqueue(&metric);
     }
 
     /// Runs one request through explicit tx control handling and standard

@@ -53,28 +53,49 @@ pub const MetricRecord = struct {
     queue_timeout_total: u64 = 0,
 };
 
-pub fn appendRecord(root_dir: *std.fs.Dir, record: *const MetricRecord) MetricsError!void {
-    var file = root_dir.createFile(metrics_filename, .{
-        .read = true,
-        .truncate = false,
-        .exclusive = false,
-    }) catch |err| switch (err) {
-        error.PathAlreadyExists => try root_dir.openFile(metrics_filename, .{ .mode = .read_write }),
-        else => return err,
-    };
-    defer file.close();
+pub const MetricsFileWriter = struct {
+    file: std.fs.File,
 
-    const stat = try file.stat();
-    if (stat.size == 0) {
-        try writeHeader(&file);
-    } else {
-        try validateHeader(&file);
+    pub fn open(root_dir: *std.fs.Dir) MetricsError!MetricsFileWriter {
+        var file = try root_dir.createFile(metrics_filename, .{
+            .read = true,
+            .truncate = false,
+            .exclusive = false,
+        });
+        const stat = try file.stat();
+        if (stat.size == 0) {
+            try writeHeader(&file);
+        } else {
+            try validateHeader(&file);
+        }
+        try file.seekFromEnd(0);
+        return .{ .file = file };
     }
 
-    try file.seekFromEnd(0);
-    var encoded: [record_size]u8 = undefined;
-    encodeRecord(record, &encoded);
-    try file.writeAll(&encoded);
+    pub fn deinit(self: *MetricsFileWriter) void {
+        self.file.close();
+    }
+
+    pub fn append(self: *MetricsFileWriter, record: *const MetricRecord) MetricsError!void {
+        var encoded: [record_size]u8 = undefined;
+        encodeRecord(record, &encoded);
+        try self.file.writeAll(&encoded);
+    }
+
+    pub fn appendBatch(
+        self: *MetricsFileWriter,
+        records: []const MetricRecord,
+    ) MetricsError!void {
+        for (records) |record| {
+            try self.append(&record);
+        }
+    }
+};
+
+pub fn appendRecord(root_dir: *std.fs.Dir, record: *const MetricRecord) MetricsError!void {
+    var writer = try MetricsFileWriter.open(root_dir);
+    defer writer.deinit();
+    try writer.append(record);
 }
 
 pub fn readAll(allocator: std.mem.Allocator, root_dir: *std.fs.Dir) MetricsError![]MetricRecord {
