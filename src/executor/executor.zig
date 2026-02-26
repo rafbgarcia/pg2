@@ -160,6 +160,7 @@ pub const PlanStats = struct {
     group_strategy: GroupStrategy = .none,
     streaming_mode: StreamingMode = .disabled,
     parallel_mode: ParallelMode = .sequential,
+    parallel_worker_budget: u8 = 1,
     parallel_scheduler_path: ParallelSchedulerPath = .direct,
     parallel_schedule_applied_tasks: u8 = 0,
     scan_strategy: ScanStrategy = .table_scan,
@@ -175,6 +176,7 @@ pub const PlanStats = struct {
     sort_reason: planner_types.ReasonCode = .none,
     group_reason: planner_types.ReasonCode = .none,
     streaming_reason: planner_types.ReasonCode = .none,
+    parallel_reason: planner_types.ReasonCode = .none,
     parallel_schedule_task_count: u8 = 0,
     parallel_schedule_fingerprint: u64 = 0,
     checkpoints: [4]PlanCheckpointTrace = [_]PlanCheckpointTrace{.{}} ** 4,
@@ -206,7 +208,8 @@ const max_variable_list_values_capacity: u16 = default_variable_list_values_befo
 const max_variable_spill_pages: u16 = @intCast(max_spill_pages);
 const variable_arena_divisor: usize = 4;
 const variable_arena_min_bytes: usize = 64 * 1024;
-const max_parallel_filter_workers: usize = 4;
+const max_parallel_filter_workers: usize = 8;
+const max_parallel_worker_cap: usize = 8;
 const parallel_filter_min_rows_per_worker: usize = 1;
 const parallel_filter_worker_arena_bytes: usize = filter_mod.max_string_result_bytes * 2;
 const parallel_offset_min_rows_per_worker: usize = 32;
@@ -401,6 +404,7 @@ pub const ExecContext = struct {
     nested_match_arena_bytes: []u8,
     storage: Storage,
     query_slot_index: u16,
+    max_query_slots: u16 = 1,
     collector: *SpillingResultCollector,
     temp_pages_per_query_slot: u64 = temp_mod.default_pages_per_query_slot,
     work_memory_bytes_per_slot: u64,
@@ -1086,7 +1090,9 @@ fn executePipelineStatement(
         &op_count,
     );
     capturePlanStats(&result.stats.plan, ctx, pipeline_idx, model_name, model_id, &ops, op_count);
-    if (result.stats.plan.parallel_mode == .enabled) {
+    if (result.stats.plan.parallel_mode == .enabled and
+        result.stats.plan.parallel_worker_budget >= 2)
+    {
         result.stats.plan.parallel_scheduler_path = .scheduled_parallel;
     }
 
@@ -2307,7 +2313,15 @@ fn tryApplyPredicateFilterParallel(
     const row_count_usize: usize = result.row_count;
     if (row_count_usize < 2) return false;
 
-    const max_workers = @min(max_parallel_filter_workers, row_count_usize);
+    const configured_cap = @max(
+        @as(usize, 1),
+        @min(
+            @as(usize, result.stats.plan.parallel_worker_budget),
+            max_parallel_worker_cap,
+        ),
+    );
+    const stage_cap = @min(max_parallel_filter_workers, configured_cap);
+    const max_workers = @min(stage_cap, row_count_usize);
     var worker_count = @min(max_workers, row_count_usize / parallel_filter_min_rows_per_worker);
     if (worker_count < 2) return false;
     if (worker_count > max_parallel_filter_workers) worker_count = max_parallel_filter_workers;
@@ -4562,6 +4576,8 @@ fn tryApplyNestedSelectionHashJoinFlatNoOps(
         join,
         target_schema.column_count,
         caps,
+        result.stats.plan.parallel_scheduler_path == .scheduled_parallel,
+        result.stats.plan.parallel_worker_budget,
     )) return .failed;
 
     const left_column_count = left_copy[0].column_count;
@@ -5877,7 +5893,15 @@ fn tryApplyOffsetParallel(
     const remaining_usize: usize = remaining;
     if (remaining_usize < parallel_offset_min_rows_per_worker * 2) return false;
 
-    const max_workers = @min(max_parallel_filter_workers, remaining_usize);
+    const configured_cap = @max(
+        @as(usize, 1),
+        @min(
+            @as(usize, result.stats.plan.parallel_worker_budget),
+            max_parallel_worker_cap,
+        ),
+    );
+    const stage_cap = @min(max_parallel_filter_workers, configured_cap);
+    const max_workers = @min(stage_cap, remaining_usize);
     var worker_count = @min(max_workers, remaining_usize / parallel_offset_min_rows_per_worker);
     if (worker_count < 2) return false;
     if (worker_count > max_parallel_filter_workers) worker_count = max_parallel_filter_workers;
@@ -6560,6 +6584,7 @@ fn buildPlannerSnapshot(
         // Join planner budgeting is aligned to executor join build-row capacity.
         .join_build_budget_bytes = capacity_mod.max_join_build_rows,
         .average_row_width_bytes = 1,
+        .max_query_slots = @max(@as(u16, 1), ctx.max_query_slots),
     };
 
     var i: usize = 0;
@@ -6604,11 +6629,13 @@ fn toPlannerDecisionSet(plan: *const PlanStats) planner_types.PhysicalDecisionSe
             .sequential => .sequential,
             .enabled => .enabled,
         },
+        .parallel_worker_budget = plan.parallel_worker_budget,
         .join_reason = plan.join_reason,
         .materialization_reason = plan.materialization_reason,
         .sort_reason = plan.sort_reason,
         .group_reason = plan.group_reason,
         .streaming_reason = plan.streaming_reason,
+        .parallel_reason = plan.parallel_reason,
     };
 }
 
@@ -6618,6 +6645,7 @@ fn applyPlannerDecisionSet(plan: *PlanStats, decisions: *const planner_types.Phy
     plan.sort_reason = decisions.sort_reason;
     plan.group_reason = decisions.group_reason;
     plan.streaming_reason = decisions.streaming_reason;
+    plan.parallel_reason = decisions.parallel_reason;
 
     plan.join_strategy = switch (decisions.join_strategy) {
         .none => .none,
@@ -6650,6 +6678,7 @@ fn applyPlannerDecisionSet(plan: *PlanStats, decisions: *const planner_types.Phy
         .sequential => .sequential,
         .enabled => .enabled,
     };
+    plan.parallel_worker_budget = decisions.parallel_worker_budget;
 }
 
 fn appendCheckpointTrace(
@@ -6688,6 +6717,11 @@ fn applyPlannerCheckpoint(
     ) catch return;
     const new_fingerprint = planner_fingerprint.decisionFingerprint(&decisions);
     applyPlannerDecisionSet(plan, &decisions);
+    plan.parallel_scheduler_path = if (plan.parallel_mode == .enabled and
+        plan.parallel_worker_budget >= 2)
+        .scheduled_parallel
+    else
+        .direct;
     appendCheckpointTrace(
         plan,
         checkpoint,
@@ -6944,6 +6978,7 @@ const ExecTestEnv = struct {
             .nested_match_arena_bytes = self.nested_match_arena_bytes,
             .storage = self.disk.storage(),
             .query_slot_index = 0,
+            .max_query_slots = 8,
             .collector = &self.collector,
             .work_memory_bytes_per_slot = 4 * 1024 * 1024,
             .planner_feature_gate_mask = self.planner_feature_gate_mask,
@@ -8134,6 +8169,162 @@ test "execute returns equivalent grouped aggregate rows with planner parallel mo
     }
 
     const src = "User |> group(active) |> sort(sum(id) desc) { active }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+
+    env.planner_feature_gate_mask = 0;
+    var result_seq = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result_seq.deinit();
+    try testing.expect(!result_seq.has_error);
+    try testing.expectEqual(ParallelMode.sequential, result_seq.stats.plan.parallel_mode);
+
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+    var result_par = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result_par.deinit();
+    try testing.expect(!result_par.has_error);
+    try testing.expectEqual(ParallelMode.enabled, result_par.stats.plan.parallel_mode);
+    try testing.expectEqual(
+        ParallelSchedulerPath.scheduled_parallel,
+        result_par.stats.plan.parallel_scheduler_path,
+    );
+    try testing.expect(
+        result_par.stats.plan.parallel_schedule_applied_tasks <=
+            result_par.stats.plan.parallel_schedule_task_count,
+    );
+
+    try expectResultRowsEqual(&result_seq, &result_par);
+}
+
+test "execute parallel mode applies scheduled tasks for nested hash join stage" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+
+    const post_model = try env.catalog.addModel("Post");
+    _ = try env.catalog.addColumn(post_model, "id", .i64, false);
+    _ = try env.catalog.addColumn(post_model, "user_id", .i64, false);
+    env.catalog.models[post_model].heap_first_page_id = 120;
+    env.catalog.models[post_model].total_pages = 1;
+    _ = try env.catalog.addAssociation(
+        env.model_id,
+        "posts",
+        AssociationKind.has_many,
+        "Post",
+    );
+    try env.catalog.resolveAssociations();
+    const post_page = try env.pool.pin(120);
+    heap_mod.HeapPage.init(post_page);
+    env.pool.unpin(120, true);
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    var id: u32 = 1;
+    while (id <= 96) : (id += 1) {
+        var user_insert: [160]u8 = undefined;
+        const user_src = try std.fmt.bufPrint(
+            user_insert[0..],
+            "User |> insert(id = {d}, name = \"JU{d}\", active = true)",
+            .{ id, id },
+        );
+        const user_tok = tokenizer_mod.tokenize(user_src);
+        const user_p = parser_mod.parse(&user_tok, user_src);
+        try testing.expect(!user_p.has_error);
+        var user_r = try execute(&env.makeCtx(tx, &snap, &user_p.ast, &user_tok, user_src));
+        defer user_r.deinit();
+        try testing.expect(!user_r.has_error);
+
+        var post_insert: [160]u8 = undefined;
+        const post_src = try std.fmt.bufPrint(
+            post_insert[0..],
+            "Post |> insert(id = {d}, user_id = {d})",
+            .{ id + 1000, id },
+        );
+        const post_tok = tokenizer_mod.tokenize(post_src);
+        const post_p = parser_mod.parse(&post_tok, post_src);
+        try testing.expect(!post_p.has_error);
+        var post_r = try execute(&env.makeCtx(tx, &snap, &post_p.ast, &post_tok, post_src));
+        defer post_r.deinit();
+        try testing.expect(!post_r.has_error);
+    }
+
+    const src = "User |> sort(id asc) { id posts { id } }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(ParallelMode.enabled, result.stats.plan.parallel_mode);
+    try testing.expectEqual(
+        ParallelSchedulerPath.scheduled_parallel,
+        result.stats.plan.parallel_scheduler_path,
+    );
+    try testing.expect(result.stats.plan.parallel_schedule_task_count > 0);
+    try testing.expectEqual(
+        result.stats.plan.parallel_schedule_task_count,
+        result.stats.plan.parallel_schedule_applied_tasks,
+    );
+}
+
+test "execute returns equivalent nested hash join rows with planner parallel mode on and off" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const post_model = try env.catalog.addModel("Post");
+    _ = try env.catalog.addColumn(post_model, "id", .i64, false);
+    _ = try env.catalog.addColumn(post_model, "user_id", .i64, false);
+    env.catalog.models[post_model].heap_first_page_id = 120;
+    env.catalog.models[post_model].total_pages = 1;
+    _ = try env.catalog.addAssociation(
+        env.model_id,
+        "posts",
+        AssociationKind.has_many,
+        "Post",
+    );
+    try env.catalog.resolveAssociations();
+    const post_page = try env.pool.pin(120);
+    heap_mod.HeapPage.init(post_page);
+    env.pool.unpin(120, true);
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    var id: u32 = 1;
+    while (id <= 96) : (id += 1) {
+        var user_insert: [160]u8 = undefined;
+        const user_src = try std.fmt.bufPrint(
+            user_insert[0..],
+            "User |> insert(id = {d}, name = \"JE{d}\", active = true)",
+            .{ id, id },
+        );
+        const user_tok = tokenizer_mod.tokenize(user_src);
+        const user_p = parser_mod.parse(&user_tok, user_src);
+        try testing.expect(!user_p.has_error);
+        var user_r = try execute(&env.makeCtx(tx, &snap, &user_p.ast, &user_tok, user_src));
+        defer user_r.deinit();
+        try testing.expect(!user_r.has_error);
+
+        var post_insert: [160]u8 = undefined;
+        const post_src = try std.fmt.bufPrint(
+            post_insert[0..],
+            "Post |> insert(id = {d}, user_id = {d})",
+            .{ id + 2000, id },
+        );
+        const post_tok = tokenizer_mod.tokenize(post_src);
+        const post_p = parser_mod.parse(&post_tok, post_src);
+        try testing.expect(!post_p.has_error);
+        var post_r = try execute(&env.makeCtx(tx, &snap, &post_p.ast, &post_tok, post_src));
+        defer post_r.deinit();
+        try testing.expect(!post_r.has_error);
+    }
+
+    const src = "User |> sort(id asc) { id posts { id } }";
     const tok = tokenizer_mod.tokenize(src);
     const p = parser_mod.parse(&tok, src);
     try testing.expect(!p.has_error);

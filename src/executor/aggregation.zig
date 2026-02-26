@@ -29,7 +29,8 @@ const setError = @import("executor.zig").setError;
 const max_group_aggregate_exprs = capacity_mod.max_group_aggregate_exprs;
 const invalid_aggregate_slot: u8 = std.math.maxInt(u8);
 const sort_key_expr_mask: u16 = 0x8000;
-const max_parallel_group_workers: usize = 4;
+const max_parallel_group_workers: usize = 8;
+const max_parallel_worker_cap: usize = 8;
 const parallel_group_min_rows_per_worker: usize = 32;
 
 pub const AggregateKind = enum {
@@ -257,7 +258,15 @@ fn tryApplyGroupParallel(
     const row_count_usize: usize = result.row_count;
     if (row_count_usize < parallel_group_min_rows_per_worker * 2) return false;
 
-    const max_workers = @min(max_parallel_group_workers, row_count_usize);
+    const configured_cap = @max(
+        @as(usize, 1),
+        @min(
+            @as(usize, result.stats.plan.parallel_worker_budget),
+            max_parallel_worker_cap,
+        ),
+    );
+    const stage_cap = @min(max_parallel_group_workers, configured_cap);
+    const max_workers = @min(stage_cap, row_count_usize);
     var worker_count = @min(max_workers, row_count_usize / parallel_group_min_rows_per_worker);
     if (worker_count < 2) return false;
     if (worker_count > max_parallel_group_workers) worker_count = max_parallel_group_workers;

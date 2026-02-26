@@ -6,8 +6,8 @@
 //! - Defines deterministic validation error codes for fail-closed planning.
 const std = @import("std");
 
-pub const snapshot_schema_version_current: u16 = 1;
-pub const policy_version_current: u16 = 1;
+pub const snapshot_schema_version_current: u16 = 2;
+pub const policy_version_current: u16 = 2;
 pub const max_operator_sequence: usize = 32;
 pub const max_relations: usize = 16;
 pub const feature_gate_parallel_policy: u64 = 1 << 0;
@@ -23,6 +23,7 @@ pub const PlannerError = error{
     MissingAggregateGroupsCap,
     MissingJoinBuildBudgetBytes,
     MissingAverageRowWidthBytes,
+    MissingMaxQuerySlots,
     InvalidRelationOrdering,
 };
 
@@ -96,6 +97,10 @@ pub const ReasonCode = enum(u16) {
     MATERIALIZE_BOUNDED_REQUIRED,
     STREAMING_ENABLED_SAFE,
     STREAMING_DISABLED_RISK_UNBOUNDED,
+    PARALLEL_DISABLED_FEATURE_GATE,
+    PARALLEL_DISABLED_INSUFFICIENT_QUERY_SLOTS,
+    PARALLEL_ENABLED_QUERY_SLOT_BUDGETED,
+    PARALLEL_DEGRADED_LOW_ROWFLOW,
     DEGRADE_MONOTONIC_GUARD,
 };
 
@@ -111,6 +116,7 @@ pub const PlannerInputSnapshot = extern struct {
     aggregate_groups_cap: u32 = 0,
     join_build_budget_bytes: u64 = 0,
     average_row_width_bytes: u32 = 0,
+    max_query_slots: u16 = 0,
     feature_gate_mask: u64 = 0,
     operator_sequence: [max_operator_sequence]OpTag = [_]OpTag{.none} ** max_operator_sequence,
     relation_ids_sorted: [max_relations]u32 = [_]u32{0} ** max_relations,
@@ -126,6 +132,7 @@ pub const PlannerInputSnapshot = extern struct {
         if (self.aggregate_groups_cap == 0) return error.MissingAggregateGroupsCap;
         if (self.join_build_budget_bytes == 0) return error.MissingJoinBuildBudgetBytes;
         if (self.average_row_width_bytes == 0) return error.MissingAverageRowWidthBytes;
+        if (self.max_query_slots == 0) return error.MissingMaxQuerySlots;
 
         var previous: u32 = 0;
         var seen_zero_tail = false;
@@ -149,12 +156,14 @@ pub const PhysicalDecisionSet = extern struct {
     group_strategy: GroupStrategy = .none,
     streaming_mode: StreamingMode = .disabled,
     parallel_mode: ParallelMode = .sequential,
+    parallel_worker_budget: u8 = 1,
 
     join_reason: ReasonCode = .none,
     materialization_reason: ReasonCode = .none,
     sort_reason: ReasonCode = .none,
     group_reason: ReasonCode = .none,
     streaming_reason: ReasonCode = .none,
+    parallel_reason: ReasonCode = .none,
 };
 
 pub const CheckpointCounters = extern struct {

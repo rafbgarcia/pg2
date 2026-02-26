@@ -23,6 +23,7 @@ fn runReplayTrace(seed: u64) !ReplayTrace {
         .aggregate_groups_cap = 32,
         .join_build_budget_bytes = 2048,
         .average_row_width_bytes = 64,
+        .max_query_slots = 8,
         .operator_sequence = blk: {
             var seq = [_]planner_types.OpTag{.none} ** planner_types.max_operator_sequence;
             seq[0] = .where_filter;

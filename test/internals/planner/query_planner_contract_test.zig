@@ -16,6 +16,7 @@ test "identical input fingerprint yields identical decision fingerprint" {
         .aggregate_groups_cap = 256,
         .join_build_budget_bytes = 4096,
         .average_row_width_bytes = 64,
+        .max_query_slots = 8,
         .relation_ids_sorted = blk: {
             var ids = [_]u32{0} ** types.max_relations;
             ids[0] = 7;
@@ -44,6 +45,7 @@ test "missing required snapshot fields fail closed with deterministic codes" {
         .aggregate_groups_cap = 256,
         .join_build_budget_bytes = 4096,
         .average_row_width_bytes = 64,
+        .max_query_slots = 8,
     };
     try std.testing.expectError(
         error.MissingQueryShapeFingerprint,
@@ -58,6 +60,7 @@ test "missing required snapshot fields fail closed with deterministic codes" {
         .aggregate_groups_cap = 256,
         .join_build_budget_bytes = 4096,
         .average_row_width_bytes = 64,
+        .max_query_slots = 8,
     };
     try std.testing.expectError(
         error.MissingCatalogSnapshotId,

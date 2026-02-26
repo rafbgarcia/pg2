@@ -1349,7 +1349,7 @@ test "session inspect appends execution and pool stats" {
         std.mem.indexOf(
             u8,
             output,
-            "planner_policy_version=1",
+            "planner_policy_version=2",
         ) != null,
     );
     try std.testing.expect(
@@ -1381,7 +1381,7 @@ test "session inspect appends execution and pool stats" {
         std.mem.indexOf(
             u8,
             output,
-            "INSPECT explain_detail join=not_applied materialization=no explicit bounded materialization streaming=streaming disabled for bounded safety parallel=sequential mode scheduler=direct execution path\n",
+            "INSPECT explain_detail join=not_applied materialization=no explicit bounded materialization streaming=streaming disabled for bounded safety parallel=sequential mode scheduler=direct execution path parallel_reason=parallel disabled by feature gate\n",
         ) != null,
     );
 }

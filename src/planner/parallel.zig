@@ -77,6 +77,7 @@ test "parallel schedule trace deterministic for identical snapshot + decisions" 
         .aggregate_groups_cap = 32,
         .join_build_budget_bytes = 2048,
         .average_row_width_bytes = 64,
+        .max_query_slots = 8,
         .feature_gate_mask = types.feature_gate_parallel_policy,
         .operator_sequence = blk: {
             var seq = [_]types.OpTag{.none} ** types.max_operator_sequence;

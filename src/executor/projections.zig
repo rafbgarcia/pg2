@@ -20,7 +20,8 @@ const ExecContext = @import("executor.zig").ExecContext;
 const QueryResult = @import("executor.zig").QueryResult;
 const evalContextForExec = @import("executor.zig").evalContextForExec;
 const setError = @import("executor.zig").setError;
-const max_parallel_projection_workers: usize = 4;
+const max_parallel_projection_workers: usize = 8;
+const max_parallel_worker_cap: usize = 8;
 const parallel_projection_min_rows_per_worker: usize = 8;
 const parallel_projection_worker_arena_bytes: usize = filter_mod.max_string_result_bytes * 2;
 
@@ -280,7 +281,15 @@ fn tryApplyFlatProjectionParallel(
     const row_count_usize: usize = result.row_count;
     if (row_count_usize < parallel_projection_min_rows_per_worker * 2) return false;
 
-    const max_workers = @min(max_parallel_projection_workers, row_count_usize);
+    const configured_cap = @max(
+        @as(usize, 1),
+        @min(
+            @as(usize, result.stats.plan.parallel_worker_budget),
+            max_parallel_worker_cap,
+        ),
+    );
+    const stage_cap = @min(max_parallel_projection_workers, configured_cap);
+    const max_workers = @min(stage_cap, row_count_usize);
     var worker_count = @min(
         max_workers,
         row_count_usize / parallel_projection_min_rows_per_worker,

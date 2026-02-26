@@ -30,7 +30,8 @@ const AggregateState = aggregation_mod.AggregateState;
 const max_sort_keys = capacity_mod.max_sort_keys;
 const sort_key_desc_mask: u16 = 0x0001;
 const sort_key_expr_mask: u16 = 0x8000;
-const max_parallel_sort_workers: usize = 4;
+const max_parallel_sort_workers: usize = 8;
+const max_parallel_worker_cap: usize = 8;
 const parallel_sort_min_rows_per_worker: usize = 32;
 const parallel_sort_worker_arena_bytes: usize = filter_mod.max_string_result_bytes * 2;
 
@@ -152,7 +153,15 @@ fn tryApplySortParallel(
     const row_count: usize = result.row_count;
     if (row_count < parallel_sort_min_rows_per_worker * 2) return false;
 
-    const max_workers = @min(max_parallel_sort_workers, row_count);
+    const configured_cap = @max(
+        @as(usize, 1),
+        @min(
+            @as(usize, result.stats.plan.parallel_worker_budget),
+            max_parallel_worker_cap,
+        ),
+    );
+    const stage_cap = @min(max_parallel_sort_workers, configured_cap);
+    const max_workers = @min(stage_cap, row_count);
     var worker_count = @min(max_workers, row_count / parallel_sort_min_rows_per_worker);
     if (worker_count < 2) return false;
     if (worker_count > max_parallel_sort_workers) worker_count = max_parallel_sort_workers;

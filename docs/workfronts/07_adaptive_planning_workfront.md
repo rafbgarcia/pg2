@@ -25,6 +25,10 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 - ✅ Planner module/contracts foundation landed (`src/planner/*`)
 - ✅ Deterministic checkpoint adaptation wired (`pre_scan -> post_filter -> post_group -> pre_join`)
 - ✅ Planner-owned decision fields enforced (`*_strategy`, `*_mode`, `*_reason`)
+- ✅ Parallel admission foundations moved into planner contracts:
+  - planner-owned `parallel_worker_budget`
+  - planner-owned `parallel_reason`
+  - snapshot carries `max_query_slots` capacity input
 - ✅ Deterministic schedule trace + inspect/explain serialization contracts landed
 - ✅ True scheduled parallel execution landed for:
   - WHERE filtering
@@ -33,6 +37,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - flat projection (column + computed expressions)
   - in-memory sort (ungrouped + grouped aggregate-key)
   - flat OFFSET compaction
+  - nested hash left-join probe/write stage (deterministic two-pass parallel path)
 - ✅ Fail-closed serial fallback on worker spawn failure for all true-parallel stages above
 - ✅ Semantic equivalence coverage (sequential vs parallel-enabled) for all true-parallel stages above
 - ✅ Full gate passing (`zig build test-all --summary all`)
@@ -68,15 +73,20 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - Parallelization policy foundation landed:
     - planner-level `parallel_mode` decision (default `sequential`, feature-gated `enabled`)
     - deterministic parallel schedule-trace builder under `src/planner/parallel.zig`
+    - planner now deterministically derives parallel worker budget from snapshot query-slot capacity (`max_query_slots`) and emits explicit parallel reason codes in decisions/inspect output
     - executor/inspect now expose deterministic schedule-trace metadata:
       - `parallel_schedule_task_count`
       - `parallel_schedule_fingerprint`
+      - `parallel_worker_budget`
+      - `parallel_reason`
     - executor now routes `parallel_mode=enabled` through deterministic parallel execution for per-chunk WHERE filtering (`parallel_scheduler_path=scheduled_parallel`) with fail-closed serial fallback if worker spawn fails
     - flat selection projection (column-only and computed-expression fields) now supports deterministic parallel execution under planner parallel mode with fail-closed serial fallback
     - grouped and non-grouped HAVING predicates on flat row sets now also support deterministic scheduled parallel filtering under planner parallel mode with fail-closed serial fallback
     - GROUP BY compaction now supports deterministic scheduled parallel execution under planner parallel mode for both no-aggregate and aggregate-expression paths (parallel chunk-local grouping + deterministic serial merge), with aggregate-expression accumulation replayed serially in stable row order to preserve strict semantics and fail-closed serial fallback on worker spawn failure
     - in-memory sort now supports deterministic scheduled parallel execution for both ungrouped and grouped aggregate-key paths (parallel chunk sort + deterministic serial merge) with fail-closed serial fallback on worker spawn failure
     - flat-row OFFSET compaction now supports deterministic scheduled parallel execution with fail-closed serial fallback on worker spawn failure
+    - nested hash left-join now supports deterministic scheduled parallel probe/write (two-pass count+write over left-row partitions) with fail-closed serial fallback on worker spawn failure
+    - stage parallel worker counts are now bounded by planner-owned worker budget derived from startup slot capacity (instead of static fixed worker counts only)
     - `parallel_schedule_applied_tasks` now reflects actually applied parallel execution work (WHERE/HAVING/group/projection/sort/offset), not prefilled scheduler metadata
     - executor sort/group modules no longer override planner decision fields; plan decisions stay checkpoint-owned
 - Tests:
@@ -98,6 +108,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - grouped aggregate-key sort semantic-equivalence and applied-task coverage added for planner parallel mode
   - grouped no-aggregate semantic-equivalence and applied-task coverage added for planner parallel mode
   - grouped aggregate-expression semantic-equivalence and applied-task coverage added for planner parallel mode
+  - nested hash join semantic-equivalence and applied-task coverage added for planner parallel mode
   - LIMIT/OFFSET semantic-equivalence coverage added for planner parallel mode (parallel-enabled vs disabled rows stay identical)
   - flat OFFSET applied-task coverage added (parallel scheduler applied-task count reflects true OFFSET-stage execution)
   - computed projection semantic-equivalence and applied-task coverage added (parallel-mode enabled vs disabled yields identical projected rows)
@@ -106,9 +117,10 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - parallel-mode zero-row coverage added to lock `parallel_schedule_applied_tasks=0` when no rows are processed
   - server serialization contract test added to lock inspect/explain scheduler output for `scheduled_parallel`
 - Verification:
-  - `zig build test-all --summary all` passing after grouped aggregate-expression scheduled-parallel extension (`928/930` passed, `2` skipped)
+  - `zig build test-all --summary all` passing after planner-budgeted worker admission + nested hash-join scheduled-parallel extension (`930/932` passed, `2` skipped)
 - Remaining:
-  - expand true parallel execution beyond WHERE/HAVING-filter, GROUP BY compaction, flat projection, in-memory sort, and flat OFFSET processing while preserving deterministic/fail-closed behavior
+  - close remaining hidden stage-level parallel admission thresholds into explicit planner/checkpoint contract fields/reasons (current worker-budget + reason ownership is planner-owned; per-stage minimum-row admission thresholds still reside in executor stage modules)
+  - finalize Phase 3/4/5/6 completion status lock once threshold-contract migration above is complete
 
 ## Fresh Session Handoff Snapshot (2026-02-26)
 
@@ -144,6 +156,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - parallel flat projection execution (column and computed fields) uses deterministic row-range partitioning and per-row in-place rewrite
   - parallel in-memory sort execution uses deterministic row-range chunking with stable per-chunk sort and deterministic global merge order for both grouped and ungrouped paths
   - parallel OFFSET execution uses deterministic row-range partitioning into scratch rows and stable copy-back order
+  - parallel nested hash left-join execution uses deterministic left-row partitioning, per-partition output counting, deterministic serial prefix-offset assignment, and disjoint parallel output writes
   - grouped sort now preserves aggregate-state/index alignment across multi-pass merge reordering (hard-stop correctness invariant)
   - parallel applied-task metrics are emitted only when a parallel execution stage is actually used
   - parallel path degrades fail-closed to serial filtering/grouping/projection/sort if worker spawn fails
@@ -163,6 +176,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - executor grouped-HAVING semantic-equivalence and applied-task tests for planner parallel mode
   - executor grouped no-aggregate semantic-equivalence and applied-task tests for planner parallel mode
   - executor grouped aggregate-expression semantic-equivalence and applied-task tests for planner parallel mode
+  - executor nested hash-join semantic-equivalence and applied-task tests for planner parallel mode
   - executor large-row semantic-equivalence test for flat projection in planner parallel mode
   - executor parallel-mode checkpoint chronology and zero-row applied-task contract tests
   - server serialization inspect/explain scheduler-contract test for `scheduled_parallel`
@@ -203,7 +217,8 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Immediate Next Step (single-threaded priority)
 
-1. Extend planner-parallel true execution coverage beyond WHERE/HAVING-filter, GROUP BY compaction, flat projection, in-memory sort, and flat OFFSET stages while preserving:
+1. Complete planner/checkpoint ownership of stage-level parallel admission thresholds/reasons so no hidden parallel policy branches remain outside planner/checkpoint contracts.
+2. Extend planner-parallel true execution coverage beyond current stages while preserving:
    - deterministic schedule traces for fixed seeds
    - semantic equivalence with sequential mode
    - fail-closed behavior under capacity pressure

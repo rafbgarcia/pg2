@@ -29,10 +29,9 @@ pub fn adaptAtCheckpoint(
     var result = AdaptationResult{ .checkpoint = checkpoint };
 
     // Sort degrade rule: bytes_accumulated > work_memory * 3/4.
-    if (
-        decisions.sort_strategy == .in_memory_merge and
-        counters.bytes_accumulated > (snapshot.work_memory_bytes_per_slot * 3) / 4
-    ) {
+    if (decisions.sort_strategy == .in_memory_merge and
+        counters.bytes_accumulated > (snapshot.work_memory_bytes_per_slot * 3) / 4)
+    {
         decisions.sort_strategy = .external_merge;
         decisions.sort_reason = .SORT_EXTERNAL_REQUIRED_BY_ROWFLOW;
         result.degraded = true;
@@ -40,10 +39,9 @@ pub fn adaptAtCheckpoint(
     }
 
     // Group degrade rule: estimated groups above cap.
-    if (
-        decisions.group_strategy == .in_memory_linear and
-        counters.group_count_estimate > snapshot.aggregate_groups_cap
-    ) {
+    if (decisions.group_strategy == .in_memory_linear and
+        counters.group_count_estimate > snapshot.aggregate_groups_cap)
+    {
         decisions.group_strategy = .hash_spill;
         decisions.group_reason = .GROUP_HASH_SPILL_GROUP_CAP_EXCEEDED;
         result.degraded = true;
@@ -51,10 +49,9 @@ pub fn adaptAtCheckpoint(
     }
 
     // Join degrade rule: build side bytes above budget.
-    if (
-        decisions.join_strategy == .hash_in_memory and
-        wouldExceedJoinBuildBudget(snapshot, counters)
-    ) {
+    if (decisions.join_strategy == .hash_in_memory and
+        wouldExceedJoinBuildBudget(snapshot, counters))
+    {
         decisions.join_strategy = .hash_spill;
         decisions.join_reason = .JOIN_HASH_SPILL_RIGHT_EXCEEDS_BUILD_WINDOW;
         result.degraded = true;
@@ -90,6 +87,7 @@ test "sort degrade triggers when rowflow bytes exceed threshold" {
         .aggregate_groups_cap = 64,
         .join_build_budget_bytes = 2048,
         .average_row_width_bytes = 32,
+        .max_query_slots = 8,
     };
     var decisions: types.PhysicalDecisionSet = .{
         .sort_strategy = .in_memory_merge,
@@ -118,6 +116,7 @@ test "degrade-only monotonicity never upgrades sort back to in-memory" {
         .aggregate_groups_cap = 64,
         .join_build_budget_bytes = 2048,
         .average_row_width_bytes = 32,
+        .max_query_slots = 8,
     };
     var decisions: types.PhysicalDecisionSet = .{
         .sort_strategy = .in_memory_merge,

@@ -10,6 +10,7 @@ const tokenizer_mod = @import("../parser/tokenizer.zig");
 const ast_mod = @import("../parser/ast.zig");
 const scan_mod = @import("../executor/scan.zig");
 const spill_collector_mod = @import("../executor/spill_collector.zig");
+const planner_types = @import("../planner/types.zig");
 
 const Catalog = catalog_mod.Catalog;
 const OverflowReclaimStatsSnapshot = catalog_mod.OverflowReclaimStatsSnapshot;
@@ -484,7 +485,7 @@ fn serializeInspectStats(
         }
     }
     writer.print(
-        " join_strategy={s} join_order={s} materialization={s} sort_strategy={s} group_strategy={s} streaming_mode={s} parallel_mode={s} parallel_scheduler_path={s} parallel_schedule_task_count={d} parallel_schedule_applied_tasks={d} parallel_schedule_fingerprint={x} nested_relations={d} nested_join_nested_loop={d} nested_join_hash_in_memory={d} nested_join_hash_spill={d} planner_policy_version={d} planner_snapshot_fingerprint={x} planner_decision_fingerprint={x} join_reason={s} materialization_reason={s} sort_reason={s} group_reason={s} streaming_reason={s}\n",
+        " join_strategy={s} join_order={s} materialization={s} sort_strategy={s} group_strategy={s} streaming_mode={s} parallel_mode={s} parallel_worker_budget={d} parallel_scheduler_path={s} parallel_schedule_task_count={d} parallel_schedule_applied_tasks={d} parallel_schedule_fingerprint={x} nested_relations={d} nested_join_nested_loop={d} nested_join_hash_in_memory={d} nested_join_hash_spill={d} planner_policy_version={d} planner_snapshot_fingerprint={x} planner_decision_fingerprint={x} join_reason={s} materialization_reason={s} sort_reason={s} group_reason={s} streaming_reason={s} parallel_reason={s}\n",
         .{
             @tagName(exec_stats.plan.join_strategy),
             @tagName(exec_stats.plan.join_order),
@@ -493,6 +494,7 @@ fn serializeInspectStats(
             @tagName(exec_stats.plan.group_strategy),
             @tagName(exec_stats.plan.streaming_mode),
             @tagName(exec_stats.plan.parallel_mode),
+            exec_stats.plan.parallel_worker_budget,
             @tagName(exec_stats.plan.parallel_scheduler_path),
             exec_stats.plan.parallel_schedule_task_count,
             exec_stats.plan.parallel_schedule_applied_tasks,
@@ -509,6 +511,7 @@ fn serializeInspectStats(
             @tagName(exec_stats.plan.sort_reason),
             @tagName(exec_stats.plan.group_reason),
             @tagName(exec_stats.plan.streaming_reason),
+            @tagName(exec_stats.plan.parallel_reason),
         },
     ) catch return error.ResponseTooLarge;
     writer.print(
@@ -522,13 +525,14 @@ fn serializeInspectStats(
         },
     ) catch return error.ResponseTooLarge;
     writer.print(
-        "INSPECT explain_detail join={s} materialization={s} streaming={s} parallel={s} scheduler={s}\n",
+        "INSPECT explain_detail join={s} materialization={s} streaming={s} parallel={s} scheduler={s} parallel_reason={s}\n",
         .{
             joinStrategyExplain(exec_stats.plan.join_strategy),
             materializationExplain(exec_stats.plan.materialization_mode),
             streamingExplain(exec_stats.plan.streaming_mode),
             parallelModeExplain(exec_stats.plan.parallel_mode),
             parallelSchedulerExplain(exec_stats.plan.parallel_scheduler_path),
+            parallelReasonExplain(exec_stats.plan.parallel_reason),
         },
     ) catch return error.ResponseTooLarge;
     var checkpoint_index: u8 = 0;
@@ -629,6 +633,17 @@ fn parallelSchedulerExplain(path: exec_mod.ParallelSchedulerPath) []const u8 {
     };
 }
 
+fn parallelReasonExplain(reason: planner_types.ReasonCode) []const u8 {
+    return switch (reason) {
+        .none => "not_set",
+        .PARALLEL_DISABLED_FEATURE_GATE => "parallel disabled by feature gate",
+        .PARALLEL_DISABLED_INSUFFICIENT_QUERY_SLOTS => "parallel disabled due to insufficient query slots",
+        .PARALLEL_ENABLED_QUERY_SLOT_BUDGETED => "parallel enabled with query-slot worker budget",
+        .PARALLEL_DEGRADED_LOW_ROWFLOW => "parallel degraded at checkpoint due to low rowflow",
+        else => "parallel reason not classified",
+    };
+}
+
 test "serializeInspectStats keeps parallel scheduler inspect and explain contract stable" {
     var exec_stats = exec_mod.ExecStats{};
     const model_name = "User";
@@ -684,6 +699,13 @@ test "serializeInspectStats keeps parallel scheduler inspect and explain contrac
             u8,
             output,
             "scheduler=deterministic parallel scheduler path",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "parallel_reason=not_set",
         ) != null,
     );
 }

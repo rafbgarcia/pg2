@@ -16,6 +16,7 @@ fn snapshotWithParallelGate(enabled: bool) types.PlannerInputSnapshot {
         .aggregate_groups_cap = 64,
         .join_build_budget_bytes = 4096,
         .average_row_width_bytes = 64,
+        .max_query_slots = 8,
         .feature_gate_mask = if (enabled) types.feature_gate_parallel_policy else 0,
         .operator_sequence = blk: {
             var seq = [_]types.OpTag{.none} ** types.max_operator_sequence;

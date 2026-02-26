@@ -27,6 +27,7 @@ test "identical snapshots produce identical fingerprints" {
         .aggregate_groups_cap = 256,
         .join_build_budget_bytes = 4096,
         .average_row_width_bytes = 64,
+        .max_query_slots = 8,
     };
 
     const a = try snapshotFingerprint(&snapshot);
