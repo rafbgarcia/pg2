@@ -74,11 +74,12 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - in-memory sort semantic-equivalence coverage added (parallel-mode enabled vs disabled yields identical sorted rows)
   - in-memory sort applied-task coverage added (parallel scheduler applied-task count reflects true sort-stage parallel execution)
   - computed projection semantic-equivalence and applied-task coverage added (parallel-mode enabled vs disabled yields identical projected rows)
+  - grouped-sort aggregate-state alignment regression coverage added to lock deterministic correctness for aggregate-key sort after multi-pass row reordering
   - parallel-mode checkpoint chronology order coverage added for stable `pre_scan -> post_filter -> post_group -> pre_join` ordering under true parallel execution
   - parallel-mode zero-row coverage added to lock `parallel_schedule_applied_tasks=0` when no rows are processed
   - server serialization contract test added to lock inspect/explain scheduler output for `scheduled_parallel`
 - Verification:
-  - `zig build test-all --summary all` passing after computed-projection parallel extension (`919/921` passed, `2` skipped)
+  - `zig build test-all --summary all` passing after grouped-sort aggregate-state alignment fix (`920/922` passed, `2` skipped)
 - Remaining:
   - expand true parallel execution beyond WHERE/HAVING-filter, flat projection, and in-memory sort processing while preserving deterministic/fail-closed behavior
 
@@ -114,6 +115,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - parallel HAVING-filter execution on flat row sets uses deterministic row-range partitioning and stable compaction order (including grouped-count compaction)
   - parallel flat projection execution (column and computed fields) uses deterministic row-range partitioning and per-row in-place rewrite
   - parallel in-memory sort execution uses deterministic row-range chunking with stable per-chunk sort and deterministic global merge order
+  - grouped sort now preserves aggregate-state/index alignment across multi-pass merge reordering (hard-stop correctness invariant)
   - parallel applied-task metrics are emitted only when a parallel execution stage is actually used
   - parallel path degrades fail-closed to serial filtering/projection/sort if worker spawn fails
   - sort/group operator modules no longer mutate plan decision fields; decision ownership remains in planner seeding + checkpoint adaptation
@@ -136,6 +138,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Relevant Commits (newest first)
 
+- `d5b6d4c` Fix grouped sort aggregate-state alignment invariant
 - `cbb7628` Extend scheduled parallel projection to computed expressions
 - `843278d` Extend scheduled parallel execution to in-memory sort stage
 - `bc9a95d` Move nested join plan decisions into planner/checkpoint flow
