@@ -83,12 +83,12 @@ pub fn applySort(
     }
 
     if (parallel_enabled and
-        !group_runtime.active and
         tryApplySortParallel(
             ctx,
             result,
             schema,
             sort_keys[0..key_count],
+            group_runtime,
             string_arena,
         ))
     {
@@ -113,21 +113,27 @@ pub fn applySort(
 
 const ParallelSortWorker = struct {
     ctx: *const ExecContext,
+    group_runtime: *GroupRuntime,
     rows: []ResultRow,
-    aux: []ResultRow,
+    state_indices: *[scan_mod.scan_batch_size]u16,
     schema: *const RowSchema,
     sort_keys: []const SortKeyDescriptor,
+    start_idx: u16,
+    end_idx: u16,
     had_eval_error: bool = false,
 
     fn run(self: *ParallelSortWorker) void {
         var arena_buf: [parallel_sort_worker_arena_bytes]u8 = undefined;
         var arena = scan_mod.StringArena.init(&arena_buf);
-        sortRowsMergeUngrouped(
+        insertionSortWindow(
             self.ctx,
+            self.group_runtime,
             self.rows,
-            self.aux,
+            self.state_indices,
             self.schema,
             self.sort_keys,
+            self.start_idx,
+            self.end_idx,
             &arena,
         ) catch {
             self.had_eval_error = true;
@@ -140,6 +146,7 @@ fn tryApplySortParallel(
     result: *QueryResult,
     schema: *const RowSchema,
     sort_keys: []const SortKeyDescriptor,
+    group_runtime: *GroupRuntime,
     string_arena: *scan_mod.StringArena,
 ) bool {
     const row_count: usize = result.row_count;
@@ -163,6 +170,12 @@ fn tryApplySortParallel(
     boundaries[worker_count] = @intCast(cursor);
     std.debug.assert(boundaries[worker_count] == result.row_count);
 
+    var state_indices: [scan_mod.scan_batch_size]u16 = undefined;
+    var row_idx: u16 = 0;
+    while (row_idx < result.row_count) : (row_idx += 1) {
+        state_indices[row_idx] = row_idx;
+    }
+
     var workers: [max_parallel_sort_workers]ParallelSortWorker = undefined;
     worker_idx = 0;
     while (worker_idx < worker_count) : (worker_idx += 1) {
@@ -170,10 +183,13 @@ fn tryApplySortParallel(
         const end = boundaries[worker_idx + 1];
         workers[worker_idx] = .{
             .ctx = ctx,
-            .rows = result.rows[start..end],
-            .aux = ctx.scratch_rows_b[start..end],
+            .group_runtime = group_runtime,
+            .rows = result.rows[0..result.row_count],
+            .state_indices = &state_indices,
             .schema = schema,
             .sort_keys = sort_keys,
+            .start_idx = start,
+            .end_idx = end,
         };
     }
 
@@ -186,6 +202,13 @@ fn tryApplySortParallel(
             var join_idx: usize = 0;
             while (join_idx < spawned) : (join_idx += 1) {
                 threads[join_idx].?.join();
+            }
+            if (group_runtime.active and group_runtime.aggregate_count > 0) {
+                reorderAggregateStatesToCurrentRowOrder(
+                    group_runtime,
+                    &state_indices,
+                    result.row_count,
+                );
             }
             return false;
         };
@@ -203,10 +226,12 @@ fn tryApplySortParallel(
         return true;
     }
 
-    mergeSortedChunksUngrouped(
+    mergeSortedChunks(
         ctx,
         result.rows[0..result.row_count],
         ctx.scratch_rows_b[0..result.row_count],
+        group_runtime,
+        &state_indices,
         schema,
         sort_keys,
         boundaries[0 .. worker_count + 1],
@@ -218,111 +243,84 @@ fn tryApplySortParallel(
     return true;
 }
 
-fn sortRowsMergeUngrouped(
+fn insertionSortWindow(
     ctx: *const ExecContext,
+    group_runtime: *GroupRuntime,
     rows: []ResultRow,
-    aux: []ResultRow,
+    state_indices: *[scan_mod.scan_batch_size]u16,
     schema: *const RowSchema,
     sort_keys: []const SortKeyDescriptor,
+    start_idx: u16,
+    end_idx: u16,
     string_arena: *scan_mod.StringArena,
 ) SortEvalError!void {
-    const n = rows.len;
-    if (n <= 1) return;
-    std.debug.assert(aux.len >= n);
-
-    var src_rows = rows;
-    var dst_rows = aux[0..n];
-    var in_result = true;
-    const group_runtime = GroupRuntime{};
-
-    var width: usize = 1;
-    while (width < n) {
-        var i: usize = 0;
-        while (i < n) {
-            const mid = @min(i + width, n);
-            const end = @min(mid + width, n);
-            try mergeAdjacentRunsUngrouped(
+    if (end_idx <= start_idx + 1) return;
+    var i: u16 = start_idx + 1;
+    while (i < end_idx) : (i += 1) {
+        var j: u16 = i;
+        while (j > start_idx) {
+            const order = compareRowsBySortKeys(
                 ctx,
                 schema,
-                &group_runtime,
+                group_runtime,
+                state_indices[j - 1],
+                state_indices[j],
+                &rows[j - 1],
+                &rows[j],
                 sort_keys,
                 string_arena,
-                src_rows,
-                dst_rows,
-                @intCast(i),
-                @intCast(mid),
-                @intCast(end),
-            );
-            i = end;
+            ) catch return error.EvalFailed;
+            if (order != .gt) break;
+
+            const tmp_row = rows[j - 1];
+            rows[j - 1] = rows[j];
+            rows[j] = tmp_row;
+
+            if (group_runtime.active) {
+                const tmp_count = group_runtime.group_counts[j - 1];
+                group_runtime.group_counts[j - 1] = group_runtime.group_counts[j];
+                group_runtime.group_counts[j] = tmp_count;
+            }
+
+            const tmp_idx = state_indices[j - 1];
+            state_indices[j - 1] = state_indices[j];
+            state_indices[j] = tmp_idx;
+            j -= 1;
         }
-
-        const tmp = src_rows;
-        src_rows = dst_rows;
-        dst_rows = tmp;
-        in_result = !in_result;
-
-        if (width > n / 2) break;
-        width *= 2;
-    }
-
-    if (!in_result) {
-        @memcpy(rows, src_rows);
     }
 }
 
-fn mergeAdjacentRunsUngrouped(
-    ctx: *const ExecContext,
-    schema: *const RowSchema,
-    group_runtime: *const GroupRuntime,
-    sort_keys: []const SortKeyDescriptor,
-    string_arena: *scan_mod.StringArena,
-    src: []const ResultRow,
-    dst: []ResultRow,
-    left: u16,
-    mid: u16,
-    right: u16,
-) SortEvalError!void {
-    var l = left;
-    var r = mid;
-    var out = left;
-
-    while (l < mid and r < right) {
-        const order = compareRowsBySortKeys(
-            ctx,
-            schema,
-            group_runtime,
-            l,
-            r,
-            &src[l],
-            &src[r],
-            sort_keys,
-            string_arena,
-        ) catch return error.EvalFailed;
-        if (order != .gt) {
-            dst[out] = src[l];
-            l += 1;
-        } else {
-            dst[out] = src[r];
-            r += 1;
+fn reorderAggregateStatesToCurrentRowOrder(
+    group_runtime: *GroupRuntime,
+    state_indices: *[scan_mod.scan_batch_size]u16,
+    row_count: u16,
+) void {
+    if (!group_runtime.active or group_runtime.aggregate_count == 0) return;
+    var reordered_states: [scan_mod.scan_batch_size]AggregateState = undefined;
+    var slot: u16 = 0;
+    while (slot < group_runtime.aggregate_count) : (slot += 1) {
+        var idx: u16 = 0;
+        while (idx < row_count) : (idx += 1) {
+            const state_idx = state_indices[idx];
+            reordered_states[idx] = group_runtime.aggregate_states[slot][state_idx];
         }
-        out += 1;
+        @memcpy(
+            group_runtime.aggregate_states[slot][0..row_count],
+            reordered_states[0..row_count],
+        );
     }
-    while (l < mid) {
-        dst[out] = src[l];
-        l += 1;
-        out += 1;
-    }
-    while (r < right) {
-        dst[out] = src[r];
-        r += 1;
-        out += 1;
+    var idx: u16 = 0;
+    while (idx < row_count) : (idx += 1) {
+        state_indices[idx] = idx;
     }
 }
 
-fn mergeSortedChunksUngrouped(
+fn mergeSortedChunks(
     ctx: *const ExecContext,
     rows: []ResultRow,
     aux: []ResultRow,
+    group_runtime: *GroupRuntime,
+    state_indices: *[scan_mod.scan_batch_size]u16,
     schema: *const RowSchema,
     sort_keys: []const SortKeyDescriptor,
     boundaries: []const u16,
@@ -330,10 +328,11 @@ fn mergeSortedChunksUngrouped(
 ) SortEvalError!void {
     const chunk_count = boundaries.len - 1;
     std.debug.assert(chunk_count >= 2);
-    const group_runtime = GroupRuntime{};
 
     var positions: [max_parallel_sort_workers]u16 = undefined;
     for (0..chunk_count) |i| positions[i] = boundaries[i];
+    var aux_counts: [scan_mod.scan_batch_size]u32 = undefined;
+    var aux_state_indices: [scan_mod.scan_batch_size]u16 = undefined;
 
     var out: usize = 0;
     while (out < rows.len) : (out += 1) {
@@ -350,9 +349,9 @@ fn mergeSortedChunksUngrouped(
             const order = compareRowsBySortKeys(
                 ctx,
                 schema,
-                &group_runtime,
-                current_idx,
-                best_idx,
+                group_runtime,
+                state_indices[current_idx],
+                state_indices[best_idx],
                 &rows[current_idx],
                 &rows[best_idx],
                 sort_keys,
@@ -366,9 +365,18 @@ fn mergeSortedChunksUngrouped(
         const selected_chunk = best_chunk.?;
         const selected_idx = positions[selected_chunk];
         aux[out] = rows[selected_idx];
+        if (group_runtime.active) aux_counts[out] = group_runtime.group_counts[selected_idx];
+        aux_state_indices[out] = state_indices[selected_idx];
         positions[selected_chunk] += 1;
     }
     @memcpy(rows, aux[0..rows.len]);
+    if (group_runtime.active) {
+        @memcpy(group_runtime.group_counts[0..rows.len], aux_counts[0..rows.len]);
+    }
+    @memcpy(state_indices[0..rows.len], aux_state_indices[0..rows.len]);
+    if (group_runtime.active and group_runtime.aggregate_count > 0) {
+        reorderAggregateStatesToCurrentRowOrder(group_runtime, state_indices, @intCast(rows.len));
+    }
 }
 
 pub fn buildSortKeyDescriptors(
