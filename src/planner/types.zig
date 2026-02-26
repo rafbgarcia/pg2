@@ -10,6 +10,7 @@ pub const snapshot_schema_version_current: u16 = 1;
 pub const policy_version_current: u16 = 1;
 pub const max_operator_sequence: usize = 32;
 pub const max_relations: usize = 16;
+pub const feature_gate_parallel_policy: u64 = 1 << 0;
 
 pub const PlannerError = error{
     MissingSnapshotSchemaVersion,
@@ -69,6 +70,11 @@ pub const GroupStrategy = enum(u8) {
 
 pub const StreamingMode = enum(u8) {
     disabled = 0,
+    enabled,
+};
+
+pub const ParallelMode = enum(u8) {
+    sequential = 0,
     enabled,
 };
 
@@ -142,6 +148,7 @@ pub const PhysicalDecisionSet = extern struct {
     sort_strategy: SortStrategy = .none,
     group_strategy: GroupStrategy = .none,
     streaming_mode: StreamingMode = .disabled,
+    parallel_mode: ParallelMode = .sequential,
 
     join_reason: ReasonCode = .none,
     materialization_reason: ReasonCode = .none,

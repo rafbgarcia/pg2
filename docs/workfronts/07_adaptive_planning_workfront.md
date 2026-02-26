@@ -39,17 +39,23 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
     - planner policy/snapshot/decision fingerprints
     - per-decision reason codes
     - deterministic checkpoint chronology with prior/new decision fingerprints
+  - Parallelization policy foundation landed:
+    - planner-level `parallel_mode` decision (default `sequential`, feature-gated `enabled`)
+    - deterministic parallel schedule-trace builder under `src/planner/parallel.zig`
 - Tests:
   - internal planner contract tests added under `test/internals/planner/`
   - deterministic replay coverage for planner adaptation traces added in:
     - `test/sim/planner_adaptation_replay_sim_test.zig`
     - `test/stress/spill_phase2_gate_nested_hash_spill_contracts_test.zig`
+  - deterministic replay coverage for parallel schedule traces added in:
+    - `test/sim/planner_parallel_schedule_sim_test.zig`
   - full `zig build unit --summary all` and `zig build test --summary all` passing after integration
 - Verification:
   - `zig build sim --summary all` passing with planner adaptation replay checks
   - `zig build stress --summary all` passing with planner checkpoint/fingerprint assertions in mixed spill scenarios
 - Remaining:
-  - implement planner-level parallelization policy and deterministic schedule trace gates
+  - wire parallel mode to executor scheduling (currently policy/traces only; execution remains sequential)
+  - add semantic-equivalence tests between sequential and parallel-enabled execution modes
 
 ## Non-Goals
 
@@ -257,7 +263,7 @@ Status: 🟡 In Progress
 
 ## Phase 5: Parallelization Policy
 
-Status: ⬜ Not Started
+Status: 🟡 In Progress
 
 ### Scope
 

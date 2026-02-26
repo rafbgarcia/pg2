@@ -484,13 +484,15 @@ fn serializeInspectStats(
         }
     }
     writer.print(
-        " join_strategy={s} join_order={s} materialization={s} sort_strategy={s} group_strategy={s} nested_relations={d} nested_join_nested_loop={d} nested_join_hash_in_memory={d} nested_join_hash_spill={d} planner_policy_version={d} planner_snapshot_fingerprint={x} planner_decision_fingerprint={x} join_reason={s} materialization_reason={s} sort_reason={s} group_reason={s} streaming_reason={s}\n",
+        " join_strategy={s} join_order={s} materialization={s} sort_strategy={s} group_strategy={s} streaming_mode={s} parallel_mode={s} nested_relations={d} nested_join_nested_loop={d} nested_join_hash_in_memory={d} nested_join_hash_spill={d} planner_policy_version={d} planner_snapshot_fingerprint={x} planner_decision_fingerprint={x} join_reason={s} materialization_reason={s} sort_reason={s} group_reason={s} streaming_reason={s}\n",
         .{
             @tagName(exec_stats.plan.join_strategy),
             @tagName(exec_stats.plan.join_order),
             @tagName(exec_stats.plan.materialization_mode),
             @tagName(exec_stats.plan.sort_strategy),
             @tagName(exec_stats.plan.group_strategy),
+            @tagName(exec_stats.plan.streaming_mode),
+            @tagName(exec_stats.plan.parallel_mode),
             exec_stats.plan.nested_relation_count,
             exec_stats.plan.nested_join_nested_loop_count,
             exec_stats.plan.nested_join_hash_in_memory_count,

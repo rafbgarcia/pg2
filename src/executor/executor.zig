@@ -126,6 +126,11 @@ pub const StreamingMode = enum {
     enabled,
 };
 
+pub const ParallelMode = enum {
+    sequential,
+    enabled,
+};
+
 pub const ScanStrategy = index_scan_planner.ScanStrategy;
 
 pub const PlanCheckpointTrace = struct {
@@ -148,6 +153,7 @@ pub const PlanStats = struct {
     sort_strategy: SortStrategy = .none,
     group_strategy: GroupStrategy = .none,
     streaming_mode: StreamingMode = .disabled,
+    parallel_mode: ParallelMode = .sequential,
     scan_strategy: ScanStrategy = .table_scan,
     nested_relation_count: u8 = 0,
     nested_join_nested_loop_count: u8 = 0,
@@ -6107,6 +6113,10 @@ fn toPlannerDecisionSet(plan: *const PlanStats) planner_types.PhysicalDecisionSe
             .disabled => .disabled,
             .enabled => .enabled,
         },
+        .parallel_mode = switch (plan.parallel_mode) {
+            .sequential => .sequential,
+            .enabled => .enabled,
+        },
         .join_reason = plan.join_reason,
         .materialization_reason = plan.materialization_reason,
         .sort_reason = plan.sort_reason,
@@ -6147,6 +6157,10 @@ fn applyPlannerDecisionSet(plan: *PlanStats, decisions: *const planner_types.Phy
     };
     plan.streaming_mode = switch (decisions.streaming_mode) {
         .disabled => .disabled,
+        .enabled => .enabled,
+    };
+    plan.parallel_mode = switch (decisions.parallel_mode) {
+        .sequential => .sequential,
         .enabled => .enabled,
     };
 }

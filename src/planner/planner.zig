@@ -7,6 +7,10 @@ pub fn planInitial(snapshot: *const types.PlannerInputSnapshot) !types.PhysicalD
     var decisions = types.PhysicalDecisionSet{};
     decisions.streaming_mode = .disabled;
     decisions.streaming_reason = .STREAMING_DISABLED_RISK_UNBOUNDED;
+    decisions.parallel_mode = if ((snapshot.feature_gate_mask & types.feature_gate_parallel_policy) != 0)
+        .enabled
+    else
+        .sequential;
     for (snapshot.operator_sequence) |op| {
         switch (op) {
             .sort_op => {
