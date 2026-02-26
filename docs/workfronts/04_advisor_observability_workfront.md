@@ -61,6 +61,25 @@ These decisions are locked for current implementation unless explicitly changed.
    - trigger when `rows_matched / rows_scanned < 0.50` with sufficient repeated evidence
    - exclude `INSERT` from this advisory family
    - recommendation text points to index consideration.
+8. Queue pressure rule semantics are locked:
+   - evaluate over successful persisted records (`had_error=false`)
+   - minimum sample size: 20 records
+   - define saturated record as `workers_busy > 0 && queue_depth >= workers_busy`
+   - define timeout edge as a positive delta in `queue_timeout_total` between adjacent records in file order
+   - trigger when either condition is true:
+     - saturation ratio >= 0.30
+     - timeout edge count >= 3
+9. Spill ratio rule semantics are locked:
+   - evaluate over successful persisted records (`had_error=false`)
+   - minimum sample size: 20 records
+   - define spill record as `spill_triggered=true || temp_bytes_written > 0 || temp_bytes_read > 0`
+   - trigger when spill record ratio >= 0.25
+10. Latency spike rule semantics are locked:
+   - evaluate only records with `total_ns > 0`
+   - minimum sample size: 30 records
+   - baseline is the median `total_ns` across the sample
+   - define spike as `total_ns >= max(4 * median, median + 5ms)`
+   - trigger when spike count >= 3
 
 ## Module Direction
 
@@ -142,6 +161,26 @@ These decisions are locked for current implementation unless explicitly changed.
 2. high spill ratio => suggest more memory/work memory tuning
 3. repeated low-selectivity predicates => suggest index consideration
 4. latency spike detection
+
+### Locked Rule Thresholds (v1)
+
+1. queue pressure:
+   - sample size gate: `n >= 20`
+   - `saturated_ratio = saturated_records / n`
+   - `timeout_edge_count = count(delta(queue_timeout_total) > 0)`
+   - trigger: `saturated_ratio >= 0.30 || timeout_edge_count >= 3`
+2. high spill ratio:
+   - sample size gate: `n >= 20`
+   - `spill_ratio = spill_records / n`
+   - trigger: `spill_ratio >= 0.25`
+3. repeated low-selectivity predicates:
+   - low-selectivity definition: `rows_matched / rows_scanned < 0.50`
+   - trigger: at least one qualifying event; confidence scales by count
+4. latency spike:
+   - sample size gate: `n >= 30` where `total_ns > 0`
+   - baseline: median `total_ns`
+   - spike threshold: `max(4 * median, median + 5ms)`
+   - trigger: spike count `>= 3`
 
 ### Gate
 
