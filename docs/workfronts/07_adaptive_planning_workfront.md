@@ -53,6 +53,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
       - `parallel_schedule_fingerprint`
     - executor now routes `parallel_mode=enabled` through deterministic parallel execution for per-chunk WHERE filtering (`parallel_scheduler_path=scheduled_parallel`) with fail-closed serial fallback if worker spawn fails
     - flat, column-only selection projection now also supports deterministic parallel execution under planner parallel mode with fail-closed serial fallback
+    - grouped and non-grouped HAVING predicates on flat row sets now also support deterministic scheduled parallel filtering under planner parallel mode with fail-closed serial fallback
     - `parallel_schedule_applied_tasks` now reflects actually applied parallel execution work (WHERE/projection), not prefilled scheduler metadata
 - Tests:
   - internal planner contract tests added under `test/internals/planner/`
@@ -66,13 +67,15 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - semantic-equivalence coverage for planner parallel mode gate added in executor tests (parallel-mode enabled vs disabled yields identical result rows with true parallel filtering enabled)
   - executor replay test added to assert deterministic parallel schedule metadata across repeated seeded runs
   - large-row equivalence coverage added for flat column projection under planner parallel mode
+  - grouped HAVING semantic-equivalence coverage added (parallel-mode enabled vs disabled yields identical grouped rows)
+  - grouped HAVING applied-task coverage added (parallel scheduler applied-task count reflects true HAVING-stage parallel execution)
   - parallel-mode checkpoint chronology order coverage added for stable `pre_scan -> post_filter -> post_group -> pre_join` ordering under true parallel execution
   - parallel-mode zero-row coverage added to lock `parallel_schedule_applied_tasks=0` when no rows are processed
   - server serialization contract test added to lock inspect/explain scheduler output for `scheduled_parallel`
 - Verification:
-  - `zig build test-all --summary all` passing after applied-task contract updates (`913/915` passed, `2` skipped)
+  - `zig build test-all --summary all` passing after grouped-HAVING parallel extension (`915/917` passed, `2` skipped)
 - Remaining:
-  - expand true parallel execution beyond WHERE-filter and flat-column-projection processing while preserving deterministic/fail-closed behavior
+  - expand true parallel execution beyond WHERE/HAVING-filter and flat-column-projection processing while preserving deterministic/fail-closed behavior
 
 ## Fresh Session Handoff Snapshot (2026-02-26)
 
@@ -101,6 +104,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - parallel policy metadata and deterministic schedule-trace metadata emitted
   - deterministic parallel scheduler path activated when `parallel_mode=enabled`
   - parallel WHERE-filter execution uses deterministic row-range partitioning and stable compaction order
+  - parallel HAVING-filter execution on flat row sets uses deterministic row-range partitioning and stable compaction order (including grouped-count compaction)
   - parallel flat-column projection execution uses deterministic row-range partitioning and per-row in-place rewrite
   - parallel applied-task metrics are emitted only when a parallel execution stage is actually used
   - parallel path degrades fail-closed to serial filtering/projection if worker spawn fails
@@ -111,12 +115,14 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - stress planner checkpoint/fingerprint assertions
   - feature-level inspect contract test (`test/features/queries/planner_inspect_contract_test.zig`)
   - executor semantic-equivalence + deterministic parallel metadata replay tests
+  - executor grouped-HAVING semantic-equivalence and applied-task tests for planner parallel mode
   - executor large-row semantic-equivalence test for flat projection in planner parallel mode
   - executor parallel-mode checkpoint chronology and zero-row applied-task contract tests
   - server serialization inspect/explain scheduler-contract test for `scheduled_parallel`
 
 ### Relevant Commits (newest first)
 
+- `9ec577b` Extend scheduled-parallel execution coverage to grouped HAVING predicates
 - `2fe6785` Document applied-task parallel execution contract updates in WF07 handoff
 - `a65a693` Complete WF07 handoff doc details for the projection-parallel slice
 - `d108414` Emit parallel applied-task metrics only when a parallel stage actually executes
@@ -142,7 +148,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Immediate Next Step (single-threaded priority)
 
-1. Extend planner-parallel true execution coverage beyond WHERE-filter and flat-column-projection stages while preserving:
+1. Extend planner-parallel true execution coverage beyond WHERE/HAVING-filter and flat-column-projection stages while preserving:
    - deterministic schedule traces for fixed seeds
    - semantic equivalence with sequential mode
    - fail-closed behavior under capacity pressure
