@@ -35,6 +35,9 @@ const index_maintenance_mod = @import("index_maintenance.zig");
 const index_key_mod = @import("../storage/index_key.zig");
 const btree_mod = @import("../storage/btree.zig");
 const temp_mod = @import("../storage/temp.zig");
+const planner_mod = @import("../planner/planner.zig");
+const planner_types = @import("../planner/types.zig");
+const planner_fingerprint = @import("../planner/fingerprint.zig");
 
 const SpillingResultCollector = spill_collector_mod.SpillingResultCollector;
 const SpillPageWriter = spill_row_mod.SpillPageWriter;
@@ -135,6 +138,14 @@ pub const PlanStats = struct {
     nested_join_nested_loop_count: u8 = 0,
     nested_join_hash_in_memory_count: u8 = 0,
     nested_join_hash_spill_count: u8 = 0,
+    planner_policy_version: u16 = 0,
+    planner_snapshot_fingerprint: u64 = 0,
+    planner_decision_fingerprint: u64 = 0,
+    join_reason: planner_types.ReasonCode = .none,
+    materialization_reason: planner_types.ReasonCode = .none,
+    sort_reason: planner_types.ReasonCode = .none,
+    group_reason: planner_types.ReasonCode = .none,
+    streaming_reason: planner_types.ReasonCode = .none,
 };
 
 /// Execution statistics for a query.
@@ -1036,7 +1047,7 @@ fn executePipelineStatement(
         &ops,
         &op_count,
     );
-    capturePlanStats(&result.stats.plan, model_name, &ops, op_count);
+    capturePlanStats(&result.stats.plan, ctx, model_name, model_id, &ops, op_count);
 
     if (findMutationOp(&ops, op_count)) |mut_idx| {
         executeMutation(
@@ -5810,7 +5821,9 @@ fn buildOperatorList(
 
 fn capturePlanStats(
     plan: *PlanStats,
+    ctx: *const ExecContext,
     model_name: []const u8,
+    model_id: ModelId,
     ops: *const [max_operators]OpDescriptor,
     op_count: u16,
 ) void {
@@ -5827,6 +5840,109 @@ fn capturePlanStats(
     while (i < plan.pipeline_op_count) : (i += 1) {
         plan.pipeline_ops[i] = ops[i].kind;
     }
+
+    seedPlannerDecisionStats(plan, ctx, model_id, ops, op_count);
+}
+
+fn toPlannerOpTag(kind: OpKind) planner_types.OpTag {
+    return switch (kind) {
+        .where_filter => .where_filter,
+        .having_filter => .having_filter,
+        .group_op => .group_op,
+        .limit_op => .limit_op,
+        .offset_op => .offset_op,
+        .insert_op => .insert_op,
+        .update_op => .update_op,
+        .delete_op => .delete_op,
+        .sort_op => .sort_op,
+        .inspect_op => .inspect_op,
+    };
+}
+
+fn hashQueryShape(model_name: []const u8, ops: *const [max_operators]OpDescriptor, op_count: u16) u128 {
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(model_name);
+    var i: u16 = 0;
+    while (i < op_count) : (i += 1) {
+        const tag_byte: u8 = @intFromEnum(toPlannerOpTag(ops[i].kind));
+        hasher.update(&[_]u8{tag_byte});
+    }
+    const lo = hasher.final();
+    hasher = std.hash.Wyhash.init(1);
+    hasher.update(model_name);
+    i = 0;
+    while (i < op_count) : (i += 1) {
+        const tag_byte: u8 = @intFromEnum(toPlannerOpTag(ops[i].kind));
+        hasher.update(&[_]u8{tag_byte});
+    }
+    const hi = hasher.final();
+    return (@as(u128, hi) << 64) | @as(u128, lo);
+}
+
+fn seedPlannerDecisionStats(
+    plan: *PlanStats,
+    ctx: *const ExecContext,
+    model_id: ModelId,
+    ops: *const [max_operators]OpDescriptor,
+    op_count: u16,
+) void {
+    var snapshot = planner_types.PlannerInputSnapshot{
+        .snapshot_schema_version = planner_types.snapshot_schema_version_current,
+        .policy_version = planner_types.policy_version_current,
+        .seed = 0,
+        .query_shape_fingerprint = hashQueryShape(
+            plan.source_model[0..plan.source_model_len],
+            ops,
+            op_count,
+        ),
+        // Catalog/runtime/version ids are deterministic snapshots derived from
+        // the current execution context until dedicated version ids are wired.
+        .catalog_snapshot_id = @as(u64, model_id) + 1,
+        .runtime_counters_snapshot_id = ctx.snapshot.next_tx,
+        .capacity_profile_id = (@as(u64, ctx.work_memory_bytes_per_slot) << 16) ^
+            @as(u64, @intCast(@min(ctx.temp_pages_per_query_slot, std.math.maxInt(u16)))),
+    };
+
+    var i: usize = 0;
+    while (i < op_count and i < planner_types.max_operator_sequence) : (i += 1) {
+        snapshot.operator_sequence[i] = toPlannerOpTag(ops[i].kind);
+    }
+    snapshot.relation_ids_sorted[0] = @as(u32, model_id) + 1;
+
+    const decisions = planner_mod.planInitial(&snapshot) catch return;
+    plan.planner_policy_version = snapshot.policy_version;
+    plan.planner_snapshot_fingerprint = planner_fingerprint.snapshotFingerprint(&snapshot) catch 0;
+    plan.planner_decision_fingerprint = planner_fingerprint.decisionFingerprint(&decisions);
+
+    plan.join_reason = decisions.join_reason;
+    plan.materialization_reason = decisions.materialization_reason;
+    plan.sort_reason = decisions.sort_reason;
+    plan.group_reason = decisions.group_reason;
+    plan.streaming_reason = decisions.streaming_reason;
+
+    plan.join_strategy = switch (decisions.join_strategy) {
+        .none => .none,
+        .hash_in_memory => .hash_in_memory,
+        .hash_spill => .hash_spill,
+    };
+    plan.join_order = switch (decisions.join_order) {
+        .none => .none,
+        .source_then_nested => .source_then_nested,
+    };
+    plan.materialization_mode = switch (decisions.materialization_mode) {
+        .none => .none,
+        .bounded_row_buffers => .bounded_row_buffers,
+    };
+    plan.sort_strategy = switch (decisions.sort_strategy) {
+        .none => .none,
+        .in_memory_merge => .in_memory_merge,
+        .external_merge => .external_merge,
+    };
+    plan.group_strategy = switch (decisions.group_strategy) {
+        .none => .none,
+        .in_memory_linear => .in_memory_linear,
+        .hash_spill => .hash_spill,
+    };
 }
 
 fn incrementPlanCounter(counter: *u8) void {
@@ -5841,6 +5957,8 @@ fn recordNestedHashJoinPlan(plan: *PlanStats) void {
     plan.join_strategy = .hash_in_memory;
     plan.join_order = .source_then_nested;
     plan.materialization_mode = .bounded_row_buffers;
+    plan.join_reason = .JOIN_HASH_IN_MEMORY_CAPACITY_OK;
+    plan.materialization_reason = .MATERIALIZE_BOUNDED_REQUIRED;
 }
 
 fn recordNestedHashSpillJoinPlan(plan: *PlanStats) void {
@@ -5849,6 +5967,8 @@ fn recordNestedHashSpillJoinPlan(plan: *PlanStats) void {
     plan.join_strategy = .hash_spill;
     plan.join_order = .source_then_nested;
     plan.materialization_mode = .bounded_row_buffers;
+    plan.join_reason = .JOIN_HASH_SPILL_RIGHT_EXCEEDS_BUILD_WINDOW;
+    plan.materialization_reason = .MATERIALIZE_BOUNDED_REQUIRED;
 }
 
 /// Find the first mutation operator in the list.

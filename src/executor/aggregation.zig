@@ -10,6 +10,7 @@ const row_mod = @import("../storage/row.zig");
 const scan_mod = @import("scan.zig");
 const filter_mod = @import("filter.zig");
 const capacity_mod = @import("capacity.zig");
+const planner_types = @import("../planner/types.zig");
 
 const NodeIndex = ast_mod.NodeIndex;
 const null_node = ast_mod.null_node;
@@ -89,6 +90,7 @@ pub fn applyGroup(
     string_arena: *scan_mod.StringArena,
 ) bool {
     result.stats.plan.group_strategy = .in_memory_linear;
+    result.stats.plan.group_reason = planner_types.ReasonCode.GROUP_LINEAR_WITHIN_GROUP_CAP;
     const node = ctx.ast.getNode(group_node);
     const group_key_count = ctx.ast.listLen(node.data.unary);
     if (group_key_count == 0) {

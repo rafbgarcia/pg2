@@ -484,7 +484,7 @@ fn serializeInspectStats(
         }
     }
     writer.print(
-        " join_strategy={s} join_order={s} materialization={s} sort_strategy={s} group_strategy={s} nested_relations={d} nested_join_nested_loop={d} nested_join_hash_in_memory={d} nested_join_hash_spill={d}\n",
+        " join_strategy={s} join_order={s} materialization={s} sort_strategy={s} group_strategy={s} nested_relations={d} nested_join_nested_loop={d} nested_join_hash_in_memory={d} nested_join_hash_spill={d} planner_policy_version={d} planner_snapshot_fingerprint={x} planner_decision_fingerprint={x} join_reason={s} materialization_reason={s} sort_reason={s} group_reason={s} streaming_reason={s}\n",
         .{
             @tagName(exec_stats.plan.join_strategy),
             @tagName(exec_stats.plan.join_order),
@@ -495,6 +495,14 @@ fn serializeInspectStats(
             exec_stats.plan.nested_join_nested_loop_count,
             exec_stats.plan.nested_join_hash_in_memory_count,
             exec_stats.plan.nested_join_hash_spill_count,
+            exec_stats.plan.planner_policy_version,
+            exec_stats.plan.planner_snapshot_fingerprint,
+            exec_stats.plan.planner_decision_fingerprint,
+            @tagName(exec_stats.plan.join_reason),
+            @tagName(exec_stats.plan.materialization_reason),
+            @tagName(exec_stats.plan.sort_reason),
+            @tagName(exec_stats.plan.group_reason),
+            @tagName(exec_stats.plan.streaming_reason),
         },
     ) catch return error.ResponseTooLarge;
     writer.print(

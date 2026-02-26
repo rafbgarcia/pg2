@@ -48,6 +48,7 @@ const spill_row = @import("../storage/spill_row.zig");
 const sorting_mod = @import("sorting.zig");
 const capacity_mod = @import("capacity.zig");
 const spill_collector_mod = @import("spill_collector.zig");
+const planner_types = @import("../planner/types.zig");
 const aggregation_mod = @import("aggregation.zig");
 
 const NodeIndex = ast_mod.NodeIndex;
@@ -360,6 +361,7 @@ pub fn applyExternalSort(
     string_arena: *StringArena,
 ) bool {
     result.stats.plan.sort_strategy = .external_merge;
+    result.stats.plan.sort_reason = planner_types.ReasonCode.SORT_EXTERNAL_REQUIRED_BY_ROWFLOW;
 
     const node = ctx.ast.getNode(sort_node);
     const key_count = ctx.ast.listLen(node.data.unary);

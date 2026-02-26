@@ -1321,7 +1321,21 @@ test "session inspect appends execution and pool stats" {
         std.mem.indexOf(
             u8,
             output,
-            "INSPECT plan source_model=User pipeline=inspect join_strategy=none join_order=none materialization=none sort_strategy=none group_strategy=none nested_relations=0 nested_join_nested_loop=0 nested_join_hash_in_memory=0 nested_join_hash_spill=0\n",
+            "INSPECT plan source_model=User pipeline=inspect join_strategy=none join_order=none materialization=none sort_strategy=none group_strategy=none nested_relations=0 nested_join_nested_loop=0 nested_join_hash_in_memory=0 nested_join_hash_spill=0",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "planner_policy_version=1",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "streaming_reason=STREAMING_DISABLED_RISK_UNBOUNDED",
         ) != null,
     );
     try std.testing.expect(
