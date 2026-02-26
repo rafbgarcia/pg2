@@ -52,7 +52,8 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
       - `parallel_schedule_task_count`
       - `parallel_schedule_fingerprint`
     - executor now routes `parallel_mode=enabled` through deterministic parallel execution for per-chunk WHERE filtering (`parallel_scheduler_path=scheduled_parallel`) with fail-closed serial fallback if worker spawn fails
-- Tests:
+    - flat, column-only selection projection now also supports deterministic parallel execution under planner parallel mode with fail-closed serial fallback
+  - Tests:
   - internal planner contract tests added under `test/internals/planner/`
   - user-visible inspect contract coverage added under:
     - `test/features/queries/planner_inspect_contract_test.zig`
@@ -63,13 +64,14 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
     - `test/sim/planner_parallel_schedule_sim_test.zig`
   - semantic-equivalence coverage for planner parallel mode gate added in executor tests (parallel-mode enabled vs disabled yields identical result rows with true parallel filtering enabled)
   - executor replay test added to assert deterministic parallel schedule metadata across repeated seeded runs
+  - large-row equivalence coverage added for flat column projection under planner parallel mode
   - server serialization contract test added to lock inspect/explain scheduler output for `scheduled_parallel`
   - full `zig build unit --summary all` and `zig build test --summary all` passing after integration
 - Verification:
   - `zig build sim --summary all` passing with planner adaptation replay checks
   - `zig build stress --summary all` passing with planner checkpoint/fingerprint assertions in mixed spill scenarios
 - Remaining:
-  - expand true parallel execution beyond WHERE-filter chunk processing while preserving deterministic/fail-closed behavior
+  - expand true parallel execution beyond WHERE-filter and flat-column-projection processing while preserving deterministic/fail-closed behavior
 
 ## Fresh Session Handoff Snapshot (2026-02-26)
 
@@ -98,6 +100,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - parallel policy metadata and deterministic schedule-trace metadata emitted
   - deterministic parallel scheduler path activated when `parallel_mode=enabled`
   - parallel WHERE-filter execution uses deterministic row-range partitioning and stable compaction order
+  - parallel flat-column projection execution uses deterministic row-range partitioning and per-row in-place rewrite
   - parallel path degrades fail-closed to serial filtering if worker spawn fails
 - Tests added/extended:
   - internals planner contract tests
@@ -110,6 +113,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Relevant Commits (newest first)
 
+- `d75083e` Extend planner-parallel true execution to flat column projection stage
 - `858f9fc` Lock scheduled-parallel inspect contract and refresh WF07 handoff/status
 - `330e33e` Replace scheduled-serial execution path with deterministic parallel WHERE filtering
 - `0c05bf8` Extend inspect explain with join/materialization/parallel details
@@ -129,7 +133,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Immediate Next Step (single-threaded priority)
 
-1. Extend planner-parallel true execution coverage beyond WHERE-filter chunks while preserving:
+1. Extend planner-parallel true execution coverage beyond WHERE-filter and flat-column-projection stages while preserving:
    - deterministic schedule traces for fixed seeds
    - semantic equivalence with sequential mode
    - fail-closed behavior under capacity pressure
