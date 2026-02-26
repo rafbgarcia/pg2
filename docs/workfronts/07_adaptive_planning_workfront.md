@@ -110,6 +110,8 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Relevant Commits (newest first)
 
+- `858f9fc` Lock scheduled-parallel inspect contract and refresh WF07 handoff/status
+- `330e33e` Replace scheduled-serial execution path with deterministic parallel WHERE filtering
 - `0c05bf8` Extend inspect explain with join/materialization/parallel details
 - `6740b2d` Route parallel mode through deterministic serial scheduler path
 - `ce3991e` Add feature-level planner inspect contract coverage
