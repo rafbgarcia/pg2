@@ -4,6 +4,29 @@
 
 🚧 IN PROGRESS
 
+### Current Implementation Snapshot (2026-02-26)
+
+- ✅ `src/advisor/metrics.zig` landed:
+  - versioned on-disk raw metrics file format
+  - deterministic append/read path for `.pg2/advisor_metrics.pg2`
+  - corruption/truncation detection tests
+- ✅ `src/advisor/rules.zig` landed with v1 low-selectivity advisory:
+  - evaluates persisted raw metrics
+  - targets predicate-driven `SELECT`/`UPDATE`/`DELETE`
+  - triggers when `rows_matched / rows_scanned < 0.50`
+  - emits index-consideration action text
+- ✅ `pg2 advise` command landed (plain text, no flags).
+- ✅ Session ingestion wiring landed:
+  - persists raw metric records on successful executed requests
+  - uses storage-root-local advisor metrics file
+  - fail-closed behavior (advisor append failures do not break query execution)
+- ✅ Gate run after landing: `zig build test-all --summary all` passed.
+- ⏳ Remaining from original scope:
+  - queue pressure rule
+  - spill ratio rule
+  - latency spike rule
+  - parse/plan/execute/serialize phase timing ingestion
+
 ## Objective
 
 Build a production-grade advisor module that consumes runtime/query metrics and emits actionable guidance.
