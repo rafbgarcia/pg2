@@ -107,6 +107,12 @@ pub fn build(b: *std.Build) void {
     sim_step.dependOn(&run_sim_t.step);
     test_step.dependOn(&run_sim_t.step);
 
+    // --- Full test lane ---
+    const test_all_step = b.step("test-all", "Run all test lanes (test, unit, stress)");
+    test_all_step.dependOn(test_step);
+    test_all_step.dependOn(unit_step);
+    test_all_step.dependOn(stress_step);
+
     // --- Simulation executable ---
     const sim_mod = b.createModule(.{
         .root_source_file = b.path("src/simulator/main.zig"),

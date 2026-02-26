@@ -69,6 +69,76 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 - Remaining:
   - replace deterministic serial scheduler path with real parallel execution while preserving deterministic scheduling traces and semantic equivalence guarantees
 
+## Fresh Session Handoff Snapshot (2026-02-26)
+
+### Decision Lock
+
+- Checkpoint chronology must reflect real execution order (never synthetic display order):
+  - `pre_scan -> post_filter -> post_group -> pre_join`
+- Adaptation remains degrade-only and deterministic.
+- Parallel execution policy is feature-gated; default behavior remains sequential and fail-closed.
+
+### Delivered Through This Session
+
+- Planner foundations:
+  - `src/planner/types.zig`
+  - `src/planner/fingerprint.zig`
+  - `src/planner/planner.zig`
+  - `src/planner/adaptation.zig`
+  - `src/planner/parallel.zig`
+- Runtime split:
+  - startup capacity planner moved to `src/runtime/capacity_planner.zig`
+  - `src/runtime/planner.zig` retained as compatibility wrapper
+- Executor/inspect integration:
+  - plan stats seeded from planner snapshot + decision contracts
+  - checkpoint traces recorded and serialized
+  - plain-language explain details emitted via `INSPECT explain_detail`
+  - parallel policy metadata and deterministic schedule-trace metadata emitted
+  - deterministic serial scheduler path activated when `parallel_mode=enabled`
+- Tests added/extended:
+  - internals planner contract tests
+  - sim adaptation replay determinism
+  - sim parallel schedule determinism
+  - stress planner checkpoint/fingerprint assertions
+  - feature-level inspect contract test (`test/features/queries/planner_inspect_contract_test.zig`)
+
+### Relevant Commits (newest first)
+
+- `0c05bf8` Extend inspect explain with join/materialization/parallel details
+- `6740b2d` Route parallel mode through deterministic serial scheduler path
+- `ce3991e` Add feature-level planner inspect contract coverage
+- `1a49bca` Expose deterministic parallel schedule trace metadata in inspect
+- `7413389` Add parallel-mode equivalence coverage and gate wiring
+- `a3ee059` Thread planner feature gates through executor snapshot context
+- `2eca3ea` Add planner parallel-mode policy foundation and schedule traces
+- `8514e84` Align checkpoint chronology with execution order across query paths
+- `3a8afcc` Add sim and stress replay checks for planner checkpoint traces
+- `157b739` Assert checkpoint inspect ordering and update WF07 status
+- `bd6ccaf` Wire planner checkpoints and inspect chronology output
+- `430d4fb` Add checkpoint adaptation rules and snapshot capacity fields
+- `265c775` Seed executor plan stats from planner decisions and reasons
+- `119b400` Add WF07 planner foundation and split capacity planner
+
+### Immediate Next Step (single-threaded priority)
+
+1. Replace `parallel_scheduler_path=scheduled_serial` with true parallel execution while preserving:
+   - deterministic schedule traces for fixed seeds
+   - semantic equivalence with sequential mode
+   - fail-closed behavior under capacity pressure
+
+### Acceptance Gates (must all pass)
+
+- `zig build unit --summary all`
+- `zig build test --summary all`
+- `zig build sim --summary all`
+- `zig build stress --summary all`
+
+### Hard-Stop Reminders
+
+- Stop if any path introduces non-deterministic scheduling without seeded/stable tie-breaks.
+- Stop if any checkpoint order/meaning diverges from actual execution stage order.
+- Stop if parallel mode can return different rows than sequential mode for the same query/snapshot.
+
 ## Non-Goals
 
 - No classic static cost model with cardinality selectivity estimation as primary decision source.
