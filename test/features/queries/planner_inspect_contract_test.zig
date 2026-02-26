@@ -23,12 +23,17 @@ test "feature inspect exposes planner metadata and deterministic checkpoint chro
         "User |> where(active == true) |> sort(id desc) |> inspect { id }",
     );
     try std.testing.expect(std.mem.indexOf(u8, result, "INSPECT plan ") != null);
-    try std.testing.expect(std.mem.indexOf(u8, result, "planner_policy_version=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "planner_policy_version=3") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "planner_snapshot_fingerprint=") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "planner_decision_fingerprint=") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "streaming_mode=disabled") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "parallel_mode=sequential") != null);
     try std.testing.expect(std.mem.indexOf(u8, result, "parallel_reason=PARALLEL_DISABLED_FEATURE_GATE") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "parallel_sort_min_rows_per_worker=32") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "parallel_projection_min_rows_per_worker=8") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "parallel_sort_admission_reason=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "parallel_join_admission_reason=") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result, "INSPECT explain_parallel_admission ") != null);
 
     const pre_scan = std.mem.indexOf(u8, result, "INSPECT checkpoint name=pre_scan ");
     const post_filter = std.mem.indexOf(u8, result, "INSPECT checkpoint name=post_filter ");

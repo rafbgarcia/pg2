@@ -31,7 +31,6 @@ const invalid_aggregate_slot: u8 = std.math.maxInt(u8);
 const sort_key_expr_mask: u16 = 0x8000;
 const max_parallel_group_workers: usize = 8;
 const max_parallel_worker_cap: usize = 8;
-const parallel_group_min_rows_per_worker: usize = 32;
 
 pub const AggregateKind = enum {
     count_star,
@@ -90,6 +89,7 @@ pub fn applyGroup(
     caps: *const capacity_mod.OperatorCapacities,
     group_runtime: *GroupRuntime,
     parallel_enabled: bool,
+    parallel_min_rows_per_worker: u16,
     string_arena: *scan_mod.StringArena,
 ) bool {
     const node = ctx.ast.getNode(group_node);
@@ -141,6 +141,7 @@ pub fn applyGroup(
             group_key_indices[0..group_key_count],
             caps,
             group_runtime,
+            parallel_min_rows_per_worker,
             string_arena,
         ))
     {
@@ -253,10 +254,12 @@ fn tryApplyGroupParallel(
     key_indices: []const u16,
     caps: *const capacity_mod.OperatorCapacities,
     group_runtime: *GroupRuntime,
+    parallel_min_rows_per_worker: u16,
     string_arena: *scan_mod.StringArena,
 ) bool {
     const row_count_usize: usize = result.row_count;
-    if (row_count_usize < parallel_group_min_rows_per_worker * 2) return false;
+    const min_rows_per_worker = @as(usize, @max(@as(u16, 1), parallel_min_rows_per_worker));
+    if (row_count_usize < min_rows_per_worker * 2) return false;
 
     const configured_cap = @max(
         @as(usize, 1),
@@ -267,7 +270,7 @@ fn tryApplyGroupParallel(
     );
     const stage_cap = @min(max_parallel_group_workers, configured_cap);
     const max_workers = @min(stage_cap, row_count_usize);
-    var worker_count = @min(max_workers, row_count_usize / parallel_group_min_rows_per_worker);
+    var worker_count = @min(max_workers, row_count_usize / min_rows_per_worker);
     if (worker_count < 2) return false;
     if (worker_count > max_parallel_group_workers) worker_count = max_parallel_group_workers;
 

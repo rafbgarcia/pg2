@@ -32,7 +32,6 @@ const sort_key_desc_mask: u16 = 0x0001;
 const sort_key_expr_mask: u16 = 0x8000;
 const max_parallel_sort_workers: usize = 8;
 const max_parallel_worker_cap: usize = 8;
-const parallel_sort_min_rows_per_worker: usize = 32;
 const parallel_sort_worker_arena_bytes: usize = filter_mod.max_string_result_bytes * 2;
 
 pub const SortKeyKind = enum {
@@ -56,6 +55,7 @@ pub fn applySort(
     group_runtime: *GroupRuntime,
     string_arena: *scan_mod.StringArena,
     parallel_enabled: bool,
+    parallel_min_rows_per_worker: u16,
 ) bool {
     const node = ctx.ast.getNode(sort_node);
     const key_count = ctx.ast.listLen(node.data.unary);
@@ -90,6 +90,7 @@ pub fn applySort(
             schema,
             sort_keys[0..key_count],
             group_runtime,
+            parallel_min_rows_per_worker,
             string_arena,
         ))
     {
@@ -148,10 +149,12 @@ fn tryApplySortParallel(
     schema: *const RowSchema,
     sort_keys: []const SortKeyDescriptor,
     group_runtime: *GroupRuntime,
+    parallel_min_rows_per_worker: u16,
     string_arena: *scan_mod.StringArena,
 ) bool {
     const row_count: usize = result.row_count;
-    if (row_count < parallel_sort_min_rows_per_worker * 2) return false;
+    const min_rows_per_worker = @as(usize, @max(@as(u16, 1), parallel_min_rows_per_worker));
+    if (row_count < min_rows_per_worker * 2) return false;
 
     const configured_cap = @max(
         @as(usize, 1),
@@ -162,7 +165,7 @@ fn tryApplySortParallel(
     );
     const stage_cap = @min(max_parallel_sort_workers, configured_cap);
     const max_workers = @min(stage_cap, row_count);
-    var worker_count = @min(max_workers, row_count / parallel_sort_min_rows_per_worker);
+    var worker_count = @min(max_workers, row_count / min_rows_per_worker);
     if (worker_count < 2) return false;
     if (worker_count > max_parallel_sort_workers) worker_count = max_parallel_sort_workers;
 

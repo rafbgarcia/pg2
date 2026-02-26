@@ -1349,7 +1349,7 @@ test "session inspect appends execution and pool stats" {
         std.mem.indexOf(
             u8,
             output,
-            "planner_policy_version=2",
+            "planner_policy_version=3",
         ) != null,
     );
     try std.testing.expect(

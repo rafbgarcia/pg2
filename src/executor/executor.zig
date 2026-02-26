@@ -161,6 +161,12 @@ pub const PlanStats = struct {
     streaming_mode: StreamingMode = .disabled,
     parallel_mode: ParallelMode = .sequential,
     parallel_worker_budget: u8 = 1,
+    parallel_filter_min_rows_per_worker: u16 = 1,
+    parallel_group_min_rows_per_worker: u16 = 32,
+    parallel_sort_min_rows_per_worker: u16 = 32,
+    parallel_projection_min_rows_per_worker: u16 = 8,
+    parallel_offset_min_rows_per_worker: u16 = 32,
+    parallel_join_min_rows_per_worker: u16 = 16,
     parallel_scheduler_path: ParallelSchedulerPath = .direct,
     parallel_schedule_applied_tasks: u8 = 0,
     scan_strategy: ScanStrategy = .table_scan,
@@ -177,6 +183,12 @@ pub const PlanStats = struct {
     group_reason: planner_types.ReasonCode = .none,
     streaming_reason: planner_types.ReasonCode = .none,
     parallel_reason: planner_types.ReasonCode = .none,
+    parallel_filter_admission_reason: planner_types.ReasonCode = .none,
+    parallel_group_admission_reason: planner_types.ReasonCode = .none,
+    parallel_sort_admission_reason: planner_types.ReasonCode = .none,
+    parallel_projection_admission_reason: planner_types.ReasonCode = .none,
+    parallel_offset_admission_reason: planner_types.ReasonCode = .none,
+    parallel_join_admission_reason: planner_types.ReasonCode = .none,
     parallel_schedule_task_count: u8 = 0,
     parallel_schedule_fingerprint: u64 = 0,
     checkpoints: [4]PlanCheckpointTrace = [_]PlanCheckpointTrace{.{}} ** 4,
@@ -210,9 +222,7 @@ const variable_arena_divisor: usize = 4;
 const variable_arena_min_bytes: usize = 64 * 1024;
 const max_parallel_filter_workers: usize = 8;
 const max_parallel_worker_cap: usize = 8;
-const parallel_filter_min_rows_per_worker: usize = 1;
 const parallel_filter_worker_arena_bytes: usize = filter_mod.max_string_result_bytes * 2;
-const parallel_offset_min_rows_per_worker: usize = 32;
 
 const VariableValue = union(enum) {
     scalar: Value,
@@ -1658,6 +1668,7 @@ fn executeReadPipeline(
             model_id,
             string_arena,
             result.stats.plan.parallel_scheduler_path == .scheduled_parallel,
+            result.stats.plan.parallel_projection_min_rows_per_worker,
         )) {
             captureTempStats(result, ctx.collector);
             return;
@@ -2100,6 +2111,7 @@ fn applyReadOperators(
                     caps,
                     &group_runtime,
                     result.stats.plan.parallel_scheduler_path == .scheduled_parallel,
+                    result.stats.plan.parallel_group_min_rows_per_worker,
                     string_arena,
                 )) return false;
             },
@@ -2115,6 +2127,7 @@ fn applyReadOperators(
                     &group_runtime,
                     string_arena,
                     result.stats.plan.parallel_scheduler_path == .scheduled_parallel,
+                    result.stats.plan.parallel_sort_min_rows_per_worker,
                 )) return false;
             },
             .inspect_op => {},
@@ -2312,6 +2325,10 @@ fn tryApplyPredicateFilterParallel(
 
     const row_count_usize: usize = result.row_count;
     if (row_count_usize < 2) return false;
+    const min_rows_per_worker = @as(
+        usize,
+        @max(@as(u16, 1), result.stats.plan.parallel_filter_min_rows_per_worker),
+    );
 
     const configured_cap = @max(
         @as(usize, 1),
@@ -2322,7 +2339,7 @@ fn tryApplyPredicateFilterParallel(
     );
     const stage_cap = @min(max_parallel_filter_workers, configured_cap);
     const max_workers = @min(stage_cap, row_count_usize);
-    var worker_count = @min(max_workers, row_count_usize / parallel_filter_min_rows_per_worker);
+    var worker_count = @min(max_workers, row_count_usize / min_rows_per_worker);
     if (worker_count < 2) return false;
     if (worker_count > max_parallel_filter_workers) worker_count = max_parallel_filter_workers;
 
@@ -2444,6 +2461,7 @@ fn applyPostScanOperators(
                     caps,
                     &group_runtime,
                     result.stats.plan.parallel_scheduler_path == .scheduled_parallel,
+                    result.stats.plan.parallel_group_min_rows_per_worker,
                     string_arena,
                 )) return false;
             },
@@ -2459,6 +2477,7 @@ fn applyPostScanOperators(
                     &group_runtime,
                     string_arena,
                     result.stats.plan.parallel_scheduler_path == .scheduled_parallel,
+                    result.stats.plan.parallel_sort_min_rows_per_worker,
                 )) return false;
             },
             .inspect_op => {},
@@ -2970,6 +2989,7 @@ fn applyPostHashAggregateOperators(
                     group_runtime,
                     string_arena,
                     result.stats.plan.parallel_scheduler_path == .scheduled_parallel,
+                    result.stats.plan.parallel_sort_min_rows_per_worker,
                 )) return false;
             },
             .limit_op => applyLimit(ctx, result, op.node, string_arena),
@@ -4578,6 +4598,7 @@ fn tryApplyNestedSelectionHashJoinFlatNoOps(
         caps,
         result.stats.plan.parallel_scheduler_path == .scheduled_parallel,
         result.stats.plan.parallel_worker_budget,
+        result.stats.plan.parallel_join_min_rows_per_worker,
     )) return .failed;
 
     const left_column_count = left_copy[0].column_count;
@@ -5193,6 +5214,7 @@ fn applyNestedReadOperatorsPerParent(
                             caps,
                             &group_runtime,
                             result.stats.plan.parallel_scheduler_path == .scheduled_parallel,
+                            result.stats.plan.parallel_group_min_rows_per_worker,
                             string_arena,
                         )) return false;
                     },
@@ -5891,7 +5913,11 @@ fn tryApplyOffsetParallel(
     remaining: u16,
 ) bool {
     const remaining_usize: usize = remaining;
-    if (remaining_usize < parallel_offset_min_rows_per_worker * 2) return false;
+    const min_rows_per_worker = @as(
+        usize,
+        @max(@as(u16, 1), result.stats.plan.parallel_offset_min_rows_per_worker),
+    );
+    if (remaining_usize < min_rows_per_worker * 2) return false;
 
     const configured_cap = @max(
         @as(usize, 1),
@@ -5902,7 +5928,7 @@ fn tryApplyOffsetParallel(
     );
     const stage_cap = @min(max_parallel_filter_workers, configured_cap);
     const max_workers = @min(stage_cap, remaining_usize);
-    var worker_count = @min(max_workers, remaining_usize / parallel_offset_min_rows_per_worker);
+    var worker_count = @min(max_workers, remaining_usize / min_rows_per_worker);
     if (worker_count < 2) return false;
     if (worker_count > max_parallel_filter_workers) worker_count = max_parallel_filter_workers;
 
@@ -6190,6 +6216,7 @@ fn executeMutation(
             model_id,
             string_arena,
             false,
+            1,
         );
     }
 }
@@ -6630,12 +6657,24 @@ fn toPlannerDecisionSet(plan: *const PlanStats) planner_types.PhysicalDecisionSe
             .enabled => .enabled,
         },
         .parallel_worker_budget = plan.parallel_worker_budget,
+        .parallel_filter_min_rows_per_worker = plan.parallel_filter_min_rows_per_worker,
+        .parallel_group_min_rows_per_worker = plan.parallel_group_min_rows_per_worker,
+        .parallel_sort_min_rows_per_worker = plan.parallel_sort_min_rows_per_worker,
+        .parallel_projection_min_rows_per_worker = plan.parallel_projection_min_rows_per_worker,
+        .parallel_offset_min_rows_per_worker = plan.parallel_offset_min_rows_per_worker,
+        .parallel_join_min_rows_per_worker = plan.parallel_join_min_rows_per_worker,
         .join_reason = plan.join_reason,
         .materialization_reason = plan.materialization_reason,
         .sort_reason = plan.sort_reason,
         .group_reason = plan.group_reason,
         .streaming_reason = plan.streaming_reason,
         .parallel_reason = plan.parallel_reason,
+        .parallel_filter_admission_reason = plan.parallel_filter_admission_reason,
+        .parallel_group_admission_reason = plan.parallel_group_admission_reason,
+        .parallel_sort_admission_reason = plan.parallel_sort_admission_reason,
+        .parallel_projection_admission_reason = plan.parallel_projection_admission_reason,
+        .parallel_offset_admission_reason = plan.parallel_offset_admission_reason,
+        .parallel_join_admission_reason = plan.parallel_join_admission_reason,
     };
 }
 
@@ -6646,6 +6685,12 @@ fn applyPlannerDecisionSet(plan: *PlanStats, decisions: *const planner_types.Phy
     plan.group_reason = decisions.group_reason;
     plan.streaming_reason = decisions.streaming_reason;
     plan.parallel_reason = decisions.parallel_reason;
+    plan.parallel_filter_admission_reason = decisions.parallel_filter_admission_reason;
+    plan.parallel_group_admission_reason = decisions.parallel_group_admission_reason;
+    plan.parallel_sort_admission_reason = decisions.parallel_sort_admission_reason;
+    plan.parallel_projection_admission_reason = decisions.parallel_projection_admission_reason;
+    plan.parallel_offset_admission_reason = decisions.parallel_offset_admission_reason;
+    plan.parallel_join_admission_reason = decisions.parallel_join_admission_reason;
 
     plan.join_strategy = switch (decisions.join_strategy) {
         .none => .none,
@@ -6679,6 +6724,12 @@ fn applyPlannerDecisionSet(plan: *PlanStats, decisions: *const planner_types.Phy
         .enabled => .enabled,
     };
     plan.parallel_worker_budget = decisions.parallel_worker_budget;
+    plan.parallel_filter_min_rows_per_worker = decisions.parallel_filter_min_rows_per_worker;
+    plan.parallel_group_min_rows_per_worker = decisions.parallel_group_min_rows_per_worker;
+    plan.parallel_sort_min_rows_per_worker = decisions.parallel_sort_min_rows_per_worker;
+    plan.parallel_projection_min_rows_per_worker = decisions.parallel_projection_min_rows_per_worker;
+    plan.parallel_offset_min_rows_per_worker = decisions.parallel_offset_min_rows_per_worker;
+    plan.parallel_join_min_rows_per_worker = decisions.parallel_join_min_rows_per_worker;
 }
 
 fn appendCheckpointTrace(

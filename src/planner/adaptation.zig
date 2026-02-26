@@ -8,6 +8,18 @@ pub const AdaptationResult = struct {
     reason: types.ReasonCode = .none,
 };
 
+fn parallelAdmissionReason(
+    decisions: *const types.PhysicalDecisionSet,
+    row_count: u64,
+    min_rows_per_worker: u16,
+) types.ReasonCode {
+    if (decisions.parallel_mode != .enabled) return .PARALLEL_STAGE_NOT_ADMITTED_MODE_DISABLED;
+    if (decisions.parallel_worker_budget < 2) return .PARALLEL_STAGE_NOT_ADMITTED_WORKER_BUDGET;
+    const threshold = @as(u64, @max(@as(u16, 1), min_rows_per_worker));
+    if (row_count < threshold * 2) return .PARALLEL_STAGE_NOT_ADMITTED_ROW_THRESHOLD;
+    return .PARALLEL_STAGE_ADMITTED_THRESHOLD_MET;
+}
+
 fn wouldExceedJoinBuildBudget(
     snapshot: *const types.PlannerInputSnapshot,
     counters: *const types.CheckpointCounters,
@@ -74,6 +86,38 @@ pub fn adaptAtCheckpoint(
         }
     }
 
+    const rowflow = counters.rows_after_filter;
+    decisions.parallel_filter_admission_reason = parallelAdmissionReason(
+        decisions,
+        rowflow,
+        decisions.parallel_filter_min_rows_per_worker,
+    );
+    decisions.parallel_group_admission_reason = parallelAdmissionReason(
+        decisions,
+        rowflow,
+        decisions.parallel_group_min_rows_per_worker,
+    );
+    decisions.parallel_sort_admission_reason = parallelAdmissionReason(
+        decisions,
+        rowflow,
+        decisions.parallel_sort_min_rows_per_worker,
+    );
+    decisions.parallel_projection_admission_reason = parallelAdmissionReason(
+        decisions,
+        rowflow,
+        decisions.parallel_projection_min_rows_per_worker,
+    );
+    decisions.parallel_offset_admission_reason = parallelAdmissionReason(
+        decisions,
+        rowflow,
+        decisions.parallel_offset_min_rows_per_worker,
+    );
+    decisions.parallel_join_admission_reason = parallelAdmissionReason(
+        decisions,
+        counters.join_probe_rows,
+        decisions.parallel_join_min_rows_per_worker,
+    );
+
     return result;
 }
 
@@ -130,4 +174,47 @@ test "degrade-only monotonicity never upgrades sort back to in-memory" {
     const low_counters: types.CheckpointCounters = .{ .bytes_accumulated = 1 };
     _ = try adaptAtCheckpoint(&snapshot, .pre_join, &low_counters, &decisions);
     try std.testing.expectEqual(types.SortStrategy.external_merge, decisions.sort_strategy);
+}
+
+test "checkpoint updates stage admission reasons from row thresholds deterministically" {
+    var snapshot: types.PlannerInputSnapshot = .{
+        .query_shape_fingerprint = 7,
+        .catalog_snapshot_id = 8,
+        .runtime_counters_snapshot_id = 9,
+        .capacity_profile_id = 10,
+        .work_memory_bytes_per_slot = 4096,
+        .aggregate_groups_cap = 64,
+        .join_build_budget_bytes = 4096,
+        .average_row_width_bytes = 32,
+        .max_query_slots = 8,
+        .feature_gate_mask = types.feature_gate_parallel_policy,
+    };
+    var decisions = try @import("planner.zig").planInitial(&snapshot);
+    const counters_low: types.CheckpointCounters = .{
+        .rows_after_filter = 1,
+        .join_probe_rows = 1,
+    };
+    _ = try adaptAtCheckpoint(&snapshot, .post_filter, &counters_low, &decisions);
+    try std.testing.expectEqual(
+        types.ReasonCode.PARALLEL_STAGE_NOT_ADMITTED_ROW_THRESHOLD,
+        decisions.parallel_group_admission_reason,
+    );
+    try std.testing.expectEqual(
+        types.ReasonCode.PARALLEL_STAGE_NOT_ADMITTED_ROW_THRESHOLD,
+        decisions.parallel_join_admission_reason,
+    );
+
+    const counters_high: types.CheckpointCounters = .{
+        .rows_after_filter = 256,
+        .join_probe_rows = 256,
+    };
+    _ = try adaptAtCheckpoint(&snapshot, .pre_join, &counters_high, &decisions);
+    try std.testing.expectEqual(
+        types.ReasonCode.PARALLEL_STAGE_ADMITTED_THRESHOLD_MET,
+        decisions.parallel_group_admission_reason,
+    );
+    try std.testing.expectEqual(
+        types.ReasonCode.PARALLEL_STAGE_ADMITTED_THRESHOLD_MET,
+        decisions.parallel_join_admission_reason,
+    );
 }

@@ -485,7 +485,7 @@ fn serializeInspectStats(
         }
     }
     writer.print(
-        " join_strategy={s} join_order={s} materialization={s} sort_strategy={s} group_strategy={s} streaming_mode={s} parallel_mode={s} parallel_worker_budget={d} parallel_scheduler_path={s} parallel_schedule_task_count={d} parallel_schedule_applied_tasks={d} parallel_schedule_fingerprint={x} nested_relations={d} nested_join_nested_loop={d} nested_join_hash_in_memory={d} nested_join_hash_spill={d} planner_policy_version={d} planner_snapshot_fingerprint={x} planner_decision_fingerprint={x} join_reason={s} materialization_reason={s} sort_reason={s} group_reason={s} streaming_reason={s} parallel_reason={s}\n",
+        " join_strategy={s} join_order={s} materialization={s} sort_strategy={s} group_strategy={s} streaming_mode={s} parallel_mode={s} parallel_worker_budget={d} parallel_filter_min_rows_per_worker={d} parallel_group_min_rows_per_worker={d} parallel_sort_min_rows_per_worker={d} parallel_projection_min_rows_per_worker={d} parallel_offset_min_rows_per_worker={d} parallel_join_min_rows_per_worker={d} parallel_scheduler_path={s} parallel_schedule_task_count={d} parallel_schedule_applied_tasks={d} parallel_schedule_fingerprint={x} nested_relations={d} nested_join_nested_loop={d} nested_join_hash_in_memory={d} nested_join_hash_spill={d} planner_policy_version={d} planner_snapshot_fingerprint={x} planner_decision_fingerprint={x}",
         .{
             @tagName(exec_stats.plan.join_strategy),
             @tagName(exec_stats.plan.join_order),
@@ -495,6 +495,12 @@ fn serializeInspectStats(
             @tagName(exec_stats.plan.streaming_mode),
             @tagName(exec_stats.plan.parallel_mode),
             exec_stats.plan.parallel_worker_budget,
+            exec_stats.plan.parallel_filter_min_rows_per_worker,
+            exec_stats.plan.parallel_group_min_rows_per_worker,
+            exec_stats.plan.parallel_sort_min_rows_per_worker,
+            exec_stats.plan.parallel_projection_min_rows_per_worker,
+            exec_stats.plan.parallel_offset_min_rows_per_worker,
+            exec_stats.plan.parallel_join_min_rows_per_worker,
             @tagName(exec_stats.plan.parallel_scheduler_path),
             exec_stats.plan.parallel_schedule_task_count,
             exec_stats.plan.parallel_schedule_applied_tasks,
@@ -506,12 +512,23 @@ fn serializeInspectStats(
             exec_stats.plan.planner_policy_version,
             exec_stats.plan.planner_snapshot_fingerprint,
             exec_stats.plan.planner_decision_fingerprint,
+        },
+    ) catch return error.ResponseTooLarge;
+    writer.print(
+        " join_reason={s} materialization_reason={s} sort_reason={s} group_reason={s} streaming_reason={s} parallel_reason={s} parallel_filter_admission_reason={s} parallel_group_admission_reason={s} parallel_sort_admission_reason={s} parallel_projection_admission_reason={s} parallel_offset_admission_reason={s} parallel_join_admission_reason={s}\n",
+        .{
             @tagName(exec_stats.plan.join_reason),
             @tagName(exec_stats.plan.materialization_reason),
             @tagName(exec_stats.plan.sort_reason),
             @tagName(exec_stats.plan.group_reason),
             @tagName(exec_stats.plan.streaming_reason),
             @tagName(exec_stats.plan.parallel_reason),
+            @tagName(exec_stats.plan.parallel_filter_admission_reason),
+            @tagName(exec_stats.plan.parallel_group_admission_reason),
+            @tagName(exec_stats.plan.parallel_sort_admission_reason),
+            @tagName(exec_stats.plan.parallel_projection_admission_reason),
+            @tagName(exec_stats.plan.parallel_offset_admission_reason),
+            @tagName(exec_stats.plan.parallel_join_admission_reason),
         },
     ) catch return error.ResponseTooLarge;
     writer.print(
@@ -533,6 +550,17 @@ fn serializeInspectStats(
             parallelModeExplain(exec_stats.plan.parallel_mode),
             parallelSchedulerExplain(exec_stats.plan.parallel_scheduler_path),
             parallelReasonExplain(exec_stats.plan.parallel_reason),
+        },
+    ) catch return error.ResponseTooLarge;
+    writer.print(
+        "INSPECT explain_parallel_admission filter={s} group={s} sort={s} projection={s} offset={s} join={s}\n",
+        .{
+            parallelReasonExplain(exec_stats.plan.parallel_filter_admission_reason),
+            parallelReasonExplain(exec_stats.plan.parallel_group_admission_reason),
+            parallelReasonExplain(exec_stats.plan.parallel_sort_admission_reason),
+            parallelReasonExplain(exec_stats.plan.parallel_projection_admission_reason),
+            parallelReasonExplain(exec_stats.plan.parallel_offset_admission_reason),
+            parallelReasonExplain(exec_stats.plan.parallel_join_admission_reason),
         },
     ) catch return error.ResponseTooLarge;
     var checkpoint_index: u8 = 0;
@@ -640,6 +668,10 @@ fn parallelReasonExplain(reason: planner_types.ReasonCode) []const u8 {
         .PARALLEL_DISABLED_INSUFFICIENT_QUERY_SLOTS => "parallel disabled due to insufficient query slots",
         .PARALLEL_ENABLED_QUERY_SLOT_BUDGETED => "parallel enabled with query-slot worker budget",
         .PARALLEL_DEGRADED_LOW_ROWFLOW => "parallel degraded at checkpoint due to low rowflow",
+        .PARALLEL_STAGE_ADMITTED_THRESHOLD_MET => "stage parallel admission passed row threshold",
+        .PARALLEL_STAGE_NOT_ADMITTED_MODE_DISABLED => "stage parallel admission disabled by mode",
+        .PARALLEL_STAGE_NOT_ADMITTED_WORKER_BUDGET => "stage parallel admission disabled by worker budget",
+        .PARALLEL_STAGE_NOT_ADMITTED_ROW_THRESHOLD => "stage parallel admission below row threshold",
         else => "parallel reason not classified",
     };
 }
@@ -706,6 +738,20 @@ test "serializeInspectStats keeps parallel scheduler inspect and explain contrac
             u8,
             output,
             "parallel_reason=not_set",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "parallel_projection_min_rows_per_worker=8",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
+            "INSPECT explain_parallel_admission",
         ) != null,
     );
 }

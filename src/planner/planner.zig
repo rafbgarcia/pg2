@@ -22,6 +22,24 @@ pub fn planInitial(snapshot: *const types.PlannerInputSnapshot) !types.PhysicalD
         decisions.parallel_worker_budget = @intCast(budget);
         decisions.parallel_reason = .PARALLEL_ENABLED_QUERY_SLOT_BUDGETED;
     }
+    decisions.parallel_filter_min_rows_per_worker = 1;
+    decisions.parallel_group_min_rows_per_worker = 32;
+    decisions.parallel_sort_min_rows_per_worker = 32;
+    decisions.parallel_projection_min_rows_per_worker = 8;
+    decisions.parallel_offset_min_rows_per_worker = 32;
+    decisions.parallel_join_min_rows_per_worker = 16;
+    const base_admission_reason: types.ReasonCode = if (decisions.parallel_mode != .enabled)
+        .PARALLEL_STAGE_NOT_ADMITTED_MODE_DISABLED
+    else if (decisions.parallel_worker_budget < 2)
+        .PARALLEL_STAGE_NOT_ADMITTED_WORKER_BUDGET
+    else
+        .PARALLEL_STAGE_ADMITTED_THRESHOLD_MET;
+    decisions.parallel_filter_admission_reason = base_admission_reason;
+    decisions.parallel_group_admission_reason = base_admission_reason;
+    decisions.parallel_sort_admission_reason = base_admission_reason;
+    decisions.parallel_projection_admission_reason = base_admission_reason;
+    decisions.parallel_offset_admission_reason = base_admission_reason;
+    decisions.parallel_join_admission_reason = base_admission_reason;
 
     const has_join = snapshot.relation_ids_sorted[1] != 0;
     if (has_join) {

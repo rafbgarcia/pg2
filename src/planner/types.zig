@@ -7,7 +7,7 @@
 const std = @import("std");
 
 pub const snapshot_schema_version_current: u16 = 2;
-pub const policy_version_current: u16 = 2;
+pub const policy_version_current: u16 = 3;
 pub const max_operator_sequence: usize = 32;
 pub const max_relations: usize = 16;
 pub const feature_gate_parallel_policy: u64 = 1 << 0;
@@ -101,6 +101,10 @@ pub const ReasonCode = enum(u16) {
     PARALLEL_DISABLED_INSUFFICIENT_QUERY_SLOTS,
     PARALLEL_ENABLED_QUERY_SLOT_BUDGETED,
     PARALLEL_DEGRADED_LOW_ROWFLOW,
+    PARALLEL_STAGE_ADMITTED_THRESHOLD_MET,
+    PARALLEL_STAGE_NOT_ADMITTED_MODE_DISABLED,
+    PARALLEL_STAGE_NOT_ADMITTED_WORKER_BUDGET,
+    PARALLEL_STAGE_NOT_ADMITTED_ROW_THRESHOLD,
     DEGRADE_MONOTONIC_GUARD,
 };
 
@@ -157,6 +161,12 @@ pub const PhysicalDecisionSet = extern struct {
     streaming_mode: StreamingMode = .disabled,
     parallel_mode: ParallelMode = .sequential,
     parallel_worker_budget: u8 = 1,
+    parallel_filter_min_rows_per_worker: u16 = 1,
+    parallel_group_min_rows_per_worker: u16 = 32,
+    parallel_sort_min_rows_per_worker: u16 = 32,
+    parallel_projection_min_rows_per_worker: u16 = 8,
+    parallel_offset_min_rows_per_worker: u16 = 32,
+    parallel_join_min_rows_per_worker: u16 = 16,
 
     join_reason: ReasonCode = .none,
     materialization_reason: ReasonCode = .none,
@@ -164,6 +174,12 @@ pub const PhysicalDecisionSet = extern struct {
     group_reason: ReasonCode = .none,
     streaming_reason: ReasonCode = .none,
     parallel_reason: ReasonCode = .none,
+    parallel_filter_admission_reason: ReasonCode = .none,
+    parallel_group_admission_reason: ReasonCode = .none,
+    parallel_sort_admission_reason: ReasonCode = .none,
+    parallel_projection_admission_reason: ReasonCode = .none,
+    parallel_offset_admission_reason: ReasonCode = .none,
+    parallel_join_admission_reason: ReasonCode = .none,
 };
 
 pub const CheckpointCounters = extern struct {

@@ -13,7 +13,6 @@ const compareValues = row_mod.compareValues;
 const ResultRow = scan_mod.ResultRow;
 const QueryResult = @import("executor.zig").QueryResult;
 const max_parallel_join_workers: usize = 8;
-const parallel_join_min_left_rows_per_worker: usize = 16;
 
 pub const JoinDescriptor = struct {
     left_key_index: u16,
@@ -29,6 +28,7 @@ pub fn executeLeftJoinHashFlat(
     caps: *const capacity_mod.OperatorCapacities,
     parallel_enabled: bool,
     parallel_worker_budget: u8,
+    parallel_min_rows_per_worker: u16,
 ) bool {
     result.row_count = 0;
     if (parallel_enabled) {
@@ -40,6 +40,7 @@ pub fn executeLeftJoinHashFlat(
             right_column_count,
             caps,
             parallel_worker_budget,
+            parallel_min_rows_per_worker,
         )) {
             .applied => {
                 result.stats.plan.parallel_schedule_applied_tasks =
@@ -224,8 +225,10 @@ fn tryExecuteLeftJoinHashFlatParallel(
     right_column_count: u16,
     caps: *const capacity_mod.OperatorCapacities,
     parallel_worker_budget: u8,
+    parallel_min_rows_per_worker: u16,
 ) JoinParallelOutcome {
-    if (left_rows.len < parallel_join_min_left_rows_per_worker * 2) return .not_applied;
+    const min_rows_per_worker = @as(usize, @max(@as(u16, 1), parallel_min_rows_per_worker));
+    if (left_rows.len < min_rows_per_worker * 2) return .not_applied;
     if (parallel_worker_budget < 2) return .not_applied;
     if (left_rows.len > scan_mod.scan_batch_size) return .failed;
 
@@ -250,7 +253,7 @@ fn tryExecuteLeftJoinHashFlatParallel(
 
     const budget_cap = @min(@as(usize, parallel_worker_budget), max_parallel_join_workers);
     const max_workers = @min(budget_cap, left_rows.len);
-    var worker_count = @min(max_workers, left_rows.len / parallel_join_min_left_rows_per_worker);
+    var worker_count = @min(max_workers, left_rows.len / min_rows_per_worker);
     if (worker_count < 2) return .not_applied;
     if (worker_count > max_parallel_join_workers) worker_count = max_parallel_join_workers;
 
@@ -594,6 +597,7 @@ test "hash left join preserves deterministic left-major order" {
         &caps,
         false,
         1,
+        16,
     );
 
     try testing.expect(ok);
@@ -631,6 +635,7 @@ test "hash left join emits null-extended row for unmatched key" {
         &caps,
         false,
         1,
+        16,
     );
 
     try testing.expect(ok);

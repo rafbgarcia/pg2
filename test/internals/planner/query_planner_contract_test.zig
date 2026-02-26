@@ -67,3 +67,31 @@ test "missing required snapshot fields fail closed with deterministic codes" {
         planner_mod.planInitial(&missing_catalog),
     );
 }
+
+test "parallel stage threshold contracts are deterministic and fingerprinted" {
+    const snapshot: types.PlannerInputSnapshot = .{
+        .query_shape_fingerprint = 0xAA55,
+        .catalog_snapshot_id = 10,
+        .runtime_counters_snapshot_id = 11,
+        .capacity_profile_id = 12,
+        .work_memory_bytes_per_slot = 1024,
+        .aggregate_groups_cap = 256,
+        .join_build_budget_bytes = 4096,
+        .average_row_width_bytes = 32,
+        .max_query_slots = 8,
+        .feature_gate_mask = types.feature_gate_parallel_policy,
+    };
+
+    const decisions_a = try planner_mod.planInitial(&snapshot);
+    const decisions_b = try planner_mod.planInitial(&snapshot);
+    try std.testing.expectEqual(decisions_a.parallel_filter_min_rows_per_worker, decisions_b.parallel_filter_min_rows_per_worker);
+    try std.testing.expectEqual(decisions_a.parallel_group_min_rows_per_worker, decisions_b.parallel_group_min_rows_per_worker);
+    try std.testing.expectEqual(decisions_a.parallel_sort_min_rows_per_worker, decisions_b.parallel_sort_min_rows_per_worker);
+    try std.testing.expectEqual(decisions_a.parallel_projection_min_rows_per_worker, decisions_b.parallel_projection_min_rows_per_worker);
+    try std.testing.expectEqual(decisions_a.parallel_offset_min_rows_per_worker, decisions_b.parallel_offset_min_rows_per_worker);
+    try std.testing.expectEqual(decisions_a.parallel_join_min_rows_per_worker, decisions_b.parallel_join_min_rows_per_worker);
+    try std.testing.expectEqual(
+        fingerprint_mod.decisionFingerprint(&decisions_a),
+        fingerprint_mod.decisionFingerprint(&decisions_b),
+    );
+}

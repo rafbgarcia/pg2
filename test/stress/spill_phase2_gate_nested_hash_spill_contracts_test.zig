@@ -29,7 +29,7 @@ test "mixed root spill and nested hash spill is deterministic under tight temp b
     const run1 = try runMixedRootAndNestedHashSpillScenario(&run1_buf);
     const run2 = try runMixedRootAndNestedHashSpillScenario(&run2_buf);
     try std.testing.expectEqualStrings(run1, run2);
-    try std.testing.expect(std.mem.indexOf(u8, run1, "planner_policy_version=2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, run1, "planner_policy_version=3") != null);
     try std.testing.expect(std.mem.indexOf(u8, run1, "planner_snapshot_fingerprint=") != null);
     try std.testing.expect(std.mem.indexOf(u8, run1, "planner_decision_fingerprint=") != null);
     try std.testing.expect(std.mem.indexOf(u8, run1, "INSPECT checkpoint name=pre_scan ") != null);

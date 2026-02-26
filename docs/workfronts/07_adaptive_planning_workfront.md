@@ -41,6 +41,10 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 - ✅ Fail-closed serial fallback on worker spawn failure for all true-parallel stages above
 - ✅ Semantic equivalence coverage (sequential vs parallel-enabled) for all true-parallel stages above
 - ✅ Full gate passing (`zig build test-all --summary all`)
+- ✅ Stage-level row-threshold parallel admission moved into planner/checkpoint contracts:
+  - planner-owned `parallel_*_min_rows_per_worker` fields
+  - planner-owned per-stage `parallel_*_admission_reason` reason codes
+  - executor stage modules consume planner-provided threshold contracts (no stage-local threshold constants)
 - 🟡 Remaining to complete WF07:
   - extend true scheduled parallel execution beyond current stage set
   - finalize Phase 3/4/5/6 completion gates end-to-end and lock completion status
@@ -117,9 +121,8 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - parallel-mode zero-row coverage added to lock `parallel_schedule_applied_tasks=0` when no rows are processed
   - server serialization contract test added to lock inspect/explain scheduler output for `scheduled_parallel`
 - Verification:
-  - `zig build test-all --summary all` passing after planner-budgeted worker admission + nested hash-join scheduled-parallel extension (`930/932` passed, `2` skipped)
+  - `zig build test-all --summary all` passing after planner-owned stage admission-threshold contract migration (`932/934` passed, `2` skipped)
 - Remaining:
-  - close remaining hidden stage-level parallel admission thresholds into explicit planner/checkpoint contract fields/reasons (current worker-budget + reason ownership is planner-owned; per-stage minimum-row admission thresholds still reside in executor stage modules)
   - finalize Phase 3/4/5/6 completion status lock once threshold-contract migration above is complete
 
 ## Fresh Session Handoff Snapshot (2026-02-26)
@@ -217,7 +220,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Immediate Next Step (single-threaded priority)
 
-1. Complete planner/checkpoint ownership of stage-level parallel admission thresholds/reasons so no hidden parallel policy branches remain outside planner/checkpoint contracts.
+1. Finalize Phase 3/4/5/6 completion status lock now that planner/checkpoint owns stage-level parallel admission thresholds/reasons.
 2. Extend planner-parallel true execution coverage beyond current stages while preserving:
    - deterministic schedule traces for fixed seeds
    - semantic equivalence with sequential mode

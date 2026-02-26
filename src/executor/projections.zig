@@ -22,7 +22,6 @@ const evalContextForExec = @import("executor.zig").evalContextForExec;
 const setError = @import("executor.zig").setError;
 const max_parallel_projection_workers: usize = 8;
 const max_parallel_worker_cap: usize = 8;
-const parallel_projection_min_rows_per_worker: usize = 8;
 const parallel_projection_worker_arena_bytes: usize = filter_mod.max_string_result_bytes * 2;
 
 pub const ProjectionKind = enum {
@@ -43,6 +42,7 @@ pub fn applyFlatColumnProjection(
     model_id: ModelId,
     string_arena: *scan_mod.StringArena,
     parallel_enabled: bool,
+    parallel_min_rows_per_worker: u16,
 ) bool {
     const selection = getPipelineSelection(ctx.ast, pipeline_node) orelse
         return true;
@@ -157,6 +157,7 @@ pub fn applyFlatColumnProjection(
             projection_descriptors[0..projection_count],
             projection_count,
             source_schema,
+            parallel_min_rows_per_worker,
         ))
     {
         result.stats.plan.parallel_schedule_applied_tasks =
@@ -277,9 +278,11 @@ fn tryApplyFlatProjectionParallel(
     descriptors: []const ProjectionDescriptor,
     projection_count: u16,
     source_schema: *const RowSchema,
+    parallel_min_rows_per_worker: u16,
 ) bool {
     const row_count_usize: usize = result.row_count;
-    if (row_count_usize < parallel_projection_min_rows_per_worker * 2) return false;
+    const min_rows_per_worker = @as(usize, @max(@as(u16, 1), parallel_min_rows_per_worker));
+    if (row_count_usize < min_rows_per_worker * 2) return false;
 
     const configured_cap = @max(
         @as(usize, 1),
@@ -292,7 +295,7 @@ fn tryApplyFlatProjectionParallel(
     const max_workers = @min(stage_cap, row_count_usize);
     var worker_count = @min(
         max_workers,
-        row_count_usize / parallel_projection_min_rows_per_worker,
+        row_count_usize / min_rows_per_worker,
     );
     if (worker_count < 2) return false;
     if (worker_count > max_parallel_projection_workers) worker_count = max_parallel_projection_workers;
