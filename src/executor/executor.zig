@@ -2126,43 +2126,24 @@ fn applyPerChunkOperators(
 ) void {
     var group_runtime = GroupRuntime{};
     const schema = &ctx.catalog.models[model_id].row_schema;
-    var used_parallel_filter = false;
     var i: u16 = 0;
     while (i < op_count) : (i += 1) {
         const op = ops[i];
         switch (op.kind) {
-            .where_filter => {
-                if (result.stats.plan.parallel_scheduler_path == .scheduled_parallel and
-                    !group_runtime.active and
-                    tryApplyWhereFilterParallel(
-                        ctx,
-                        result,
-                        op.node,
-                        schema,
-                    ))
-                {
-                    used_parallel_filter = true;
-                } else {
-                    applyWhereFilter(
-                        ctx,
-                        result,
-                        op.node,
-                        schema,
-                        &group_runtime,
-                        string_arena,
-                    );
-                }
-            },
+            .where_filter => applyWhereFilter(
+                ctx,
+                result,
+                op.node,
+                schema,
+                &group_runtime,
+                string_arena,
+            ),
             else => {},
         }
     }
-    if (used_parallel_filter) {
-        result.stats.plan.parallel_schedule_applied_tasks =
-            result.stats.plan.parallel_schedule_task_count;
-    }
 }
 
-const ParallelWhereError = enum(u8) {
+const ParallelPredicateError = enum(u8) {
     none = 0,
     undefined_parameter,
     clock_unavailable,
@@ -2173,18 +2154,19 @@ const ParallelWhereError = enum(u8) {
     variable_storage_read,
 };
 
-const ParallelWhereWorker = struct {
+const ParallelPredicateWorker = struct {
     ctx: *const ExecContext,
     result: *QueryResult,
     predicate: NodeIndex,
     schema: *const RowSchema,
+    group_runtime: *const GroupRuntime,
     start_idx: u16,
     end_idx: u16,
     match_flags: *[scan_mod.scan_batch_size]u8,
     first_error_index: u16 = std.math.maxInt(u16),
-    first_error_code: ParallelWhereError = .none,
+    first_error_code: ParallelPredicateError = .none,
 
-    fn run(self: *ParallelWhereWorker) void {
+    fn run(self: *ParallelPredicateWorker) void {
         var arena_buf: [parallel_filter_worker_arena_bytes]u8 = undefined;
         var arena = scan_mod.StringArena.init(&arena_buf);
         var exec_eval = evalContextForExec(self.ctx, &arena);
@@ -2194,59 +2176,107 @@ const ParallelWhereWorker = struct {
         while (read_idx < self.end_idx) : (read_idx += 1) {
             arena.reset();
             const row = &self.result.rows[read_idx];
-            const matches = filter_mod.evaluatePredicateFull(
-                self.ctx.ast,
-                self.ctx.tokens,
-                self.ctx.source,
-                self.predicate,
-                row.values[0..row.column_count],
-                self.schema,
-                null,
-                &exec_eval.eval_ctx,
-            ) catch |err| switch (err) {
-                error.UndefinedParameter => {
-                    self.first_error_index = read_idx;
-                    self.first_error_code = .undefined_parameter;
-                    return;
-                },
-                error.ClockUnavailable => {
-                    self.first_error_index = read_idx;
-                    self.first_error_code = .clock_unavailable;
-                    return;
-                },
-                error.TypeMismatch => {
-                    self.first_error_index = read_idx;
-                    self.first_error_code = .type_mismatch;
-                    return;
-                },
-                error.UndefinedVariable => {
-                    self.first_error_index = read_idx;
-                    self.first_error_code = .undefined_variable;
-                    return;
-                },
-                error.AmbiguousIdentifier => {
-                    self.first_error_index = read_idx;
-                    self.first_error_code = .ambiguous_identifier;
-                    return;
-                },
-                error.VariableTypeMismatch => {
-                    self.first_error_index = read_idx;
-                    self.first_error_code = .variable_type_mismatch;
-                    return;
-                },
-                error.VariableStorageRead => {
-                    self.first_error_index = read_idx;
-                    self.first_error_code = .variable_storage_read;
-                    return;
-                },
-                else => false,
-            };
+            const matches = if (self.group_runtime.active)
+                aggregation_mod.evaluateGroupedPredicate(
+                    self.ctx,
+                    self.group_runtime,
+                    self.predicate,
+                    row.values[0..row.column_count],
+                    self.schema,
+                    read_idx,
+                    &exec_eval.eval_ctx,
+                ) catch |err| switch (err) {
+                    error.UndefinedParameter => {
+                        self.first_error_index = read_idx;
+                        self.first_error_code = .undefined_parameter;
+                        return;
+                    },
+                    error.ClockUnavailable => {
+                        self.first_error_index = read_idx;
+                        self.first_error_code = .clock_unavailable;
+                        return;
+                    },
+                    error.TypeMismatch => {
+                        self.first_error_index = read_idx;
+                        self.first_error_code = .type_mismatch;
+                        return;
+                    },
+                    error.UndefinedVariable => {
+                        self.first_error_index = read_idx;
+                        self.first_error_code = .undefined_variable;
+                        return;
+                    },
+                    error.AmbiguousIdentifier => {
+                        self.first_error_index = read_idx;
+                        self.first_error_code = .ambiguous_identifier;
+                        return;
+                    },
+                    error.VariableTypeMismatch => {
+                        self.first_error_index = read_idx;
+                        self.first_error_code = .variable_type_mismatch;
+                        return;
+                    },
+                    error.VariableStorageRead => {
+                        self.first_error_index = read_idx;
+                        self.first_error_code = .variable_storage_read;
+                        return;
+                    },
+                    else => false,
+                }
+            else
+                filter_mod.evaluatePredicateFull(
+                    self.ctx.ast,
+                    self.ctx.tokens,
+                    self.ctx.source,
+                    self.predicate,
+                    row.values[0..row.column_count],
+                    self.schema,
+                    null,
+                    &exec_eval.eval_ctx,
+                ) catch |err| switch (err) {
+                    error.UndefinedParameter => {
+                        self.first_error_index = read_idx;
+                        self.first_error_code = .undefined_parameter;
+                        return;
+                    },
+                    error.ClockUnavailable => {
+                        self.first_error_index = read_idx;
+                        self.first_error_code = .clock_unavailable;
+                        return;
+                    },
+                    error.TypeMismatch => {
+                        self.first_error_index = read_idx;
+                        self.first_error_code = .type_mismatch;
+                        return;
+                    },
+                    error.UndefinedVariable => {
+                        self.first_error_index = read_idx;
+                        self.first_error_code = .undefined_variable;
+                        return;
+                    },
+                    error.AmbiguousIdentifier => {
+                        self.first_error_index = read_idx;
+                        self.first_error_code = .ambiguous_identifier;
+                        return;
+                    },
+                    error.VariableTypeMismatch => {
+                        self.first_error_index = read_idx;
+                        self.first_error_code = .variable_type_mismatch;
+                        return;
+                    },
+                    error.VariableStorageRead => {
+                        self.first_error_index = read_idx;
+                        self.first_error_code = .variable_storage_read;
+                        return;
+                    },
+                    else => false,
+                };
             self.match_flags[read_idx] = if (matches) 1 else 0;
         }
     }
 };
 
-fn setParallelPredicateError(result: *QueryResult, scope: []const u8, err: ParallelWhereError) void {
+fn setParallelPredicateError(result: *QueryResult, scope: []const u8, err: ParallelPredicateError) void {
     switch (err) {
         .none => {},
         .undefined_parameter => setPredicateUndefinedParameterError(result, scope),
@@ -2259,16 +2289,16 @@ fn setParallelPredicateError(result: *QueryResult, scope: []const u8, err: Paral
     }
 }
 
-fn tryApplyWhereFilterParallel(
+fn tryApplyPredicateFilterParallel(
     ctx: *const ExecContext,
     result: *QueryResult,
-    where_node: NodeIndex,
+    predicate_node: NodeIndex,
     schema: *const RowSchema,
+    group_runtime: *GroupRuntime,
+    predicate_scope: []const u8,
 ) bool {
-    const node = ctx.ast.getNode(where_node);
-    if (node.tag == .op_having) return false;
-    const predicate = node.data.unary;
-    if (predicate == null_node) return true;
+    const predicate = ctx.ast.getNode(predicate_node).data.unary;
+    if (predicate == null_node) return false;
 
     const row_count_usize: usize = result.row_count;
     if (row_count_usize < 2) return false;
@@ -2279,7 +2309,7 @@ fn tryApplyWhereFilterParallel(
     if (worker_count > max_parallel_filter_workers) worker_count = max_parallel_filter_workers;
 
     var match_flags: [scan_mod.scan_batch_size]u8 = [_]u8{0} ** scan_mod.scan_batch_size;
-    var workers: [max_parallel_filter_workers]ParallelWhereWorker = undefined;
+    var workers: [max_parallel_filter_workers]ParallelPredicateWorker = undefined;
     var threads: [max_parallel_filter_workers - 1]?std.Thread =
         [_]?std.Thread{null} ** (max_parallel_filter_workers - 1);
     var spawned: usize = 0;
@@ -2296,6 +2326,7 @@ fn tryApplyWhereFilterParallel(
             .result = result,
             .predicate = predicate,
             .schema = schema,
+            .group_runtime = group_runtime,
             .start_idx = @intCast(start_idx),
             .end_idx = @intCast(end_idx),
             .match_flags = &match_flags,
@@ -2305,7 +2336,7 @@ fn tryApplyWhereFilterParallel(
 
     worker_idx = 1;
     while (worker_idx < worker_count) : (worker_idx += 1) {
-        threads[spawned] = std.Thread.spawn(.{}, ParallelWhereWorker.run, .{&workers[worker_idx]}) catch {
+        threads[spawned] = std.Thread.spawn(.{}, ParallelPredicateWorker.run, .{&workers[worker_idx]}) catch {
             var join_idx: usize = 0;
             while (join_idx < spawned) : (join_idx += 1) {
                 threads[join_idx].?.join();
@@ -2323,7 +2354,7 @@ fn tryApplyWhereFilterParallel(
     }
 
     var first_error_index: u16 = std.math.maxInt(u16);
-    var first_error_code: ParallelWhereError = .none;
+    var first_error_code: ParallelPredicateError = .none;
     worker_idx = 0;
     while (worker_idx < worker_count) : (worker_idx += 1) {
         if (workers[worker_idx].first_error_code == .none) continue;
@@ -2333,7 +2364,7 @@ fn tryApplyWhereFilterParallel(
         }
     }
     if (first_error_code != .none) {
-        setParallelPredicateError(result, "where", first_error_code);
+        setParallelPredicateError(result, predicate_scope, first_error_code);
         return true;
     }
 
@@ -2344,6 +2375,10 @@ fn tryApplyWhereFilterParallel(
         if (match_flags[read_idx] == 0) continue;
         if (write_idx != read_idx) {
             result.rows[write_idx] = result.rows[read_idx];
+            if (group_runtime.active) {
+                group_runtime.group_counts[write_idx] =
+                    group_runtime.group_counts[read_idx];
+            }
         }
         write_idx += 1;
     }
@@ -5313,6 +5348,20 @@ fn applyWhereFilter(
     };
     const predicate = node.data.unary;
     if (predicate == null_node) return;
+    if (result.stats.plan.parallel_scheduler_path == .scheduled_parallel and
+        tryApplyPredicateFilterParallel(
+            ctx,
+            result,
+            where_node,
+            schema,
+            group_runtime,
+            predicate_scope,
+        ))
+    {
+        result.stats.plan.parallel_schedule_applied_tasks =
+            result.stats.plan.parallel_schedule_task_count;
+        return;
+    }
 
     const original_count = result.row_count;
     var exec_eval = evalContextForExec(ctx, string_arena);
@@ -7327,6 +7376,105 @@ test "execute returns equivalent rows for large flat projection with planner par
     try testing.expectEqual(
         ParallelSchedulerPath.scheduled_parallel,
         result_par.stats.plan.parallel_scheduler_path,
+    );
+
+    try expectResultRowsEqual(&result_seq, &result_par);
+}
+
+test "execute parallel mode applies scheduled tasks for grouped having filter" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    var id: u32 = 1;
+    while (id <= 16) : (id += 1) {
+        var insert_buf: [128]u8 = undefined;
+        const src_insert = try std.fmt.bufPrint(
+            insert_buf[0..],
+            "User |> insert(id = {d}, name = \"H{d}\", active = true)",
+            .{ id, id },
+        );
+        const tok_insert = tokenizer_mod.tokenize(src_insert);
+        const p_insert = parser_mod.parse(&tok_insert, src_insert);
+        try testing.expect(!p_insert.has_error);
+        var r_insert = try execute(&env.makeCtx(tx, &snap, &p_insert.ast, &tok_insert, src_insert));
+        defer r_insert.deinit();
+        try testing.expect(!r_insert.has_error);
+    }
+
+    const src = "User |> group(id) |> having(id > 0) |> inspect";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(ParallelMode.enabled, result.stats.plan.parallel_mode);
+    try testing.expectEqual(
+        ParallelSchedulerPath.scheduled_parallel,
+        result.stats.plan.parallel_scheduler_path,
+    );
+    try testing.expect(result.stats.plan.parallel_schedule_task_count > 0);
+    try testing.expectEqual(
+        result.stats.plan.parallel_schedule_task_count,
+        result.stats.plan.parallel_schedule_applied_tasks,
+    );
+}
+
+test "execute returns equivalent grouped having rows with planner parallel mode on and off" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    var id: u32 = 1;
+    while (id <= 64) : (id += 1) {
+        const active = if (id % 3 == 0) "true" else "false";
+        var insert_buf: [160]u8 = undefined;
+        const src_insert = try std.fmt.bufPrint(
+            insert_buf[0..],
+            "User |> insert(id = {d}, name = \"G{d}\", active = {s})",
+            .{ id, id, active },
+        );
+        const tok_insert = tokenizer_mod.tokenize(src_insert);
+        const p_insert = parser_mod.parse(&tok_insert, src_insert);
+        try testing.expect(!p_insert.has_error);
+        var r_insert = try execute(&env.makeCtx(tx, &snap, &p_insert.ast, &tok_insert, src_insert));
+        defer r_insert.deinit();
+        try testing.expect(!r_insert.has_error);
+    }
+
+    const src = "User |> group(active) |> having(active == false) |> sort(active asc) { active }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+
+    env.planner_feature_gate_mask = 0;
+    var result_seq = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result_seq.deinit();
+    try testing.expect(!result_seq.has_error);
+    try testing.expectEqual(ParallelMode.sequential, result_seq.stats.plan.parallel_mode);
+
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+    var result_par = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result_par.deinit();
+    try testing.expect(!result_par.has_error);
+    try testing.expectEqual(ParallelMode.enabled, result_par.stats.plan.parallel_mode);
+    try testing.expectEqual(
+        ParallelSchedulerPath.scheduled_parallel,
+        result_par.stats.plan.parallel_scheduler_path,
+    );
+    try testing.expect(
+        result_par.stats.plan.parallel_schedule_applied_tasks <=
+            result_par.stats.plan.parallel_schedule_task_count,
     );
 
     try expectResultRowsEqual(&result_seq, &result_par);
