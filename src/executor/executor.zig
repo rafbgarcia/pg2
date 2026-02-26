@@ -1140,10 +1140,6 @@ fn executeReadPipeline(
     op_count: u16,
     string_arena: *scan_mod.StringArena,
 ) void {
-    if (result.stats.plan.parallel_scheduler_path == .scheduled_parallel) {
-        result.stats.plan.parallel_schedule_applied_tasks =
-            result.stats.plan.parallel_schedule_task_count;
-    }
     const caps = capacity_mod.OperatorCapacities.defaults();
     const source_model_name =
         result.stats.plan.source_model[0..result.stats.plan.source_model_len];
@@ -7109,6 +7105,72 @@ test "execute captures parallel mode when planner feature gate is enabled" {
     try testing.expect(result.stats.plan.parallel_schedule_fingerprint != 0);
 }
 
+test "execute parallel mode keeps checkpoint chronology order stable" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const seed = [_][]const u8{
+        "User |> insert(id = 1, name = \"A\", active = true)",
+        "User |> insert(id = 2, name = \"B\", active = false)",
+        "User |> insert(id = 3, name = \"C\", active = true)",
+    };
+    for (seed) |src_insert| {
+        const tok_insert = tokenizer_mod.tokenize(src_insert);
+        const p_insert = parser_mod.parse(&tok_insert, src_insert);
+        try testing.expect(!p_insert.has_error);
+        var r_insert = try execute(&env.makeCtx(tx, &snap, &p_insert.ast, &tok_insert, src_insert));
+        defer r_insert.deinit();
+        try testing.expect(!r_insert.has_error);
+    }
+
+    const src = "User |> where(active == true) |> sort(id desc) |> inspect { id }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+    try testing.expect(!result.has_error);
+
+    try testing.expectEqual(@as(u8, 4), result.stats.plan.checkpoint_count);
+    try testing.expectEqual(planner_types.Checkpoint.pre_scan, result.stats.plan.checkpoints[0].checkpoint);
+    try testing.expectEqual(planner_types.Checkpoint.post_filter, result.stats.plan.checkpoints[1].checkpoint);
+    try testing.expectEqual(planner_types.Checkpoint.post_group, result.stats.plan.checkpoints[2].checkpoint);
+    try testing.expectEqual(planner_types.Checkpoint.pre_join, result.stats.plan.checkpoints[3].checkpoint);
+}
+
+test "execute parallel mode keeps applied schedule tasks zero when no rows are processed" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    const src = "User |> where(active == true) |> inspect { id }";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+    try testing.expect(!result.has_error);
+
+    try testing.expectEqual(ParallelMode.enabled, result.stats.plan.parallel_mode);
+    try testing.expectEqual(
+        ParallelSchedulerPath.scheduled_parallel,
+        result.stats.plan.parallel_scheduler_path,
+    );
+    try testing.expectEqual(@as(u32, 0), result.stats.rows_scanned);
+    try testing.expectEqual(@as(u8, 0), result.stats.plan.parallel_schedule_applied_tasks);
+}
+
 test "execute returns equivalent rows with planner parallel mode on and off" {
     var env: ExecTestEnv = undefined;
     try env.init();
@@ -7152,7 +7214,10 @@ test "execute returns equivalent rows with planner parallel mode on and off" {
         ParallelSchedulerPath.scheduled_parallel,
         result_par.stats.plan.parallel_scheduler_path,
     );
-    try testing.expect(result_par.stats.plan.parallel_schedule_applied_tasks > 0);
+    try testing.expect(
+        result_par.stats.plan.parallel_schedule_applied_tasks <=
+            result_par.stats.plan.parallel_schedule_task_count,
+    );
 
     try expectResultRowsEqual(&result_seq, &result_par);
 }

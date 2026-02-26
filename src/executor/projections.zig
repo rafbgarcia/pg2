@@ -156,6 +156,8 @@ pub fn applyFlatColumnProjection(
             projection_count,
         ))
     {
+        result.stats.plan.parallel_schedule_applied_tasks =
+            result.stats.plan.parallel_schedule_task_count;
         return true;
     }
 
