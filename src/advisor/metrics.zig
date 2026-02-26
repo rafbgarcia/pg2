@@ -9,9 +9,9 @@ const std = @import("std");
 pub const metrics_filename = "advisor_metrics.pg2";
 
 const file_magic = "PG2ADVM1";
-const file_version: u16 = 1;
+const file_version: u16 = 2;
 const header_size: usize = 12;
-const record_size: usize = 88;
+const record_size: usize = 128;
 
 pub const MetricsError = error{
     InvalidFormat,
@@ -51,6 +51,11 @@ pub const MetricRecord = struct {
     queue_depth: u32 = 0,
     workers_busy: u32 = 0,
     queue_timeout_total: u64 = 0,
+    parse_ns: u64 = 0,
+    plan_ns: u64 = 0,
+    execute_ns: u64 = 0,
+    serialize_ns: u64 = 0,
+    total_ns: u64 = 0,
 };
 
 pub const MetricsFileWriter = struct {
@@ -184,6 +189,11 @@ fn encodeRecord(record: *const MetricRecord, out: *[record_size]u8) void {
     writeU32(out, &cursor, record.queue_depth);
     writeU32(out, &cursor, record.workers_busy);
     writeU64(out, &cursor, record.queue_timeout_total);
+    writeU64(out, &cursor, record.parse_ns);
+    writeU64(out, &cursor, record.plan_ns);
+    writeU64(out, &cursor, record.execute_ns);
+    writeU64(out, &cursor, record.serialize_ns);
+    writeU64(out, &cursor, record.total_ns);
 
     std.debug.assert(cursor == record_size);
 }
@@ -224,6 +234,11 @@ fn decodeRecord(raw: []const u8) error{InvalidFormat}!MetricRecord {
         .queue_depth = readU32(raw, &cursor),
         .workers_busy = readU32(raw, &cursor),
         .queue_timeout_total = readU64(raw, &cursor),
+        .parse_ns = readU64(raw, &cursor),
+        .plan_ns = readU64(raw, &cursor),
+        .execute_ns = readU64(raw, &cursor),
+        .serialize_ns = readU64(raw, &cursor),
+        .total_ns = readU64(raw, &cursor),
     };
 }
 
@@ -286,6 +301,11 @@ test "appendRecord and readAll round-trip records" {
         .queue_depth = 3,
         .workers_busy = 1,
         .queue_timeout_total = 5,
+        .parse_ns = 111,
+        .plan_ns = 222,
+        .execute_ns = 333,
+        .serialize_ns = 444,
+        .total_ns = 555,
     };
 
     try appendRecord(&tmp.dir, &input);
@@ -298,6 +318,11 @@ test "appendRecord and readAll round-trip records" {
     try std.testing.expectEqual(input.rows_matched, out[0].rows_matched);
     try std.testing.expectEqual(input.operation_kind, out[0].operation_kind);
     try std.testing.expect(out[0].has_predicate_filter);
+    try std.testing.expectEqual(input.parse_ns, out[0].parse_ns);
+    try std.testing.expectEqual(input.plan_ns, out[0].plan_ns);
+    try std.testing.expectEqual(input.execute_ns, out[0].execute_ns);
+    try std.testing.expectEqual(input.serialize_ns, out[0].serialize_ns);
+    try std.testing.expectEqual(input.total_ns, out[0].total_ns);
 }
 
 test "readAll rejects invalid header magic" {

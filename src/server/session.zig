@@ -131,6 +131,8 @@ pub const Session = struct {
         std.debug.assert(out.len > 0);
         std.debug.assert(pool_conn.checked_out);
         std.debug.assert(self.runtime.static_allocator.isSealed());
+        const request_start_ns = timestampNs();
+        const parse_start_ns = request_start_ns;
         var stream = std.io.fixedBufferStream(out);
         const writer = stream.writer();
 
@@ -201,6 +203,7 @@ pub const Session = struct {
                 .had_mutation = false,
             };
         }
+        const parse_ns = elapsedNs(parse_start_ns, timestampNs());
         if (missingCrudReturningBlock(&parsed.ast)) {
             writer.writeAll(
                 "ERR query: message=\"returning block required for CRUD statements; use {} for no returned rows\" phase=semantic code=MissingReturningBlock path=query line=1 col=1\n",
@@ -235,6 +238,7 @@ pub const Session = struct {
         defer result.deinit();
 
         const pool_stats: ?PoolStats = if (include_inspect) pool.snapshotStats() else null;
+        const serialize_start_ns = timestampNs();
         try serializeQueryResult(
             writer,
             &result,
@@ -246,12 +250,17 @@ pub const Session = struct {
             &tokens,
             source,
         );
+        const serialize_ns = elapsedNs(serialize_start_ns, timestampNs());
+        const total_ns = elapsedNs(request_start_ns, timestampNs());
         if (!result.has_error) {
             self.persistAdvisorMetric(
                 &parsed.ast,
                 source,
                 &result.stats,
                 runtime_inspect_stats,
+                parse_ns,
+                serialize_ns,
+                total_ns,
             );
         }
         const had_mutation =
@@ -271,6 +280,9 @@ pub const Session = struct {
         source: []const u8,
         stats: *const exec_mod.ExecStats,
         runtime_inspect_stats: ?RuntimeInspectStats,
+        parse_ns: u64,
+        serialize_ns: u64,
+        total_ns: u64,
     ) void {
         _ = self.storage_root;
         const sink = self.advisor_sink orelse return;
@@ -298,6 +310,11 @@ pub const Session = struct {
             .queue_depth = saturatingU32(runtime_stats.queue_depth),
             .workers_busy = saturatingU32(runtime_stats.workers_busy),
             .queue_timeout_total = runtime_stats.queue_timeout_total,
+            .parse_ns = parse_ns,
+            .plan_ns = stats.plan_ns,
+            .execute_ns = stats.execute_ns,
+            .serialize_ns = serialize_ns,
+            .total_ns = total_ns,
         };
         _ = sink.enqueue(&metric);
     }
@@ -1055,6 +1072,15 @@ fn astHasPredicateFilter(ast: *const ast_mod.Ast) bool {
 
 fn saturatingU32(value: usize) u32 {
     return @intCast(@min(value, @as(usize, std.math.maxInt(u32))));
+}
+
+fn timestampNs() u64 {
+    return @intCast(@max(@as(i64, 0), std.time.nanoTimestamp()));
+}
+
+fn elapsedNs(start_ns: u64, end_ns: u64) u64 {
+    if (end_ns <= start_ns) return 0;
+    return end_ns - start_ns;
 }
 
 fn astTopLevelStatementCount(ast: *const ast_mod.Ast) u16 {

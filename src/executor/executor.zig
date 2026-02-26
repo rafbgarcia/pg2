@@ -209,6 +209,8 @@ pub const ExecStats = struct {
     temp_pages_reclaimed: u32 = 0,
     temp_bytes_written: u64 = 0,
     temp_bytes_read: u64 = 0,
+    plan_ns: u64 = 0,
+    execute_ns: u64 = 0,
     spill_triggered: bool = false,
     result_bytes_accumulated: u64 = 0,
     plan: PlanStats = .{},
@@ -563,6 +565,8 @@ fn accumulateStatementStats(total: *ExecStats, current: *const ExecStats) void {
     total.temp_pages_reclaimed +|= current.temp_pages_reclaimed;
     total.temp_bytes_written +|= current.temp_bytes_written;
     total.temp_bytes_read +|= current.temp_bytes_read;
+    total.plan_ns +|= current.plan_ns;
+    total.execute_ns +|= current.execute_ns;
     total.spill_triggered = total.spill_triggered or current.spill_triggered;
     total.result_bytes_accumulated +|= current.result_bytes_accumulated;
     total.plan = current.plan;
@@ -1071,6 +1075,7 @@ fn executePipelineStatement(
     pipeline_idx: NodeIndex,
     string_arena: *scan_mod.StringArena,
 ) void {
+    const plan_start_ns = phaseTimestampNs();
     const pipeline = ctx.ast.getNode(pipeline_idx);
     if (pipeline.tag != .pipeline) {
         setError(result, "expected pipeline node");
@@ -1105,7 +1110,9 @@ fn executePipelineStatement(
     {
         result.stats.plan.parallel_scheduler_path = .scheduled_parallel;
     }
+    result.stats.plan_ns = elapsedNs(plan_start_ns, phaseTimestampNs());
 
+    const execute_start_ns = phaseTimestampNs();
     if (findMutationOp(&ops, op_count)) |mut_idx| {
         executeMutation(
             ctx,
@@ -1117,6 +1124,7 @@ fn executePipelineStatement(
             mut_idx,
             string_arena,
         );
+        result.stats.execute_ns +|= elapsedNs(execute_start_ns, phaseTimestampNs());
         return;
     }
 
@@ -1129,6 +1137,16 @@ fn executePipelineStatement(
         op_count,
         string_arena,
     );
+    result.stats.execute_ns +|= elapsedNs(execute_start_ns, phaseTimestampNs());
+}
+
+fn phaseTimestampNs() u64 {
+    return @intCast(@max(@as(i64, 0), std.time.nanoTimestamp()));
+}
+
+fn elapsedNs(start_ns: u64, end_ns: u64) u64 {
+    if (end_ns <= start_ns) return 0;
+    return end_ns - start_ns;
 }
 
 fn setStatementError(result: *QueryResult, statement_index: u16, message: []const u8) void {
