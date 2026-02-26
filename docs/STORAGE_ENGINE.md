@@ -73,12 +73,12 @@ If a replica falls behind beyond the retention window, it cannot catch up via WA
 
 ### Recovery
 
-On startup:
-1. Read WAL forward from the last checkpoint.
-2. **Redo phase**: replay all records to bring pages up to date.
-3. **Undo phase**: roll back any transactions that didn't commit (no `tx_commit` record found).
+Current runtime behavior is fail-closed:
+1. Clean shutdown flushes buffered WAL, flushes dirty pages, and marks a clean WAL envelope.
+2. Startup reads the WAL envelope.
+3. If startup detects an unclean shutdown boundary (non-empty durable WAL envelope), boot fails closed and requests recovery replay support.
 
-This is the standard ARIES-style recovery protocol, simplified.
+Full ARIES-style redo/undo replay is planned but not yet enabled in the production startup path.
 
 ## Heap Storage
 
