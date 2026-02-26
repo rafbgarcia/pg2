@@ -47,7 +47,6 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - executor stage modules consume planner-provided threshold contracts (no stage-local threshold constants)
 - 🟡 Remaining to complete WF07:
   - extend true scheduled parallel execution beyond current stage set
-  - finalize Phase 3/4/5/6 completion gates end-to-end and lock completion status
 
 - Implemented:
   - New query planner module surface under `src/planner/` with:
@@ -122,8 +121,13 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - server serialization contract test added to lock inspect/explain scheduler output for `scheduled_parallel`
 - Verification:
   - `zig build test-all --summary all` passing after planner-owned stage admission-threshold contract migration (`932/934` passed, `2` skipped)
+  - phase-gate commands passing:
+    - `zig build unit --summary all` (`663/665` passed, `2` skipped)
+    - `zig build test --summary all` (`247/247` passed)
+    - `zig build sim --summary all` (`7/7` passed)
+    - `zig build stress --summary all` (`22/22` passed)
 - Remaining:
-  - finalize Phase 3/4/5/6 completion status lock once threshold-contract migration above is complete
+  - extend true scheduled parallel execution beyond current stage set while preserving deterministic/fail-closed semantics
 
 ## Fresh Session Handoff Snapshot (2026-02-26)
 
@@ -220,8 +224,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Immediate Next Step (single-threaded priority)
 
-1. Finalize Phase 3/4/5/6 completion status lock now that planner/checkpoint owns stage-level parallel admission thresholds/reasons.
-2. Extend planner-parallel true execution coverage beyond current stages while preserving:
+1. Extend planner-parallel true execution coverage beyond current stages while preserving:
    - deterministic schedule traces for fixed seeds
    - semantic equivalence with sequential mode
    - fail-closed behavior under capacity pressure
@@ -408,7 +411,7 @@ Status: ✅ Complete (v1 baseline landed; further refinement may extend policy d
 
 ## Phase 3: Runtime-Observed Adaptation Rules
 
-Status: 🟡 In Progress
+Status: ✅ Complete
 
 ### Scope
 
@@ -427,7 +430,7 @@ Status: 🟡 In Progress
 
 ## Phase 4: Inspect/Explain Contract
 
-Status: 🟡 In Progress
+Status: ✅ Complete
 
 ### Scope
 
@@ -443,7 +446,7 @@ Status: 🟡 In Progress
 
 ## Phase 5: Parallelization Policy
 
-Status: 🟡 In Progress
+Status: ✅ Complete
 
 ### Scope
 
@@ -459,7 +462,7 @@ Status: 🟡 In Progress
 
 ## Phase 6: Planning Test Surface
 
-Status: 🟡 In Progress
+Status: ✅ Complete
 
 ### Scope
 
