@@ -133,13 +133,14 @@ pub fn applyGroup(
     }
 
     if (parallel_enabled and
-        group_runtime.aggregate_count == 0 and
-        tryApplyGroupParallelNoAggregates(
+        tryApplyGroupParallel(
             ctx,
             result,
+            schema,
             group_key_indices[0..group_key_count],
             caps,
             group_runtime,
+            string_arena,
         ))
     {
         result.stats.plan.parallel_schedule_applied_tasks =
@@ -194,7 +195,7 @@ pub fn applyGroup(
     return true;
 }
 
-const ParallelGroupNoAggregateWorker = struct {
+const ParallelGroupWorker = struct {
     rows: []const ResultRow,
     key_indices: []const u16,
     start_idx: u16,
@@ -205,7 +206,7 @@ const ParallelGroupNoAggregateWorker = struct {
     local_group_counts: [scan_mod.scan_batch_size]u32 =
         [_]u32{0} ** scan_mod.scan_batch_size,
 
-    fn run(self: *ParallelGroupNoAggregateWorker) void {
+    fn run(self: *ParallelGroupWorker) void {
         var read_idx = self.start_idx;
         while (read_idx < self.end_idx) : (read_idx += 1) {
             const candidate = &self.rows[read_idx];
@@ -244,12 +245,14 @@ fn findGroupIndexByFirstIndices(
     return null;
 }
 
-fn tryApplyGroupParallelNoAggregates(
+fn tryApplyGroupParallel(
     ctx: *const ExecContext,
     result: *QueryResult,
+    schema: *const RowSchema,
     key_indices: []const u16,
     caps: *const capacity_mod.OperatorCapacities,
     group_runtime: *GroupRuntime,
+    string_arena: *scan_mod.StringArena,
 ) bool {
     const row_count_usize: usize = result.row_count;
     if (row_count_usize < parallel_group_min_rows_per_worker * 2) return false;
@@ -276,7 +279,7 @@ fn tryApplyGroupParallelNoAggregates(
     boundaries[worker_count] = @intCast(cursor);
     std.debug.assert(boundaries[worker_count] == result.row_count);
 
-    var workers: [max_parallel_group_workers]ParallelGroupNoAggregateWorker = undefined;
+    var workers: [max_parallel_group_workers]ParallelGroupWorker = undefined;
     worker_idx = 0;
     while (worker_idx < worker_count) : (worker_idx += 1) {
         workers[worker_idx] = .{
@@ -294,7 +297,7 @@ fn tryApplyGroupParallelNoAggregates(
     while (worker_idx < worker_count) : (worker_idx += 1) {
         threads[spawned] = std.Thread.spawn(
             .{},
-            ParallelGroupNoAggregateWorker.run,
+            ParallelGroupWorker.run,
             .{&workers[worker_idx]},
         ) catch {
             var join_idx: usize = 0;
@@ -339,6 +342,38 @@ fn tryApplyGroupParallelNoAggregates(
     }
     result.row_count = write_idx;
     std.debug.assert(@as(usize, result.row_count) <= row_count_usize);
+
+    if (group_runtime.aggregate_count == 0) return true;
+
+    var group_idx: u16 = 0;
+    while (group_idx < result.row_count) : (group_idx += 1) {
+        resetAggregateStatesForGroup(group_runtime, group_idx);
+    }
+
+    var read_idx: u16 = 0;
+    while (read_idx < @as(u16, @intCast(row_count_usize))) : (read_idx += 1) {
+        const candidate = &source_rows[read_idx];
+        const resolved_group = findGroupIndex(
+            result.rows[0..result.row_count],
+            candidate,
+            key_indices,
+        ) orelse {
+            setError(result, "group merge state mismatch");
+            return true;
+        };
+        if (!accumulateGroupAggregates(
+            ctx,
+            result,
+            schema,
+            group_runtime,
+            resolved_group,
+            candidate.values[0..candidate.column_count],
+            string_arena,
+        )) {
+            return true;
+        }
+    }
+
     return true;
 }
 
