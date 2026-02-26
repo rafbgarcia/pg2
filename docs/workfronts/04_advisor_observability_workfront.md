@@ -82,6 +82,14 @@ These decisions are locked for current implementation unless explicitly changed.
 
 ## Phase 1: Metrics Contract and Persistence Foundation
 
+### Progress
+
+- ✅ DONE: versioned raw metric schema and persistence file (`advisor_metrics.pg2`)
+- ✅ DONE: async sink with bounded queue and non-blocking enqueue from statement path
+- ✅ DONE: queue-overflow drop behavior (no request-path blocking)
+- ✅ DONE: deterministic persistence/corruption tests
+- ⏳ MISSING: raw phase timing fields (`parse_ns`, `plan_ns`, `execute_ns`, `serialize_ns`, `total_ns`)
+
 ### Scope
 
 - Define canonical advisor metric record schema (raw values only), versioned.
@@ -108,6 +116,15 @@ These decisions are locked for current implementation unless explicitly changed.
 
 ## Phase 2: Rule Evaluation Engine (Raw-to-Derived at Read Time)
 
+### Progress
+
+- ✅ DONE: rule engine framework + deterministic text formatter
+- ✅ DONE: low-selectivity predicate advisory rule
+- ⏳ MISSING: queue pressure rule
+- ⏳ MISSING: spill ratio rule
+- ⏳ MISSING: latency spike rule
+- ⏳ MISSING: synthetic trigger/non-trigger tests for missing rules
+
 ### Scope
 
 - Read persisted raw metrics and compute derived values in-memory for one pass.
@@ -133,6 +150,13 @@ These decisions are locked for current implementation unless explicitly changed.
 
 ## Phase 3: CLI Surface (`pg2 advise`)
 
+### Progress
+
+- ✅ DONE: `pg2 advise` command in `src/main.zig`
+- ✅ DONE: plain text deterministic output with all triggered advisories
+- ✅ DONE: deterministic no-advisory output line
+- ⏳ MISSING: explicit CLI tests for missing/corrupt advisor file paths and trigger/no-trigger matrix
+
 ### Scope
 
 - Add `pg2 advise` command in `src/main.zig`.
@@ -154,11 +178,24 @@ These decisions are locked for current implementation unless explicitly changed.
 
 ## Fresh Session Handoff
 
-1. Check `src/executor/executor.zig` (`ExecStats`), `src/server/diagnostics.zig` (`RuntimeInspectStats`), and request/session boundaries for ingestion points.
-2. Implement advisor metric schema and file reader/writer in `src/advisor/` first.
-3. Wire persistence from runtime/query boundary with bounded overhead.
-4. Add `pg2 advise` command path and v1 text renderer.
-5. Add deterministic tests, then run:
+### Already Landed
+
+1. `docs` decision locks and phase plan updates.
+2. `src/advisor/metrics.zig`: versioned raw metrics file format and reader/writer.
+3. `src/advisor/sink.zig`: bounded queue + async background writer.
+4. `src/advisor/rules.zig`: low-selectivity rule and text formatter.
+5. `src/main.zig`: `pg2 advise` command and sink startup in server mode.
+6. `src/server/session.zig`: enqueue-only metric capture path.
+
+### Next Session Start Here
+
+1. Add phase timing raw fields to `MetricRecord` and populate in session/request boundary.
+2. Implement rule: queue pressure (using persisted queue/backpressure counters).
+3. Implement rule: spill ratio (using persisted spill/temp counters).
+4. Implement rule: latency spike (using persisted latency fields after step 1).
+5. Add deterministic tests for trigger/non-trigger per new rule.
+6. Add/expand CLI-level tests for missing/corrupt metrics file behavior and multi-rule output.
+7. Run gate:
    - `zig build test-all --summary all`
 
 ## Hard-Stop Conditions
