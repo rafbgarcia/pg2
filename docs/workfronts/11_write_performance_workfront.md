@@ -82,23 +82,23 @@ Eliminate O(n²) insert degradation by wiring B+ tree indexes into constraint en
 ### Design Decisions
 - **Deferred fsync.** Instead of fsyncing on every `commitTx`, the WAL accumulates commit records and flushes on a configurable trigger: either a byte threshold (e.g., 64 KB of WAL data) or when explicitly requested (e.g., at session boundary or explicit FLUSH).
 - **Single-statement auto-commit batching.** For single-statement auto-commit transactions (the common INSERT case), the WAL batches multiple commits and flushes once at the end of a request batch or when the buffer fills. This turns N inserts from N fsyncs into ~1 fsync.
-- **Durability contract.** A committed transaction is durable only after the WAL flush that includes its commit record. For single-row auto-commit inserts, the response is sent after the flush — the batching is transparent to the client. For explicit transactions (BEGIN/COMMIT), COMMIT always triggers an immediate flush (matches PostgreSQL's `synchronous_commit = on` default).
+- **Durability contract.** A committed transaction is durable only after the WAL flush that includes its commit record. For both single-row auto-commit inserts and explicit transactions (BEGIN/COMMIT), responses are sent only after the commit WAL is durably flushed (`synchronous_commit = on` semantics).
 - **Configuration.** `BootstrapConfig` gains `wal_flush_threshold_bytes` (default 64 KB). This is a tuning knob, not an architecture change.
 
 ### Scope
 - Refactor `Wal.commitTx` to append without flushing. Add `Wal.flushIfNeeded()` that checks the byte threshold.
 - Add `Wal.forceFlush()` for explicit transaction commit and session teardown.
-- Wire the session/executor layer to call `flushIfNeeded()` after each auto-commit and `forceFlush()` after explicit COMMIT.
+- Wire the session/executor layer to force flush before acknowledging commit boundaries.
 - Add `wal_flush_threshold_bytes` to `BootstrapConfig`.
 
 ### Implementation Notes
 - `commitTx()` appends the commit record without flushing. `flushIfNeeded()` gates on `buffer_len >= flush_threshold_bytes` (threshold=0 always flushes for backward compat). `forceFlush()` flushes unconditionally.
-- `pool.checkin()` calls `flushIfNeeded()` — the group commit gate for auto-commit transactions.
+- `pool.checkin()` calls `forceFlush()` so auto-commit acknowledgments are always durable.
 - `session.serveConnection()` calls `forceFlush()` on connection close to ensure all deferred commits are durable.
 - `BootstrapConfig.wal_buffer_capacity_bytes` default raised from 8 KB to 128 KB to accommodate deferred flush accumulation.
 - Test harnesses (`TestExecutor.run()`) call `forceFlush()` after checkin to preserve per-operation durability semantics expected by feature/stress tests.
 - Fault matrix and FK fault matrix tests updated with explicit `flush()`/`forceFlush()` calls since `commitTx` no longer flushes.
-- Durability semantics for auto-commit: `synchronous_commit = off` — response may be sent before WAL is durable, but flush arrives within the next threshold cycle or at session close.
+- Durability semantics for auto-commit: `synchronous_commit = on` — response is only sent after WAL durability.
 
 ### Gate
 - Unit tests: WAL accumulates multiple commit records without fsyncing until threshold.
@@ -217,7 +217,7 @@ This maintains the clean separation: `loadSchema()` = AST → catalog metadata (
   1. *Per-row heap insertion*: build values, enforce all constraints (PK + FK + unique — all O(log n) via indexes), overflow handling, heap write, WAL append. Running page hint avoids repeated scans. Store `(pk_value, row_id)` pair in batch array.
   2. *Sorted B+ tree index insertion*: sort collected PK values by key, open each unique index's B+ tree once, insert all keys in sorted order, sync state once per index. Sorted insertion targets the rightmost leaf for sequential keys — fewer page splits and better buffer pool locality.
 
-- **Single WAL flush per batch.** A multi-row insert is a single transaction. Phase 3's deferred fsync means: N WAL append records (one per row) + one commit record + one conditional flush at `pool.checkin()`. No additional work needed — this is free from Phase 3.
+- **Single WAL flush per batch.** A multi-row insert is a single transaction: N WAL append records (one per row) + one commit record + one flush at `pool.checkin()`.
 
 - **Error semantics.** Any row failure (duplicate key, FK violation, constraint error) aborts the entire batch. Partial heap writes are invisible because the WAL commit never happens. B+ tree index insertion (the second phase of batch execution) hasn't run yet, so no index cleanup is needed. This matches PostgreSQL's all-or-nothing batch INSERT semantics.
 

@@ -100,7 +100,7 @@ pub const ConnectionPool = struct {
         if (conn.pinned) return error.PoolConnPinned;
 
         _ = try self.runtime.wal.commitTx(conn.tx_id);
-        _ = try self.runtime.wal.flushIfNeeded();
+        try self.runtime.wal.forceFlush();
         conn.snapshot.deinit();
         try self.runtime.tx_manager.commit(conn.tx_id);
         const oldest_active = self.runtime.tx_manager.getOldestActive();
@@ -324,6 +324,19 @@ test "checkin releases slot for reuse" {
     var second = try pool.checkout();
     defer pool.checkin(&second) catch {};
     try std.testing.expectEqual(@as(u16, 0), second.slot_index);
+}
+
+test "checkin forces WAL durability regardless of threshold" {
+    var fixture = try RuntimeFixture.init(1);
+    defer fixture.deinit();
+
+    fixture.runtime.wal.flush_threshold_bytes = std.math.maxInt(usize);
+    var pool = ConnectionPool.init(&fixture.runtime);
+    var conn = try pool.checkout();
+    try std.testing.expectEqual(@as(u64, 0), fixture.runtime.wal.flushed_lsn);
+
+    try pool.checkin(&conn);
+    try std.testing.expect(fixture.runtime.wal.flushed_lsn > 0);
 }
 
 test "abortCheckin aborts transaction and releases slot for reuse" {

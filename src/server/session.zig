@@ -724,19 +724,6 @@ pub const Session = struct {
                 .pin_transition = .ended,
             };
         };
-        self.runtime.wal.forceFlush() catch |flush_err| {
-            const class = runtime_errors.classifySessionBoundary(flush_err);
-            const boundary_msg = try serializeBoundaryError(
-                response_buf,
-                class,
-                flush_err,
-            );
-            pin_state.* = .{};
-            return .{
-                .bytes_written = boundary_msg.len,
-                .pin_transition = .ended,
-            };
-        };
         pin_state.* = .{};
         return .{
             .bytes_written = try serializeTxControlOk(response_buf, "COMMIT"),
