@@ -41,6 +41,7 @@ test "internal overflow reclaim WAL replay restores page state after crash and i
     );
 
     // Persist overflow chain pages before delete so replay must reclaim them.
+    try env.runtime.wal.forceFlush();
     try env.runtime.pool.flushAll();
 
     result = try executor.run("User |> where(id == 1) |> delete {}");
@@ -93,6 +94,7 @@ test "internal overflow reclaim WAL replay restores page state after crash and i
         @as(usize, 1),
         first_replay.overflow_reclaim_applied + first_replay.overflow_reclaim_idempotent_skips,
     );
+    try recovered_wal.forceFlush();
     try recovered_pool.flushAll();
 
     {

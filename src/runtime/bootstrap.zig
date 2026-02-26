@@ -41,6 +41,7 @@ pub const QueryBufferError = error{
     NoQuerySlotAvailable,
     InvalidQuerySlot,
 };
+pub const ShutdownError = wal_mod.WalError || buffer_pool_mod.BufferPoolError;
 
 pub fn requiredBytesForConfig(
     allocator: std.mem.Allocator,
@@ -363,6 +364,17 @@ pub const BootstrappedRuntime = struct {
         self.* = undefined;
     }
 
+    /// Graceful runtime shutdown boundary.
+    ///
+    /// Ensures buffered WAL is durable, flushes dirty data pages, then marks
+    /// WAL state clean for restart without crash-recovery replay.
+    pub fn shutdown(self: *BootstrappedRuntime) ShutdownError!void {
+        self.pool.wal = &self.wal;
+        try self.wal.forceFlush();
+        try self.pool.flushAll();
+        try self.wal.markCleanShutdown();
+    }
+
     fn rowsForSlot(
         self: *BootstrappedRuntime,
         rows: []ResultRow,
@@ -555,13 +567,60 @@ test "bootstrap seals allocator before runtime operations" {
     defer runtime.deinit();
 
     try std.testing.expect(runtime.static_allocator.isSealed());
-
     // These operations run after seal. If they allocate, test fails via panic.
     const page = try runtime.pool.pin(1);
     page.header.lsn = 1;
     runtime.pool.unpin(1, true);
     _ = try runtime.wal.append(1, .tx_begin, 1, "x");
     try runtime.wal.flush();
+}
+
+test "runtime shutdown flushes dirty pages and clears WAL envelope" {
+    var disk = disk_mod.SimulatedDisk.init(std.testing.allocator);
+    defer disk.deinit();
+
+    const memory_size_bytes = 256 * 1024 * 1024;
+    const backing_memory = try std.testing.allocator.alloc(
+        u8,
+        memory_size_bytes,
+    );
+    defer std.testing.allocator.free(backing_memory);
+    var runtime = try BootstrappedRuntime.init(
+        backing_memory,
+        disk.storage(),
+        .{
+            .buffer_pool_frames = 8,
+            .undo_max_entries = 128,
+            .undo_max_data_bytes = 16 * 1024,
+            .wal_buffer_capacity_bytes = 4096,
+            .wal_flush_threshold_bytes = 0,
+            .max_query_slots = 1,
+        },
+    );
+    defer runtime.deinit();
+
+    const tx_id: u64 = 1;
+    _ = try runtime.wal.beginTx(tx_id);
+    const lsn = try runtime.wal.append(tx_id, .insert, 7, "abc");
+    _ = try runtime.wal.commitTx(tx_id);
+
+    const page = try runtime.pool.pin(7);
+    page.header.page_type = .heap;
+    page.header.lsn = lsn;
+    page.content[0] = 0xA5;
+    runtime.pool.unpin(7, true);
+
+    try runtime.shutdown();
+
+    var raw: [io_mod.page_size]u8 = undefined;
+    try disk.storage().read(7, &raw);
+    try std.testing.expectEqual(@as(u8, 0xA5), raw[24]);
+
+    var recovered = Wal.init(std.testing.allocator, disk.storage());
+    defer recovered.deinit();
+    try recovered.recover();
+    try std.testing.expectEqual(@as(u64, 1), recovered.next_lsn);
+    try std.testing.expectEqual(@as(u64, 0), recovered.flushed_lsn);
 }
 
 test "runtime wal growth beyond startup cap fails closed" {

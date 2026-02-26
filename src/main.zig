@@ -218,7 +218,28 @@ pub fn main() !void {
             return;
         },
     };
-    defer runtime.deinit();
+    var clean_shutdown_enabled = false;
+    defer {
+        if (clean_shutdown_enabled) {
+            runtime.shutdown() catch |err| {
+                std.log.err("runtime clean shutdown failed: {s}", .{@errorName(err)});
+            };
+        }
+        runtime.deinit();
+    }
+
+    runtime.wal.recover() catch {
+        try stdout.writeAll("startup failed: WAL envelope recovery failed\n");
+        return;
+    };
+    if (runtime.wal.flushed_lsn > 0) {
+        try stdout.writeAll(
+            "startup failed: unclean shutdown detected; crash recovery replay is required before restart\n",
+        );
+        return;
+    }
+    runtime.pool.wal = &runtime.wal;
+    clean_shutdown_enabled = true;
 
     var buf: [160]u8 = undefined;
     const msg = std.fmt.bufPrint(

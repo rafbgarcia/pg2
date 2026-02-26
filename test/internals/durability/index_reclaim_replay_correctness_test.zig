@@ -66,8 +66,8 @@ test "internal replay matrix asserts post-restart index delete correctness" {
     try env.runtime.tx_manager.commit(maintenance_tx);
 
     // Persist post-delete page state so crash restart observes reclaimed index state.
+    try env.runtime.wal.forceFlush();
     try env.runtime.pool.flushAll();
-    try env.runtime.wal.flush();
 
     env.disk.crash();
 

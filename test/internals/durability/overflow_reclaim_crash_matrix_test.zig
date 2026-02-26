@@ -86,6 +86,7 @@ fn runCrashScenario(crash_point: CrashPoint) !ScenarioOutcome {
     );
 
     // Persist initial overflow chains so replay has durable pre-reclaim page state.
+    try env.runtime.wal.forceFlush();
     try env.runtime.pool.flushAll();
 
     var name_b: [1200]u8 = undefined;
@@ -257,6 +258,7 @@ test "internal crash matrix: repeated replay cycles remain idempotent after dura
         "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
         result,
     );
+    try env.runtime.wal.forceFlush();
     try env.runtime.pool.flushAll();
 
     var name_b: [1200]u8 = undefined;
@@ -310,6 +312,7 @@ test "internal crash matrix: repeated replay cycles remain idempotent after dura
         first_replay.overflow_reclaim_records_seen,
         first_replay.overflow_reclaim_applied + first_replay.overflow_reclaim_idempotent_skips,
     );
+    try recovered_wal.forceFlush();
     try recovered_pool.flushAll();
 
     var replay_records_b: [512]Record = undefined;

@@ -62,6 +62,7 @@ test "internal overflow replay fails closed for lifecycle record without tx mark
         "OK returned_rows=0 inserted_rows=1 updated_rows=0 deleted_rows=0\n",
         result,
     );
+    try env.runtime.wal.forceFlush();
     try env.runtime.pool.flushAll();
 
     var wal_records: [128]Record = undefined;

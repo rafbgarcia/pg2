@@ -524,6 +524,26 @@ pub const Wal = struct {
         self.buffer_len = 0;
     }
 
+    /// Mark WAL state as clean for a graceful shutdown boundary.
+    ///
+    /// This clears persisted WAL offsets/LSNs so restart treats storage as a
+    /// clean baseline and does not attempt crash-recovery replay.
+    pub fn markCleanShutdown(self: *Wal) WalError!void {
+        // At clean shutdown all buffered WAL must already be durable.
+        std.debug.assert(self.buffer_len == 0);
+
+        self.wal_page_offset = 0;
+        self.wal_byte_offset = 0;
+        self.next_lsn = 1;
+        self.flushed_lsn = 0;
+        self.buffer_max_lsn = 0;
+
+        var zero_page: [io.page_size]u8 = std.mem.zeroes([io.page_size]u8);
+        self.storage.write(self.wal_meta_page_id, &zero_page) catch
+            return error.WalWriteError;
+        self.storage.fsync() catch return error.WalFsyncError;
+    }
+
     /// Convenience: begin a transaction.
     pub fn beginTx(self: *Wal, tx_id: u64) WalError!u64 {
         return self.append(tx_id, .tx_begin, 0, &.{});

@@ -466,6 +466,7 @@ test "replayCommittedOverflowLifecycle reclaims chain and is idempotent" {
         insert_op.data.unary,
     );
 
+    try wal.forceFlush();
     try pool.flushAll();
 
     const delete_src = "User |> where(id == 1) |> delete";
@@ -512,6 +513,7 @@ test "replayCommittedOverflowLifecycle reclaims chain and is idempotent" {
         records_a[0..],
         payload_a[0..],
     );
+    try replay_wal.forceFlush();
     try pool.flushAll();
 
     var records_b: [128]Record = undefined;
