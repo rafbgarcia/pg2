@@ -504,46 +504,9 @@ fn handleInspectCommand(stdout: std.fs.File, args: []const []const u8) !void {
 }
 
 fn handleAdviseCommand(stdout: std.fs.File, args: []const []const u8) !void {
-    if (args.len > 0) {
-        if (args.len == 1 and std.mem.eql(u8, args[0], "--help")) {
-            try stdout.writeAll("Usage: pg2 advise\n");
-            return;
-        }
-        try stdout.writeAll("unknown argument\n");
-        return;
-    }
-
-    var storage_dir = std.fs.cwd().openDir(runtime_storage_root_mod.default_storage_root, .{}) catch {
-        try stdout.writeAll("no advisories\n");
-        return;
-    };
-    defer storage_dir.close();
-
-    const allocator = std.heap.page_allocator;
-    const records = advisor_mod.metrics.readAll(allocator, &storage_dir) catch |err| switch (err) {
-        error.FileNotFound => {
-            try stdout.writeAll("no advisories\n");
-            return;
-        },
-        error.InvalidFormat, error.UnsupportedVersion => {
-            try stdout.writeAll("advise failed: advisor metrics file is corrupted\n");
-            return;
-        },
-        else => {
-            try stdout.writeAll("advise failed: could not read advisor metrics\n");
-            return;
-        },
-    };
-    defer allocator.free(records);
-
-    const advisories = advisor_mod.rules.evaluate(allocator, records) catch {
-        try stdout.writeAll("advise failed: could not evaluate advisories\n");
-        return;
-    };
-    defer allocator.free(advisories);
-
-    advisor_mod.rules.writeText(stdout.writer(), advisories) catch {
-        try stdout.writeAll("advise failed: output formatting failed\n");
-        return;
-    };
+    try advisor_mod.cli.runAdviseCommand(
+        stdout.writer(),
+        std.fs.cwd(),
+        args,
+    );
 }
