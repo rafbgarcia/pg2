@@ -45,6 +45,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
     - executor/inspect now expose deterministic schedule-trace metadata:
       - `parallel_schedule_task_count`
       - `parallel_schedule_fingerprint`
+    - executor now routes `parallel_mode=enabled` through a deterministic serial scheduler path (`parallel_scheduler_path=scheduled_serial`) while preserving current sequential semantics
 - Tests:
   - internal planner contract tests added under `test/internals/planner/`
   - deterministic replay coverage for planner adaptation traces added in:
@@ -58,7 +59,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - `zig build sim --summary all` passing with planner adaptation replay checks
   - `zig build stress --summary all` passing with planner checkpoint/fingerprint assertions in mixed spill scenarios
 - Remaining:
-  - wire parallel mode to executor scheduling (currently policy/traces only; execution remains sequential)
+  - replace deterministic serial scheduler path with real parallel execution while preserving deterministic scheduling traces and semantic equivalence guarantees
 
 ## Non-Goals
 

@@ -1335,6 +1335,13 @@ test "session inspect appends execution and pool stats" {
         std.mem.indexOf(
             u8,
             output,
+            "parallel_scheduler_path=direct",
+        ) != null,
+    );
+    try std.testing.expect(
+        std.mem.indexOf(
+            u8,
+            output,
             "parallel_schedule_task_count=0",
         ) != null,
     );

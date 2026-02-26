@@ -132,6 +132,11 @@ pub const ParallelMode = enum {
     enabled,
 };
 
+pub const ParallelSchedulerPath = enum {
+    direct,
+    scheduled_serial,
+};
+
 pub const ScanStrategy = index_scan_planner.ScanStrategy;
 
 pub const PlanCheckpointTrace = struct {
@@ -155,6 +160,8 @@ pub const PlanStats = struct {
     group_strategy: GroupStrategy = .none,
     streaming_mode: StreamingMode = .disabled,
     parallel_mode: ParallelMode = .sequential,
+    parallel_scheduler_path: ParallelSchedulerPath = .direct,
+    parallel_schedule_applied_tasks: u8 = 0,
     scan_strategy: ScanStrategy = .table_scan,
     nested_relation_count: u8 = 0,
     nested_join_nested_loop_count: u8 = 0,
@@ -1075,6 +1082,9 @@ fn executePipelineStatement(
         &op_count,
     );
     capturePlanStats(&result.stats.plan, ctx, model_name, model_id, &ops, op_count);
+    if (result.stats.plan.parallel_mode == .enabled) {
+        result.stats.plan.parallel_scheduler_path = .scheduled_serial;
+    }
 
     if (findMutationOp(&ops, op_count)) |mut_idx| {
         executeMutation(
@@ -1127,6 +1137,10 @@ fn executeReadPipeline(
     op_count: u16,
     string_arena: *scan_mod.StringArena,
 ) void {
+    if (result.stats.plan.parallel_scheduler_path == .scheduled_serial) {
+        result.stats.plan.parallel_schedule_applied_tasks =
+            result.stats.plan.parallel_schedule_task_count;
+    }
     const caps = capacity_mod.OperatorCapacities.defaults();
     const source_model_name =
         result.stats.plan.source_model[0..result.stats.plan.source_model_len];
@@ -6858,7 +6872,12 @@ test "execute captures parallel mode when planner feature gate is enabled" {
         ParallelMode.enabled,
         result.stats.plan.parallel_mode,
     );
+    try testing.expectEqual(
+        ParallelSchedulerPath.scheduled_serial,
+        result.stats.plan.parallel_scheduler_path,
+    );
     try testing.expect(result.stats.plan.parallel_schedule_task_count > 0);
+    try testing.expect(result.stats.plan.parallel_schedule_applied_tasks > 0);
     try testing.expect(result.stats.plan.parallel_schedule_fingerprint != 0);
 }
 
