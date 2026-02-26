@@ -29,6 +29,8 @@ const setError = @import("executor.zig").setError;
 const max_group_aggregate_exprs = capacity_mod.max_group_aggregate_exprs;
 const invalid_aggregate_slot: u8 = std.math.maxInt(u8);
 const sort_key_expr_mask: u16 = 0x8000;
+const max_parallel_group_workers: usize = 4;
+const parallel_group_min_rows_per_worker: usize = 32;
 
 pub const AggregateKind = enum {
     count_star,
@@ -86,6 +88,7 @@ pub fn applyGroup(
     group_op_index: u16,
     caps: *const capacity_mod.OperatorCapacities,
     group_runtime: *GroupRuntime,
+    parallel_enabled: bool,
     string_arena: *scan_mod.StringArena,
 ) bool {
     const node = ctx.ast.getNode(group_node);
@@ -127,6 +130,21 @@ pub fn applyGroup(
         group_runtime,
     )) {
         return false;
+    }
+
+    if (parallel_enabled and
+        group_runtime.aggregate_count == 0 and
+        tryApplyGroupParallelNoAggregates(
+            ctx,
+            result,
+            group_key_indices[0..group_key_count],
+            caps,
+            group_runtime,
+        ))
+    {
+        result.stats.plan.parallel_schedule_applied_tasks =
+            result.stats.plan.parallel_schedule_task_count;
+        return true;
     }
 
     var write_idx: u16 = 0;
@@ -173,6 +191,154 @@ pub fn applyGroup(
         }
     }
     result.row_count = write_idx;
+    return true;
+}
+
+const ParallelGroupNoAggregateWorker = struct {
+    rows: []const ResultRow,
+    key_indices: []const u16,
+    start_idx: u16,
+    end_idx: u16,
+    local_group_count: u16 = 0,
+    local_first_indices: [scan_mod.scan_batch_size]u16 =
+        [_]u16{0} ** scan_mod.scan_batch_size,
+    local_group_counts: [scan_mod.scan_batch_size]u32 =
+        [_]u32{0} ** scan_mod.scan_batch_size,
+
+    fn run(self: *ParallelGroupNoAggregateWorker) void {
+        var read_idx = self.start_idx;
+        while (read_idx < self.end_idx) : (read_idx += 1) {
+            const candidate = &self.rows[read_idx];
+            if (findGroupIndexByFirstIndices(
+                self.rows,
+                &self.local_first_indices,
+                self.local_group_count,
+                candidate,
+                self.key_indices,
+            )) |local_group_index| {
+                self.local_group_counts[local_group_index] += 1;
+            } else {
+                const slot = self.local_group_count;
+                self.local_first_indices[slot] = read_idx;
+                self.local_group_counts[slot] = 1;
+                self.local_group_count += 1;
+            }
+        }
+    }
+};
+
+fn findGroupIndexByFirstIndices(
+    rows: []const ResultRow,
+    local_first_indices: *const [scan_mod.scan_batch_size]u16,
+    local_group_count: u16,
+    candidate: *const ResultRow,
+    key_indices: []const u16,
+) ?u16 {
+    var idx: u16 = 0;
+    while (idx < local_group_count) : (idx += 1) {
+        const first_idx = local_first_indices[idx];
+        if (rowsEqualOnGroupKeys(&rows[first_idx], candidate, key_indices)) {
+            return idx;
+        }
+    }
+    return null;
+}
+
+fn tryApplyGroupParallelNoAggregates(
+    ctx: *const ExecContext,
+    result: *QueryResult,
+    key_indices: []const u16,
+    caps: *const capacity_mod.OperatorCapacities,
+    group_runtime: *GroupRuntime,
+) bool {
+    const row_count_usize: usize = result.row_count;
+    if (row_count_usize < parallel_group_min_rows_per_worker * 2) return false;
+
+    const max_workers = @min(max_parallel_group_workers, row_count_usize);
+    var worker_count = @min(max_workers, row_count_usize / parallel_group_min_rows_per_worker);
+    if (worker_count < 2) return false;
+    if (worker_count > max_parallel_group_workers) worker_count = max_parallel_group_workers;
+
+    const source_rows = ctx.scratch_rows_b[0..result.row_count];
+    @memcpy(source_rows, result.rows[0..result.row_count]);
+
+    var boundaries: [max_parallel_group_workers + 1]u16 =
+        [_]u16{0} ** (max_parallel_group_workers + 1);
+    const base = row_count_usize / worker_count;
+    const remainder = row_count_usize % worker_count;
+    var cursor: usize = 0;
+    var worker_idx: usize = 0;
+    while (worker_idx < worker_count) : (worker_idx += 1) {
+        boundaries[worker_idx] = @intCast(cursor);
+        const span = base + if (worker_idx < remainder) @as(usize, 1) else @as(usize, 0);
+        cursor += span;
+    }
+    boundaries[worker_count] = @intCast(cursor);
+    std.debug.assert(boundaries[worker_count] == result.row_count);
+
+    var workers: [max_parallel_group_workers]ParallelGroupNoAggregateWorker = undefined;
+    worker_idx = 0;
+    while (worker_idx < worker_count) : (worker_idx += 1) {
+        workers[worker_idx] = .{
+            .rows = source_rows,
+            .key_indices = key_indices,
+            .start_idx = boundaries[worker_idx],
+            .end_idx = boundaries[worker_idx + 1],
+        };
+    }
+
+    var threads: [max_parallel_group_workers - 1]?std.Thread =
+        [_]?std.Thread{null} ** (max_parallel_group_workers - 1);
+    var spawned: usize = 0;
+    worker_idx = 1;
+    while (worker_idx < worker_count) : (worker_idx += 1) {
+        threads[spawned] = std.Thread.spawn(
+            .{},
+            ParallelGroupNoAggregateWorker.run,
+            .{&workers[worker_idx]},
+        ) catch {
+            var join_idx: usize = 0;
+            while (join_idx < spawned) : (join_idx += 1) {
+                threads[join_idx].?.join();
+            }
+            return false;
+        };
+        spawned += 1;
+    }
+    workers[0].run();
+    var join_idx: usize = 0;
+    while (join_idx < spawned) : (join_idx += 1) {
+        threads[join_idx].?.join();
+    }
+
+    @memset(group_runtime.group_counts[0..], 0);
+    var write_idx: u16 = 0;
+    worker_idx = 0;
+    while (worker_idx < worker_count) : (worker_idx += 1) {
+        var local_idx: u16 = 0;
+        while (local_idx < workers[worker_idx].local_group_count) : (local_idx += 1) {
+            const first_idx = workers[worker_idx].local_first_indices[local_idx];
+            const candidate = &source_rows[first_idx];
+            const local_count = workers[worker_idx].local_group_counts[local_idx];
+            if (findGroupIndex(
+                result.rows[0..write_idx],
+                candidate,
+                key_indices,
+            )) |group_index| {
+                group_runtime.group_counts[group_index] += local_count;
+            } else {
+                if (@as(usize, write_idx) >= caps.aggregate_groups) {
+                    setError(result, "aggregate group capacity exceeded");
+                    return true;
+                }
+                result.rows[write_idx] = candidate.*;
+                group_runtime.group_counts[write_idx] = local_count;
+                write_idx += 1;
+            }
+        }
+    }
+    result.row_count = write_idx;
+    std.debug.assert(@as(usize, result.row_count) <= row_count_usize);
     return true;
 }
 

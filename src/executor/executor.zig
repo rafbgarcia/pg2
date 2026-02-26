@@ -2093,6 +2093,7 @@ fn applyReadOperators(
                     i,
                     caps,
                     &group_runtime,
+                    result.stats.plan.parallel_scheduler_path == .scheduled_parallel,
                     string_arena,
                 )) return false;
             },
@@ -2428,6 +2429,7 @@ fn applyPostScanOperators(
                     i,
                     caps,
                     &group_runtime,
+                    result.stats.plan.parallel_scheduler_path == .scheduled_parallel,
                     string_arena,
                 )) return false;
             },
@@ -5174,6 +5176,7 @@ fn applyNestedReadOperatorsPerParent(
                             i,
                             caps,
                             &group_runtime,
+                            result.stats.plan.parallel_scheduler_path == .scheduled_parallel,
                             string_arena,
                         )) return false;
                     },
@@ -7931,6 +7934,106 @@ test "execute returns equivalent rows for limit and offset with planner parallel
     }
 
     const src = "User |> offset(17) |> limit(40)";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+
+    env.planner_feature_gate_mask = 0;
+    var result_seq = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result_seq.deinit();
+    try testing.expect(!result_seq.has_error);
+    try testing.expectEqual(ParallelMode.sequential, result_seq.stats.plan.parallel_mode);
+
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+    var result_par = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result_par.deinit();
+    try testing.expect(!result_par.has_error);
+    try testing.expectEqual(ParallelMode.enabled, result_par.stats.plan.parallel_mode);
+    try testing.expectEqual(
+        ParallelSchedulerPath.scheduled_parallel,
+        result_par.stats.plan.parallel_scheduler_path,
+    );
+    try testing.expect(
+        result_par.stats.plan.parallel_schedule_applied_tasks <=
+            result_par.stats.plan.parallel_schedule_task_count,
+    );
+
+    try expectResultRowsEqual(&result_seq, &result_par);
+}
+
+test "execute parallel mode applies scheduled tasks for grouped no-aggregate stage" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+    env.planner_feature_gate_mask = planner_types.feature_gate_parallel_policy;
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    var id: u32 = 1;
+    while (id <= 128) : (id += 1) {
+        const active = if ((id % 2) == 0) "true" else "false";
+        var insert_buf: [160]u8 = undefined;
+        const src_insert = try std.fmt.bufPrint(
+            insert_buf[0..],
+            "User |> insert(id = {d}, name = \"PG{d}\", active = {s})",
+            .{ id, id, active },
+        );
+        const tok_insert = tokenizer_mod.tokenize(src_insert);
+        const p_insert = parser_mod.parse(&tok_insert, src_insert);
+        try testing.expect(!p_insert.has_error);
+        var r_insert = try execute(&env.makeCtx(tx, &snap, &p_insert.ast, &tok_insert, src_insert));
+        defer r_insert.deinit();
+        try testing.expect(!r_insert.has_error);
+    }
+
+    const src = "User |> group(active)";
+    const tok = tokenizer_mod.tokenize(src);
+    const p = parser_mod.parse(&tok, src);
+    try testing.expect(!p.has_error);
+    var result = try execute(&env.makeCtx(tx, &snap, &p.ast, &tok, src));
+    defer result.deinit();
+    try testing.expect(!result.has_error);
+    try testing.expectEqual(ParallelMode.enabled, result.stats.plan.parallel_mode);
+    try testing.expectEqual(
+        ParallelSchedulerPath.scheduled_parallel,
+        result.stats.plan.parallel_scheduler_path,
+    );
+    try testing.expect(result.stats.plan.parallel_schedule_task_count > 0);
+    try testing.expectEqual(
+        result.stats.plan.parallel_schedule_task_count,
+        result.stats.plan.parallel_schedule_applied_tasks,
+    );
+}
+
+test "execute returns equivalent grouped no-aggregate rows with planner parallel mode on and off" {
+    var env: ExecTestEnv = undefined;
+    try env.init();
+    defer env.deinit();
+
+    const tx = try env.tm.begin();
+    var snap = try env.tm.snapshot(tx);
+    defer snap.deinit();
+
+    var id: u32 = 1;
+    while (id <= 128) : (id += 1) {
+        const active = if ((id % 5) == 0) "true" else "false";
+        var insert_buf: [160]u8 = undefined;
+        const src_insert = try std.fmt.bufPrint(
+            insert_buf[0..],
+            "User |> insert(id = {d}, name = \"GN{d}\", active = {s})",
+            .{ id, id, active },
+        );
+        const tok_insert = tokenizer_mod.tokenize(src_insert);
+        const p_insert = parser_mod.parse(&tok_insert, src_insert);
+        try testing.expect(!p_insert.has_error);
+        var r_insert = try execute(&env.makeCtx(tx, &snap, &p_insert.ast, &tok_insert, src_insert));
+        defer r_insert.deinit();
+        try testing.expect(!r_insert.has_error);
+    }
+
+    const src = "User |> group(active) |> sort(active asc) { active }";
     const tok = tokenizer_mod.tokenize(src);
     const p = parser_mod.parse(&tok, src);
     try testing.expect(!p.has_error);
