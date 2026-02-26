@@ -13,7 +13,6 @@ const scan_mod = @import("scan.zig");
 const filter_mod = @import("filter.zig");
 const capacity_mod = @import("capacity.zig");
 const aggregation_mod = @import("aggregation.zig");
-const planner_types = @import("../planner/types.zig");
 
 const NodeIndex = ast_mod.NodeIndex;
 const null_node = ast_mod.null_node;
@@ -52,8 +51,6 @@ pub fn applySort(
     group_runtime: *GroupRuntime,
     string_arena: *scan_mod.StringArena,
 ) bool {
-    result.stats.plan.sort_strategy = .in_memory_merge;
-    result.stats.plan.sort_reason = planner_types.ReasonCode.SORT_IN_MEMORY_WITHIN_BUDGET;
     const node = ctx.ast.getNode(sort_node);
     const key_count = ctx.ast.listLen(node.data.unary);
     if (key_count == 0) {

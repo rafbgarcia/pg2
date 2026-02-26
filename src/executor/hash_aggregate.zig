@@ -49,7 +49,6 @@ const capacity_mod = @import("capacity.zig");
 const aggregation_mod = @import("aggregation.zig");
 const spill_collector_mod = @import("spill_collector.zig");
 const filter_mod = @import("filter.zig");
-const planner_types = @import("../planner/types.zig");
 
 const NodeIndex = ast_mod.NodeIndex;
 const null_node = ast_mod.null_node;
@@ -421,9 +420,6 @@ pub fn applyHashAggregate(
     group_runtime: *GroupRuntime,
     string_arena: *StringArena,
 ) bool {
-    result.stats.plan.group_strategy = .hash_spill;
-    result.stats.plan.group_reason = planner_types.ReasonCode.GROUP_HASH_SPILL_GROUP_CAP_EXCEEDED;
-
     // Parse group keys from AST.
     const node = ctx.ast.getNode(group_node);
     const group_key_count = ctx.ast.listLen(node.data.unary);
