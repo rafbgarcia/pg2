@@ -41,10 +41,16 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
     - deterministic checkpoint chronology with prior/new decision fingerprints
 - Tests:
   - internal planner contract tests added under `test/internals/planner/`
+  - deterministic replay coverage for planner adaptation traces added in:
+    - `test/sim/planner_adaptation_replay_sim_test.zig`
+    - `test/stress/spill_phase2_gate_nested_hash_spill_contracts_test.zig`
   - full `zig build unit --summary all` and `zig build test --summary all` passing after integration
+- Verification:
+  - `zig build sim --summary all` passing with planner adaptation replay checks
+  - `zig build stress --summary all` passing with planner checkpoint/fingerprint assertions in mixed spill scenarios
 - Remaining:
-  - add deterministic sim/stress traces for adaptation and (later) parallel scheduling
   - expand adaptation coverage for non-group root paths to emit `post_group` no-op chronology records consistently
+  - implement planner-level parallelization policy and deterministic schedule trace gates
 
 ## Non-Goals
 

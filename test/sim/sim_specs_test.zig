@@ -7,4 +7,5 @@
 comptime {
     _ = @import("fault_matrix_sim_test.zig");
     _ = @import("fk_fault_matrix_sim_test.zig");
+    _ = @import("planner_adaptation_replay_sim_test.zig");
 }
