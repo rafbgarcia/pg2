@@ -77,7 +77,6 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - `zig build test-all --summary all` passing after grouped-HAVING parallel extension (`915/917` passed, `2` skipped)
 - Remaining:
   - expand true parallel execution beyond WHERE/HAVING-filter and flat-column-projection processing while preserving deterministic/fail-closed behavior
-  - migrate remaining nested-join decision-field writes to planner-owned checkpoint flow (executor should emit counters/telemetry only)
 
 ## Fresh Session Handoff Snapshot (2026-02-26)
 
@@ -113,6 +112,11 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
   - parallel applied-task metrics are emitted only when a parallel execution stage is actually used
   - parallel path degrades fail-closed to serial filtering/projection if worker spawn fails
   - sort/group operator modules no longer mutate plan decision fields; decision ownership remains in planner seeding + checkpoint adaptation
+  - nested-join decision fields (join/materialization strategy + reasons) now remain planner-owned:
+    - planner snapshot captures nested relation ids deterministically
+    - planner initial decisions seed nested hash join strategy
+    - pre-join checkpoint uses deterministic nested build-row estimates for degrade-only join spill adaptation
+    - executor nested join path now emits only observed counters (no decision-field mutation)
 - Tests added/extended:
   - internals planner contract tests
   - sim adaptation replay determinism
@@ -127,6 +131,7 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
 
 ### Relevant Commits (newest first)
 
+- `bc9a95d` Move nested join plan decisions into planner/checkpoint flow
 - `a039de7` Keep sort/group plan decisions planner-owned
 - `9ec577b` Extend scheduled-parallel execution coverage to grouped HAVING predicates
 - `2fe6785` Document applied-task parallel execution contract updates in WF07 handoff
@@ -158,7 +163,6 @@ The planner must be deterministic, inspectable, and safe under pressure. Adaptiv
    - deterministic schedule traces for fixed seeds
    - semantic equivalence with sequential mode
    - fail-closed behavior under capacity pressure
-2. Move remaining nested-join decision mutations out of executor/operator paths so planner checkpoints remain the only decision mutation surface.
 
 ### Acceptance Gates (must all pass)
 
