@@ -11,6 +11,16 @@ pub fn planInitial(snapshot: *const types.PlannerInputSnapshot) !types.PhysicalD
         .enabled
     else
         .sequential;
+
+    const has_join = snapshot.relation_ids_sorted[1] != 0;
+    if (has_join) {
+        decisions.join_strategy = .hash_in_memory;
+        decisions.join_order = .source_then_nested;
+        decisions.materialization_mode = .bounded_row_buffers;
+        decisions.join_reason = .JOIN_HASH_IN_MEMORY_CAPACITY_OK;
+        decisions.materialization_reason = .MATERIALIZE_BOUNDED_REQUIRED;
+    }
+
     for (snapshot.operator_sequence) |op| {
         switch (op) {
             .sort_op => {

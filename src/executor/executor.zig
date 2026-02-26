@@ -1084,7 +1084,7 @@ fn executePipelineStatement(
         &ops,
         &op_count,
     );
-    capturePlanStats(&result.stats.plan, ctx, model_name, model_id, &ops, op_count);
+    capturePlanStats(&result.stats.plan, ctx, pipeline_idx, model_name, model_id, &ops, op_count);
     if (result.stats.plan.parallel_mode == .enabled) {
         result.stats.plan.parallel_scheduler_path = .scheduled_parallel;
     }
@@ -1145,6 +1145,7 @@ fn executeReadPipeline(
         result.stats.plan.source_model[0..result.stats.plan.source_model_len];
     const planner_snapshot = buildPlannerSnapshot(
         ctx,
+        pipeline_node,
         source_model_name,
         model_id,
         ops,
@@ -1331,7 +1332,7 @@ fn executeReadPipeline(
             .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
             .spill_pages_used = ctx.collector.spill_page_count,
             .group_count_estimate = result.row_count,
-            .join_build_rows = result.row_count,
+            .join_build_rows = estimateNestedJoinBuildRows(ctx, pipeline_node, model_id, result.row_count),
             .join_probe_rows = result.row_count,
         };
         applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .pre_join, &pre_join_counters);
@@ -1415,7 +1416,7 @@ fn executeReadPipeline(
                 .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
                 .spill_pages_used = ctx.collector.spill_page_count,
                 .group_count_estimate = @intCast(@min(rowSetVisibleCount(output_rows), std.math.maxInt(u32))),
-                .join_build_rows = rowSetVisibleCount(output_rows),
+                .join_build_rows = estimateNestedJoinBuildRows(ctx, pipeline_node, model_id, rowSetVisibleCount(output_rows)),
                 .join_probe_rows = rowSetVisibleCount(output_rows),
             };
             applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .pre_join, &pre_join_counters);
@@ -1510,7 +1511,7 @@ fn executeReadPipeline(
                     .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
                     .spill_pages_used = ctx.collector.spill_page_count,
                     .group_count_estimate = @intCast(@min(rowSetVisibleCount(output_rows), std.math.maxInt(u32))),
-                    .join_build_rows = rowSetVisibleCount(output_rows),
+                    .join_build_rows = estimateNestedJoinBuildRows(ctx, pipeline_node, model_id, rowSetVisibleCount(output_rows)),
                     .join_probe_rows = rowSetVisibleCount(output_rows),
                 };
                 applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .pre_join, &pre_join_counters);
@@ -1555,7 +1556,7 @@ fn executeReadPipeline(
                 .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
                 .spill_pages_used = ctx.collector.spill_page_count,
                 .group_count_estimate = result.row_count,
-                .join_build_rows = result.row_count,
+                .join_build_rows = estimateNestedJoinBuildRows(ctx, pipeline_node, model_id, result.row_count),
                 .join_probe_rows = result.row_count,
             };
             applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .pre_join, &pre_join_counters);
@@ -1599,7 +1600,7 @@ fn executeReadPipeline(
             .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
             .spill_pages_used = ctx.collector.spill_page_count,
             .group_count_estimate = result.row_count,
-            .join_build_rows = result.row_count,
+            .join_build_rows = estimateNestedJoinBuildRows(ctx, pipeline_node, model_id, result.row_count),
             .join_probe_rows = result.row_count,
         };
         applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .post_group, &post_group_counters);
@@ -1610,7 +1611,7 @@ fn executeReadPipeline(
             .bytes_accumulated = ctx.collector.resultBytesAccumulated(),
             .spill_pages_used = ctx.collector.spill_page_count,
             .group_count_estimate = result.row_count,
-            .join_build_rows = result.row_count,
+            .join_build_rows = estimateNestedJoinBuildRows(ctx, pipeline_node, model_id, result.row_count),
             .join_probe_rows = result.row_count,
         };
         applyPlannerCheckpoint(&result.stats.plan, &planner_snapshot, .pre_join, &pre_join_counters);
@@ -2829,6 +2830,39 @@ fn hasNestedSelection(tree: *const Ast, pipeline_node: NodeIndex) bool {
         field = node.next;
     }
     return false;
+}
+
+fn estimateNestedJoinBuildRows(
+    ctx: *const ExecContext,
+    pipeline_node: NodeIndex,
+    source_model_id: ModelId,
+    left_rows: u64,
+) u64 {
+    const selection = getPipelineSelection(ctx.ast, pipeline_node) orelse return left_rows;
+    var nested_rows: u64 = 0;
+    var field = ctx.ast.getNode(selection).data.unary;
+    while (field != null_node) {
+        const node = ctx.ast.getNode(field);
+        if (node.tag == .select_nested) {
+            const relation_name = ctx.tokens.getText(node.extra, ctx.source);
+            if (ctx.catalog.findAssociation(source_model_id, relation_name)) |assoc_id| {
+                const assoc = &ctx.catalog.models[source_model_id].associations[assoc_id];
+                if (assoc.target_model_id != null_model) {
+                    const target = &ctx.catalog.models[assoc.target_model_id];
+                    const page_row_upper_bound =
+                        @as(u64, target.total_pages) * scan_mod.scan_batch_size;
+                    const build_rows_estimate = if (page_row_upper_bound == 0)
+                        target.row_count
+                    else
+                        @min(target.row_count, page_row_upper_bound);
+                    nested_rows +|= build_rows_estimate;
+                }
+            }
+        }
+        field = node.next;
+    }
+    if (nested_rows > 0) return nested_rows;
+    return left_rows;
 }
 
 /// Find the AST node for the WHERE operator, if present.
@@ -6283,6 +6317,7 @@ fn buildOperatorList(
 fn capturePlanStats(
     plan: *PlanStats,
     ctx: *const ExecContext,
+    pipeline_node: NodeIndex,
     model_name: []const u8,
     model_id: ModelId,
     ops: *const [max_operators]OpDescriptor,
@@ -6302,7 +6337,7 @@ fn capturePlanStats(
         plan.pipeline_ops[i] = ops[i].kind;
     }
 
-    seedPlannerDecisionStats(plan, ctx, model_name, model_id, ops, op_count);
+    seedPlannerDecisionStats(plan, ctx, pipeline_node, model_name, model_id, ops, op_count);
 }
 
 fn toPlannerOpTag(kind: OpKind) planner_types.OpTag {
@@ -6340,8 +6375,57 @@ fn hashQueryShape(model_name: []const u8, ops: *const [max_operators]OpDescripto
     return (@as(u128, hi) << 64) | @as(u128, lo);
 }
 
+fn relationLessThan(_: void, lhs: u32, rhs: u32) bool {
+    return lhs < rhs;
+}
+
+fn collectPlannerRelationIds(
+    ctx: *const ExecContext,
+    pipeline_node: NodeIndex,
+    source_model_id: ModelId,
+    out_relation_ids_sorted: *[planner_types.max_relations]u32,
+) void {
+    @memset(out_relation_ids_sorted[0..], 0);
+    var relation_ids: [planner_types.max_relations]u32 = [_]u32{0} ** planner_types.max_relations;
+    var relation_count: usize = 0;
+
+    relation_ids[relation_count] = @as(u32, source_model_id) + 1;
+    relation_count += 1;
+
+    const selection = getPipelineSelection(ctx.ast, pipeline_node) orelse {
+        out_relation_ids_sorted.*[0] = relation_ids[0];
+        return;
+    };
+    var field = ctx.ast.getNode(selection).data.unary;
+    while (field != null_node) {
+        const node = ctx.ast.getNode(field);
+        if (node.tag == .select_nested and relation_count < planner_types.max_relations) {
+            const relation_name = ctx.tokens.getText(node.extra, ctx.source);
+            if (ctx.catalog.findAssociation(source_model_id, relation_name)) |assoc_id| {
+                const assoc = &ctx.catalog.models[source_model_id].associations[assoc_id];
+                if (assoc.target_model_id != null_model) {
+                    relation_ids[relation_count] = @as(u32, assoc.target_model_id) + 1;
+                    relation_count += 1;
+                }
+            }
+        }
+        field = node.next;
+    }
+
+    std.sort.pdq(u32, relation_ids[0..relation_count], {}, relationLessThan);
+
+    var write_idx: usize = 0;
+    var i: usize = 0;
+    while (i < relation_count and write_idx < planner_types.max_relations) : (i += 1) {
+        if (i > 0 and relation_ids[i] == relation_ids[i - 1]) continue;
+        out_relation_ids_sorted.*[write_idx] = relation_ids[i];
+        write_idx += 1;
+    }
+}
+
 fn buildPlannerSnapshot(
     ctx: *const ExecContext,
+    pipeline_node: NodeIndex,
     model_name: []const u8,
     model_id: ModelId,
     ops: *const [max_operators]OpDescriptor,
@@ -6361,15 +6445,16 @@ fn buildPlannerSnapshot(
         .feature_gate_mask = ctx.planner_feature_gate_mask,
         .work_memory_bytes_per_slot = ctx.work_memory_bytes_per_slot,
         .aggregate_groups_cap = capacity_mod.max_aggregate_groups,
-        .join_build_budget_bytes = ctx.work_memory_bytes_per_slot,
-        .average_row_width_bytes = scan_mod.max_row_size_bytes / 4,
+        // Join planner budgeting is aligned to executor join build-row capacity.
+        .join_build_budget_bytes = capacity_mod.max_join_build_rows,
+        .average_row_width_bytes = 1,
     };
 
     var i: usize = 0;
     while (i < op_count and i < planner_types.max_operator_sequence) : (i += 1) {
         snapshot.operator_sequence[i] = toPlannerOpTag(ops[i].kind);
     }
-    snapshot.relation_ids_sorted[0] = @as(u32, model_id) + 1;
+    collectPlannerRelationIds(ctx, pipeline_node, model_id, &snapshot.relation_ids_sorted);
     return snapshot;
 }
 
@@ -6505,12 +6590,13 @@ fn applyPlannerCheckpoint(
 fn seedPlannerDecisionStats(
     plan: *PlanStats,
     ctx: *const ExecContext,
+    pipeline_node: NodeIndex,
     model_name: []const u8,
     model_id: ModelId,
     ops: *const [max_operators]OpDescriptor,
     op_count: u16,
 ) void {
-    const snapshot = buildPlannerSnapshot(ctx, model_name, model_id, ops, op_count);
+    const snapshot = buildPlannerSnapshot(ctx, pipeline_node, model_name, model_id, ops, op_count);
     const decisions = planner_mod.planInitial(&snapshot) catch return;
     plan.planner_policy_version = snapshot.policy_version;
     plan.planner_snapshot_fingerprint = planner_fingerprint.snapshotFingerprint(&snapshot) catch 0;
@@ -6537,21 +6623,11 @@ fn incrementPlanCounter(counter: *u8) void {
 fn recordNestedHashJoinPlan(plan: *PlanStats) void {
     incrementPlanCounter(&plan.nested_relation_count);
     incrementPlanCounter(&plan.nested_join_hash_in_memory_count);
-    plan.join_strategy = .hash_in_memory;
-    plan.join_order = .source_then_nested;
-    plan.materialization_mode = .bounded_row_buffers;
-    plan.join_reason = .JOIN_HASH_IN_MEMORY_CAPACITY_OK;
-    plan.materialization_reason = .MATERIALIZE_BOUNDED_REQUIRED;
 }
 
 fn recordNestedHashSpillJoinPlan(plan: *PlanStats) void {
     incrementPlanCounter(&plan.nested_relation_count);
     incrementPlanCounter(&plan.nested_join_hash_spill_count);
-    plan.join_strategy = .hash_spill;
-    plan.join_order = .source_then_nested;
-    plan.materialization_mode = .bounded_row_buffers;
-    plan.join_reason = .JOIN_HASH_SPILL_RIGHT_EXCEEDS_BUILD_WINDOW;
-    plan.materialization_reason = .MATERIALIZE_BOUNDED_REQUIRED;
 }
 
 /// Find the first mutation operator in the list.
