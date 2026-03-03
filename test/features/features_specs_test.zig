@@ -14,7 +14,9 @@ comptime {
     _ = @import("constraints/type_sensitive_defaults_test.zig");
     _ = @import("expressions/addition_test.zig");
     _ = @import("expressions/boolean_logic_test.zig");
+    _ = @import("expressions/contexts/cross_context_test.zig");
     _ = @import("expressions/delete_test.zig");
+    _ = @import("expressions/diagnostics/diagnostics_test.zig");
     _ = @import("expressions/division_test.zig");
     _ = @import("expressions/equality_test.zig");
     _ = @import("expressions/gt_test.zig");
@@ -34,6 +36,7 @@ comptime {
     _ = @import("expressions/parameters_test.zig");
     _ = @import("expressions/precedence_parentheses_test.zig");
     _ = @import("expressions/select_test.zig");
+    _ = @import("expressions/semantics/null_semantics_test.zig");
     _ = @import("expressions/sort_test.zig");
     _ = @import("expressions/stdlib/abs_test.zig");
     _ = @import("expressions/stdlib/coalesce_test.zig");

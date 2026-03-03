@@ -94,9 +94,9 @@ v1 binding contract:
 - [x] `T14` `test/features/expressions/logical_not_test.zig`
 - [x] `T15` `test/features/expressions/logical_and_test.zig`
 - [x] `T16` `test/features/expressions/logical_or_test.zig`
-- [ ] `T21` `test/features/expressions/semantics/null_semantics_test.zig`
-- [ ] `T22` `test/features/expressions/contexts/cross_context_test.zig`
-- [ ] `T23` `test/features/expressions/diagnostics/diagnostics_test.zig`
+- [x] `T21` `test/features/expressions/semantics/null_semantics_test.zig`
+- [x] `T22` `test/features/expressions/contexts/cross_context_test.zig`
+- [x] `T23` `test/features/expressions/diagnostics/diagnostics_test.zig`
 
 ## Phase 6: Diagnostics and Hardening
 
