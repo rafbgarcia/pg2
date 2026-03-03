@@ -2,74 +2,144 @@
 
 ## Objective
 
-Deliver production-ready expression semantics for pg2 across parsing, execution, diagnostics, and feature tests.
+Finish expression-language v1 with production-grade, deterministic behavior across:
 
-## Phase 5: Feature Test Matrix
+- Feature coverage shape (dedicated files per capability)
+- Diagnostics contracts (parser/evaluator/mutation paths)
+- Parameter binding integration on the session/request path
+
+This workfront is now implementation-focused. Product/design decisions for list runtime model and parameter binding surface are already locked.
+
+## Snapshot (2026-03-02)
+
+Already true:
+
+- Broad expression behavior coverage exists in:
+  - `test/features/expressions/where_test.zig`
+  - `test/features/expressions/select_test.zig`
+  - `test/features/expressions/update_test.zig`
+  - `test/features/expressions/precedence_parentheses_test.zig`
+  - `test/features/expressions/in_test.zig`
+- `test/features/expressions/parameters_test.zig` exists and is imported.
+- Structured runtime parameter bindings are wired (`ExecuteRequest.parameter_bindings`), but session-path success coverage is still missing.
+
+Not yet complete:
+
+- Phase 5 dedicated-file matrix is incomplete.
+- Diagnostics normalization/hardening (`D01..D05`) is incomplete.
+- Session/request successful parameter-binding integration tests (`P08-03`) are incomplete.
+
+## Locked Decisions (Do Not Reopen In This Workfront)
+
+### D-08-01 Runtime List Value Model (Accepted 2026-03-02)
+
+v1 does **not** introduce first-class list expression values.
+
+v1 supports lists only via:
+
+- List literals in membership: `in(value, [a, b, c])`
+- Request-scoped `let` list variables (including spill-backed lists): `in(value, ids)`
+
+Unsupported list-producing expression surfaces must fail closed with deterministic diagnostics.
+
+Supported in v1:
+
+```pg2
+let userIds = User |> where(active == true) { id }
+User |> where(in(id, userIds)) { id }
+```
+
+Examples intentionally deferred from v1:
+
+```pg2
+User |> where(in(id, coalesce($ids, [1, 2, 3]))) { id }
+User |> sort(id asc) { id tags: [status, "active"] }
+User |> where(length(intersect(role_ids, $allowed_roles)) > 0) { id }
+```
+
+### D-08-02 Parameter Binding Input Surface (Accepted 2026-03-02)
+
+Adopt Candidate A for v1:
+
+- `$param` is query reference syntax only.
+- Values are supplied out-of-band via structured request/session binding payload.
+- No query-text binding syntax (`params(...)`, preambles, inline binding directives) in v1.
+
+v1 binding contract:
+
+- Canonical binding key includes `$` prefix (for example `$target_id`).
+- Duplicate keys in one payload are request errors (fail closed before execution).
+- Missing key produces deterministic undefined-parameter diagnostics.
+- Null binding values are allowed and use existing null semantics.
+- Parameter namespace is independent from columns/`let` names (no fallback/shadow resolution).
+
+## Phase 5: Feature Test Matrix Consolidation
 
 ### Gate
 
-- Every listed file exists, is imported in feature suite, and passes.
-- Recommended foldering for clarity at scale:
-  - Keep all expression behavior under `test/features/expressions/`.
-  - Split by concern: `stdlib/`, `semantics/`, `contexts/`, `diagnostics/`.
-  - For built-ins, use one file per function (avoids broad multi-function files and makes failures easier to localize).
+- Every listed file exists, is imported in `test/features/features_specs_test.zig`, and passes:
+  - `zig build test-all --summary all`
+- Behavior parity preserved (this phase is structure/coverage movement, not semantics changes).
 
 ### Tasks
 
-- [ ] `T06` `test/features/expressions/lt_test.zig` (side note: less-than `<` comparison semantics and type/null behavior)
-- [ ] `T07` `test/features/expressions/lte_test.zig` (side note: less-than-or-equal `<=` comparison semantics and type/null behavior)
-- [ ] `T08` `test/features/expressions/gt_test.zig` (side note: greater-than `>` comparison semantics and type/null behavior)
-- [ ] `T09` `test/features/expressions/gte_test.zig` (side note: greater-than-or-equal `>=` comparison semantics and type/null behavior)
-- [ ] `T10` `test/features/expressions/equality_test.zig` (side note: equality `==` semantics including null comparison behavior)
-- [ ] `T11` `test/features/expressions/inequality_test.zig` (side note: inequality `!=` semantics including null comparison behavior)
-- [ ] `T12` `test/features/expressions/boolean_logic_test.zig` (side note: boolean operator semantics for `!`, `&&`, `||` including short-circuit and null interactions)
-- [ ] `T14` `test/features/expressions/logical_not_test.zig` (side note: unary logical negation `!` semantics and parse shape)
-- [ ] `T15` `test/features/expressions/logical_and_test.zig` (side note: conjunction `&&` semantics and parse shape)
-- [ ] `T16` `test/features/expressions/logical_or_test.zig` (side note: disjunction `||` semantics and parse shape)
-- [ ] `T21` `test/features/expressions/semantics/null_semantics_test.zig` (side note: null propagation and boolean/null truth-table behavior across arithmetic, comparisons, and predicates)
-- [ ] `T22` `test/features/expressions/contexts/cross_context_test.zig` (side note: same expression semantics in `where`, `update`, computed `select`, `sort(expr)`, and `having`)
-- [ ] `T23` `test/features/expressions/diagnostics/diagnostics_test.zig` (side note: deterministic fail-closed parser/evaluator errors with precise messages/locations for invalid shapes and type/null violations)
+- [ ] `T05-00` Move existing assertions into dedicated files below (no semantic changes in this slice).
+- [ ] `T06` `test/features/expressions/lt_test.zig`
+- [ ] `T07` `test/features/expressions/lte_test.zig`
+- [ ] `T08` `test/features/expressions/gt_test.zig`
+- [ ] `T09` `test/features/expressions/gte_test.zig`
+- [ ] `T10` `test/features/expressions/equality_test.zig`
+- [ ] `T11` `test/features/expressions/inequality_test.zig`
+- [ ] `T12` `test/features/expressions/boolean_logic_test.zig` (include explicit short-circuit proofs)
+- [ ] `T14` `test/features/expressions/logical_not_test.zig`
+- [ ] `T15` `test/features/expressions/logical_and_test.zig`
+- [ ] `T16` `test/features/expressions/logical_or_test.zig`
+- [ ] `T21` `test/features/expressions/semantics/null_semantics_test.zig`
+- [ ] `T22` `test/features/expressions/contexts/cross_context_test.zig`
+- [ ] `T23` `test/features/expressions/diagnostics/diagnostics_test.zig`
 
 ## Phase 6: Diagnostics and Hardening
 
 ### Gate
 
 - Diagnostics are explicit, deterministic, and context-aware.
+- Mutation-path expression failures always include assignment path (`path=update.<field>`).
 
 ### Tasks
 
-- [ ] `D01` Normalize parser error messages for invalid legacy logical/membership textual forms (shape errors, not keyword errors).
+- [ ] `D01` Normalize parser errors for invalid legacy logical/membership textual forms (shape errors, not keyword errors).
 - [ ] `D02` Normalize evaluator errors for null arithmetic, type mismatch, and invalid predicate result.
 - [ ] `D03` Ensure mutation-path diagnostics include precise assignment path for expression failures.
 - [ ] `D04` Add regression tests for fail-closed behavior on unsupported textual expression shapes.
-- [ ] `D05` Add membership-specific evaluator diagnostics that identify incompatible operand/list element types for `in(value, list)` failures.
+- [ ] `D05` Add membership-specific evaluator diagnostics for incompatible operand/list element types in `in(value, list)`.
 
-## Phase 7: Runtime Value Model Decision
-
-### Gate
-
-- Runtime expression value model for collections is explicit before extending membership to variable/subquery-backed list sources.
-
-### Tasks
-
-- [ ] `R01` Decide whether expression runtime values include first-class list values beyond direct list literals.
-- [ ] `R02` If approved, design `Value` representation and evaluator contracts for list-carrying expressions (including parameter/subquery binding paths).
-- [ ] `R03` If deferred, document explicit v1 boundary and fail-closed behavior for unsupported list-producing expression forms.
-
-## Phase 8: Pending Product Decision
+## Phase 8: Parameter Binding Integration (Candidate A)
 
 ### Gate
 
-- Product decision captured explicitly before implementation.
+- Session/request path supports successful structured parameter bindings across all required contexts.
+- Conflict/missing/null behavior is deterministic and tested.
 
 ### Tasks
 
-- [ ] `P08-02` Decide user-facing parameter binding input surface for `$param`.
-  - Candidate A: structured runtime/session API payload only (bindings separate from query text).
-  - Candidate B: query-text binding syntax (for example dedicated `params(...)` stage or preamble binding form).
-  - Candidate C: support both, with one documented default path.
-  - Must define deterministic conflict rules (duplicate keys, shadowing, missing keys, and null handling) and fail-closed diagnostics.
-- [ ] `P08-03` After `P08-02` is decided, add session/request integration tests for successful bound-parameter execution.
-  - Cover at minimum: `where`, `update` assignments, computed `select`, `sort(expr)`, and deterministic undefined-parameter errors.
-  - Dependency: do not start this task until `P08-02` is explicitly accepted in product sign-off notes.
-  - Keep one capability file for binding transport behavior in `test/features/expressions/parameters_test.zig`.
+- [ ] `P08-03` Add session/request integration tests for successful bound-parameter execution.
+  - Minimum contexts: `where`, `update` assignments, computed `select`, `sort(expr)`, `having`
+  - Include deterministic undefined-parameter failures on each relevant path
+  - Keep transport behavior in `test/features/expressions/parameters_test.zig`
+
+## Execution Order (Next Slices)
+
+1. `T05-00` + comparator/equality file split (`T06..T11`) with no semantic changes.
+2. Logical operator contracts (`T12`, `T14`, `T15`, `T16`) including short-circuit proof tests.
+3. Null/cross-context/diagnostics capability files (`T21`, `T22`, `T23`).
+4. Diagnostics normalization/hardening (`D01..D05`) with exact error contract assertions.
+5. Candidate A integration completion (`P08-03`) on session/request path.
+
+## Completion Criteria
+
+This workfront is complete when all are true:
+
+- All remaining tasks above are checked.
+- `scripts/generate_test_suites.sh` has been run after adding new feature files.
+- `zig build test-all --summary all` passes.
+- Documented contracts in this file match implemented behavior and tests (no stale decision text).

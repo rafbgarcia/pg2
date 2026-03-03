@@ -26,3 +26,6 @@ Complete this section after the strict sequential lane before tagging `v1.0.0`.
 | Operational Safety Contracts          | Makes failure modes explicit: deterministic errors, limits, and fail-closed boundaries.                                         |
 | Soak + Performance Baseline           | Validates long-running stability (memory/storage growth, reclaim behavior, latency envelopes).                                  |
 | Security Baseline (Context-Dependent) | Local single-user only: minimal auth may be optional. Any shared/remote access: require auth + role separation before `v1.0.0`. |
+
+- Encryption at rest
+- TLS
