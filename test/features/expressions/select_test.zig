@@ -199,69 +199,6 @@ test "feature nested child pipeline applies limit and offset per parent" {
     try std.testing.expectEqualStrings(expected, result);
 }
 
-test "feature nested child pipeline applies having per parent" {
-    var env: feature.FeatureEnv = undefined;
-    try env.init();
-    defer env.deinit();
-
-    const executor = &env.executor;
-    try executor.applyDefinitions(
-        \\User {
-        \\  field(id, i64, notNull, primaryKey)
-        \\  field(name, string, notNull)
-        \\  reference(posts, id, Post.user_id, withoutReferentialIntegrity)
-        \\}
-        \\Post {
-        \\  field(id, i64, notNull, primaryKey)
-        \\  field(user_id, i64, notNull)
-        \\  field(title, string, notNull)
-        \\}
-    );
-
-    _ = try executor.run("User |> insert(id = 1, name = \"Alice\") {}");
-    _ = try executor.run("User |> insert(id = 2, name = \"Bob\") {}");
-
-    _ = try executor.run("Post |> insert(id = 10, user_id = 1, title = \"A10\") {}");
-    _ = try executor.run("Post |> insert(id = 8, user_id = 1, title = \"A08\") {}");
-    _ = try executor.run("Post |> insert(id = 9, user_id = 2, title = \"B09\") {}");
-    _ = try executor.run("Post |> insert(id = 7, user_id = 2, title = \"B07\") {}");
-
-    const result = try executor.run(
-        "User |> sort(id asc) { name posts |> having(id > 8) |> sort(id desc) { id } }",
-    );
-    const expected =
-        "OK returned_rows=2 inserted_rows=0 updated_rows=0 deleted_rows=0\n" ++
-        "{name:str,posts:[{id:i64}]}\n" ++
-        "\"Alice\",[[10]]\n" ++
-        "\"Bob\",[[9]]\n";
-    try std.testing.expectEqualStrings(expected, result);
-}
-
-test "feature query supports operator-keyword field names in where sort and projection" {
-    var env: feature.FeatureEnv = undefined;
-    try env.init();
-    defer env.deinit();
-
-    const executor = &env.executor;
-    try executor.applyDefinitions(
-        \\KeywordFields {
-        \\  field(id, i64, notNull, primaryKey)
-        \\  field(offset, i64, notNull)
-        \\}
-    );
-
-    _ = try executor.run("KeywordFields |> insert(id = 1, offset = 20) {}");
-    _ = try executor.run("KeywordFields |> insert(id = 2, offset = 10) {}");
-
-    const result = try executor.run(
-        "KeywordFields |> where(offset >= 10) |> sort(offset asc) { id offset }",
-    );
-    try std.testing.expectEqualStrings(
-        "OK returned_rows=2 inserted_rows=0 updated_rows=0 deleted_rows=0\n2,10\n1,20\n",
-        result,
-    );
-}
-
 test "feature computed select mirrors where predicate outcomes for composed expressions" {
     var env: feature.FeatureEnv = undefined;
     try env.init();
@@ -296,32 +233,6 @@ test "feature computed select mirrors where predicate outcomes for composed expr
     );
     try std.testing.expectEqualStrings(
         "OK returned_rows=4 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,true\n2,true\n3,false\n4,false\n",
-        result,
-    );
-}
-
-test "feature computed select preserves null equality and inequality semantics" {
-    var env: feature.FeatureEnv = undefined;
-    try env.init();
-    defer env.deinit();
-
-    const executor = &env.executor;
-    try executor.applyDefinitions(
-        \\ComputedSelectNullEq {
-        \\  field(id, i64, notNull, primaryKey)
-        \\  field(status, string, nullable)
-        \\}
-    );
-
-    _ = try executor.run("ComputedSelectNullEq |> insert(id = 1, status = \"open\") {}");
-    _ = try executor.run("ComputedSelectNullEq |> insert(id = 2, status = \"closed\") {}");
-    _ = try executor.run("ComputedSelectNullEq |> insert(id = 3, status = null) {}");
-
-    const result = try executor.run(
-        "ComputedSelectNullEq |> sort(id asc) { id probe: status == null || status != null }",
-    );
-    try std.testing.expectEqualStrings(
-        "OK returned_rows=3 inserted_rows=0 updated_rows=0 deleted_rows=0\n1,true\n2,true\n3,true\n",
         result,
     );
 }

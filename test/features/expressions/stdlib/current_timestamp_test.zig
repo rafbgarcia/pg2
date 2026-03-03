@@ -71,13 +71,4 @@ test "feature CurrentTimestamp returns identical value for all references in a s
     // (PostgreSQL semantics: statement-level clock, not per-reference).
     try std.testing.expectEqual(pair_1.created_at, pair_1.updated_at);
 
-    // CurrentTimestamp < CurrentTimestamp is always false (both sides
-    // are the same value), so no rows should match the predicate.
-    result = try executor.run(
-        "CurrentTsSemantics |> where(CurrentTimestamp < CurrentTimestamp) |> sort(id asc) { id }",
-    );
-    try std.testing.expectEqualStrings(
-        "OK returned_rows=0 inserted_rows=0 updated_rows=0 deleted_rows=0\n",
-        result,
-    );
 }

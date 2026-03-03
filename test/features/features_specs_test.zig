@@ -15,11 +15,17 @@ comptime {
     _ = @import("expressions/addition_test.zig");
     _ = @import("expressions/delete_test.zig");
     _ = @import("expressions/division_test.zig");
+    _ = @import("expressions/equality_test.zig");
+    _ = @import("expressions/gt_test.zig");
+    _ = @import("expressions/gte_test.zig");
     _ = @import("expressions/having_test.zig");
     _ = @import("expressions/in_test.zig");
+    _ = @import("expressions/inequality_test.zig");
     _ = @import("expressions/insert_constraints_and_defaults_test.zig");
     _ = @import("expressions/insert_multi_row_behavior_test.zig");
     _ = @import("expressions/insert_single_row_and_wide_contracts_test.zig");
+    _ = @import("expressions/lt_test.zig");
+    _ = @import("expressions/lte_test.zig");
     _ = @import("expressions/multiplication_test.zig");
     _ = @import("expressions/parameters_test.zig");
     _ = @import("expressions/precedence_parentheses_test.zig");

@@ -83,13 +83,13 @@ v1 binding contract:
 
 ### Tasks
 
-- [ ] `T05-00` Move existing assertions into dedicated files below (no semantic changes in this slice).
-- [ ] `T06` `test/features/expressions/lt_test.zig`
-- [ ] `T07` `test/features/expressions/lte_test.zig`
-- [ ] `T08` `test/features/expressions/gt_test.zig`
-- [ ] `T09` `test/features/expressions/gte_test.zig`
-- [ ] `T10` `test/features/expressions/equality_test.zig`
-- [ ] `T11` `test/features/expressions/inequality_test.zig`
+- [x] `T05-00` Move existing assertions into dedicated files below (no semantic changes in this slice).
+- [x] `T06` `test/features/expressions/lt_test.zig`
+- [x] `T07` `test/features/expressions/lte_test.zig`
+- [x] `T08` `test/features/expressions/gt_test.zig`
+- [x] `T09` `test/features/expressions/gte_test.zig`
+- [x] `T10` `test/features/expressions/equality_test.zig`
+- [x] `T11` `test/features/expressions/inequality_test.zig`
 - [ ] `T12` `test/features/expressions/boolean_logic_test.zig` (include explicit short-circuit proofs)
 - [ ] `T14` `test/features/expressions/logical_not_test.zig`
 - [ ] `T15` `test/features/expressions/logical_and_test.zig`
