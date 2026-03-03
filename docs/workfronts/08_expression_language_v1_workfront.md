@@ -90,10 +90,10 @@ v1 binding contract:
 - [x] `T09` `test/features/expressions/gte_test.zig`
 - [x] `T10` `test/features/expressions/equality_test.zig`
 - [x] `T11` `test/features/expressions/inequality_test.zig`
-- [ ] `T12` `test/features/expressions/boolean_logic_test.zig` (include explicit short-circuit proofs)
-- [ ] `T14` `test/features/expressions/logical_not_test.zig`
-- [ ] `T15` `test/features/expressions/logical_and_test.zig`
-- [ ] `T16` `test/features/expressions/logical_or_test.zig`
+- [x] `T12` `test/features/expressions/boolean_logic_test.zig` (include explicit short-circuit proofs)
+- [x] `T14` `test/features/expressions/logical_not_test.zig`
+- [x] `T15` `test/features/expressions/logical_and_test.zig`
+- [x] `T16` `test/features/expressions/logical_or_test.zig`
 - [ ] `T21` `test/features/expressions/semantics/null_semantics_test.zig`
 - [ ] `T22` `test/features/expressions/contexts/cross_context_test.zig`
 - [ ] `T23` `test/features/expressions/diagnostics/diagnostics_test.zig`

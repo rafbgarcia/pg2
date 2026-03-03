@@ -119,6 +119,8 @@ pub const EvalContext = struct {
 const WorkItem = union(enum) {
     evaluate: NodeIndex,
     apply_binary: u16,
+    apply_binary_short_circuit: struct { token_index: u16, rhs: NodeIndex },
+    apply_binary_with_lhs: struct { token_index: u16, lhs: Value },
     apply_unary: u16,
     apply_column_ref: u16,
     apply_parameter: u16,
@@ -252,6 +254,42 @@ pub fn evaluateExpressionFull(
                 const rhs = evalPop(&eval_stack, &eval_count);
                 const lhs = evalPop(&eval_stack, &eval_count);
                 const result = try applyBinaryOp(lhs, rhs, op_type);
+                try evalPush(&eval_stack, &eval_count, result);
+            },
+            .apply_binary_short_circuit => |info| {
+                if (eval_count < 1) return error.StackUnderflow;
+                const lhs = evalPop(&eval_stack, &eval_count);
+                const op_type = tokens.tokens[info.token_index].token_type;
+                switch (op_type) {
+                    .and_and => {
+                        if (lhs == .bool and lhs.bool == false) {
+                            try evalPush(&eval_stack, &eval_count, Value{ .bool = false });
+                            continue;
+                        }
+                    },
+                    .or_or => {
+                        if (lhs == .bool and lhs.bool == true) {
+                            try evalPush(&eval_stack, &eval_count, Value{ .bool = true });
+                            continue;
+                        }
+                    },
+                    else => unreachable,
+                }
+                try workPush(&work_stack, &work_count, .{
+                    .apply_binary_with_lhs = .{
+                        .token_index = info.token_index,
+                        .lhs = lhs,
+                    },
+                });
+                try workPush(&work_stack, &work_count, .{
+                    .evaluate = info.rhs,
+                });
+            },
+            .apply_binary_with_lhs => |info| {
+                if (eval_count < 1) return error.StackUnderflow;
+                const rhs = evalPop(&eval_stack, &eval_count);
+                const op_type = tokens.tokens[info.token_index].token_type;
+                const result = try applyBinaryOp(info.lhs, rhs, op_type);
                 try evalPush(&eval_stack, &eval_count, result);
             },
             .apply_unary => |tok_idx| {
@@ -448,8 +486,24 @@ fn pushNodeWork(
             });
         },
         .expr_binary => {
-            // Post-order: push apply first (executed last), then children.
             const op_tok = node.extra;
+            const op_type = tokens.tokens[op_tok].token_type;
+            if (op_type == .and_and or op_type == .or_or) {
+                // Evaluate lhs first. For short-circuit cases, rhs evaluation
+                // is skipped entirely and the result is determined from lhs.
+                try workPush(work_stack, work_count, .{
+                    .apply_binary_short_circuit = .{
+                        .token_index = op_tok,
+                        .rhs = node.data.binary.rhs,
+                    },
+                });
+                try workPush(work_stack, work_count, .{
+                    .evaluate = node.data.binary.lhs,
+                });
+                return;
+            }
+
+            // Post-order: push apply first (executed last), then children.
             try workPush(work_stack, work_count, .{ .apply_binary = op_tok });
             try workPush(work_stack, work_count, .{
                 .evaluate = node.data.binary.rhs,
@@ -950,6 +1004,60 @@ test "logical or" {
         &schema,
     );
     try testing.expect(result.bool);
+}
+
+test "logical or short-circuits undefined parameter rhs when lhs is true" {
+    var tree = Ast{};
+    const source = "true || $missing";
+    const tokens = tokenizer_mod.tokenize(source);
+    const expr = try expression_mod.parseExpression(&tree, &tokens, "", 0);
+    const schema = RowSchema{};
+    const fixture = ParameterFixture{ .bindings = &.{} };
+    const resolver = ParameterResolver{
+        .ctx = &fixture,
+        .resolve = resolveParameterFromBindings,
+    };
+    const ctx = EvalContext{ .parameter_resolver = &resolver };
+
+    const result = try evaluateExpressionFull(
+        &tree,
+        &tokens,
+        source,
+        expr.node,
+        &.{},
+        &schema,
+        null,
+        &ctx,
+    );
+    try testing.expect(result == .bool);
+    try testing.expect(result.bool);
+}
+
+test "logical and short-circuits undefined parameter rhs when lhs is false" {
+    var tree = Ast{};
+    const source = "false && $missing";
+    const tokens = tokenizer_mod.tokenize(source);
+    const expr = try expression_mod.parseExpression(&tree, &tokens, "", 0);
+    const schema = RowSchema{};
+    const fixture = ParameterFixture{ .bindings = &.{} };
+    const resolver = ParameterResolver{
+        .ctx = &fixture,
+        .resolve = resolveParameterFromBindings,
+    };
+    const ctx = EvalContext{ .parameter_resolver = &resolver };
+
+    const result = try evaluateExpressionFull(
+        &tree,
+        &tokens,
+        source,
+        expr.node,
+        &.{},
+        &schema,
+        null,
+        &ctx,
+    );
+    try testing.expect(result == .bool);
+    try testing.expect(!result.bool);
 }
 
 test "column reference evaluation" {

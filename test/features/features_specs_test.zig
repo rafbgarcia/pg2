@@ -13,6 +13,7 @@ comptime {
     _ = @import("constraints/nullable_test.zig");
     _ = @import("constraints/type_sensitive_defaults_test.zig");
     _ = @import("expressions/addition_test.zig");
+    _ = @import("expressions/boolean_logic_test.zig");
     _ = @import("expressions/delete_test.zig");
     _ = @import("expressions/division_test.zig");
     _ = @import("expressions/equality_test.zig");
@@ -24,6 +25,9 @@ comptime {
     _ = @import("expressions/insert_constraints_and_defaults_test.zig");
     _ = @import("expressions/insert_multi_row_behavior_test.zig");
     _ = @import("expressions/insert_single_row_and_wide_contracts_test.zig");
+    _ = @import("expressions/logical_and_test.zig");
+    _ = @import("expressions/logical_not_test.zig");
+    _ = @import("expressions/logical_or_test.zig");
     _ = @import("expressions/lt_test.zig");
     _ = @import("expressions/lte_test.zig");
     _ = @import("expressions/multiplication_test.zig");
